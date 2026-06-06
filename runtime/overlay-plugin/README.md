@@ -1,6 +1,7 @@
 # RPG-Translator Runtime Overlay
 
-The runtime overlay is intentionally empty during Phase 1.
+Cache-only RPG Maker MV/MZ overlay modules live here.
 
-Phase 6 will replace this placeholder with the cache-only RPG Maker MV/MZ
-plugin. The runtime must never call translation providers.
+The overlay loads static export bundle files, installs message/window text hooks,
+renders cache hits, leaves cache misses unchanged, and never calls translation
+providers.

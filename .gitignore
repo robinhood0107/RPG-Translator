@@ -68,3 +68,4 @@ screenshots/
 translation-cache.log
 translation-metrics*.json
 translation-metrics*.log
+.gstack/
