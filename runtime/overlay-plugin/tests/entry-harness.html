@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>RPG-Translator Entry Harness</title>
+  </head>
+  <body>
+    <div id="status">running</div>
+    <script>
+      window.RPGTranslatorDisableAutoInstall = true;
+    </script>
+    <script src="../RPGTranslator.js"></script>
+    <script>
+      (async () => {
+        const root = window;
+        const loaded = [];
+        const baseUrl = 'file:///game/js/plugins/rpg-translator/';
+        root.Utils = { RPGMAKER_NAME: 'MZ' };
+        root.RPGTranslatorOverlay.Boot = {
+          async install(scope, options) {
+            loaded.push(['boot', options.baseUrl, options.engine]);
+            scope.bootOptions = options;
+            return { installed: true };
+          },
+        };
+
+        await root.RPGTranslatorOverlay.RuntimeEntry.install(root, {
+          baseUrl,
+          loadScript: async (url) => {
+            loaded.push(url);
+          },
+        });
+
+        const expected = [
+          `${baseUrl}text-codec.js`,
+          `${baseUrl}lookup-index.js`,
+          `${baseUrl}cache-loader.js`,
+          `${baseUrl}message-adapter.js`,
+          `${baseUrl}window-text-adapter.js`,
+          `${baseUrl}startup-toast.js`,
+          `${baseUrl}boot.js`,
+          ['boot', baseUrl, 'mz'],
+        ];
+        document.querySelector('#status').textContent =
+          JSON.stringify(loaded) === JSON.stringify(expected) ? 'pass' : `fail ${JSON.stringify(loaded)}`;
+      })().catch((error) => {
+        document.querySelector('#status').textContent = `fail ${error.message}`;
+      });
+    </script>
+  </body>
+</html>

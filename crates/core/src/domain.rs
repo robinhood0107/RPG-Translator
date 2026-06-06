@@ -216,3 +216,22 @@ pub struct QaFindingRecord {
     pub severity: String,
     pub message: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewInstallRecord {
+    pub project_id: Option<i64>,
+    pub game_root: String,
+    pub export_id: Option<i64>,
+    pub backup_manifest_path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallRecord {
+    pub id: i64,
+    pub project_id: Option<i64>,
+    pub game_root: String,
+    pub export_id: Option<i64>,
+    pub backup_manifest_path: String,
+    pub status: String,
+}

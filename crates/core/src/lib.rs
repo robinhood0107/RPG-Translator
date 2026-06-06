@@ -16,12 +16,12 @@ pub use batch::{
 pub use cache_key::{CacheKeyBuilder, CacheKeyParts};
 pub use db::TranslationDb;
 pub use domain::{
-    DataFileRecord, DetectedGame, Engine, ExtractedOccurrence, GameLayoutKind, NewOccurrence,
-    NewProject, NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, OccurrenceContext,
-    ProjectRecord, QaFindingRecord, RejectedCandidate, ScanReport, SkippedDataFile,
-    SourceTextRecord, TextAnalysis, TranslationRecord,
+    DataFileRecord, DetectedGame, Engine, ExtractedOccurrence, GameLayoutKind, NewInstallRecord,
+    NewOccurrence, NewProject, NewProviderRun, NewQaFinding, NewSourceText, NewTranslation,
+    OccurrenceContext, ProjectRecord, QaFindingRecord, RejectedCandidate, ScanReport,
+    SkippedDataFile, SourceTextRecord, TextAnalysis, TranslationRecord,
 };
-pub use domain::{ExportableTranslationRecord, GameSnapshotRecord};
+pub use domain::{ExportableTranslationRecord, GameSnapshotRecord, InstallRecord};
 pub use error::{Error, Result};
 pub use export::{
     ExportBuilder, ExportPolicy, ExportReport, OverlayConfig, RuntimeCacheRecord,
