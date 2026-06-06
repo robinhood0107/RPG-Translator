@@ -1,0 +1,20 @@
+[
+  {
+    "input": "\\C[2]Hello\\N[1]\r\nWorld\\G",
+    "normalized_text": "\\C[2]Hello\\N[1]\nWorld\\G",
+    "visible_text": "Hello\nWorld",
+    "provider_text": "¤Hello¤\nWorld¤",
+    "control_codes": ["\\C[2]", "\\N[1]", "\\G"],
+    "restored_provider_translation": "¤안녕¤\n세계¤",
+    "restored_text": "\\C[2]안녕\\N[1]\n세계\\G"
+  },
+  {
+    "input": "\\{勇者\\}\\$",
+    "normalized_text": "\\{勇者\\}\\$",
+    "visible_text": "勇者",
+    "provider_text": "¤勇者¤¤",
+    "control_codes": ["\\{", "\\}", "\\$"],
+    "restored_provider_translation": "¤용사¤¤",
+    "restored_text": "\\{용사\\}\\$"
+  }
+]
