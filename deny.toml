@@ -2,14 +2,38 @@
 all-features = false
 
 [advisories]
-ignore = []
+ignore = [
+    # Tauri 2 Linux desktop stack currently depends on gtk-rs GTK3 crates through
+    # wry/tao/webkit2gtk. These advisories are unmaintained notices with no safe
+    # upgrade path in the current Tauri line, not vulnerability advisories.
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    # Transitive build/parser dependencies pulled by Tauri's current Linux stack.
+    "RUSTSEC-2024-0370",
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
+]
 
 [licenses]
 confidence-threshold = 0.8
 allow = [
     "AGPL-3.0-only",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
     "MIT",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",

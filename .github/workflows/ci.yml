@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Rust format
+        run: cargo fmt --check
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo deny
+        run: cargo deny check
+
+      - name: Frontend tests
+        working-directory: apps/desktop
+        run: npm test -- --run
+
+      - name: Frontend typecheck
+        working-directory: apps/desktop
+        run: npm run typecheck
+
+      - name: Frontend build
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Runtime overlay tests
+        run: node --test runtime/overlay-plugin/tests/runtime-overlay.test.js
+
+      - name: Local-only source guard
+        run: scripts/check-local-only.sh --tree
+
+      - name: Release archive dry-run guard
+        run: scripts/check-release-archive.sh

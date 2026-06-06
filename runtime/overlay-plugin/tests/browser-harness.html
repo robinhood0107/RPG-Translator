@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>RPG-Translator Overlay Harness</title>
+  </head>
+  <body>
+    <div id="status">running</div>
+    <script src="../text-codec.js"></script>
+    <script src="../lookup-index.js"></script>
+    <script src="../cache-loader.js"></script>
+    <script src="../message-adapter.js"></script>
+    <script src="../window-text-adapter.js"></script>
+    <script src="../startup-toast.js"></script>
+    <script src="../boot.js"></script>
+    <script>
+      (async () => {
+        const root = window;
+        const calls = [];
+        root.$gameMessage = { _texts: ['世界'] };
+        root.Window_Message = function WindowMessage() {};
+        root.Window_Base = function WindowBase() {};
+        root.Window_Message.prototype.startMessage = function startMessage() {
+          calls.push(['message', root.$gameMessage._texts[0]]);
+        };
+        root.Window_Base.prototype.drawText = function drawText(text) {
+          calls.push(['drawText', text]);
+        };
+        root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+          calls.push(['drawTextEx', text]);
+          return text.length;
+        };
+
+        const cacheKey = root.RPGTranslatorOverlay.CacheKeyBuilder.build({
+          engine: 'mz',
+          sourceLanguage: 'ja',
+          targetLanguage: 'ko',
+          normalizedText: '世界',
+          controlCodeSignature: '',
+          contextHash: null,
+        });
+        await root.RPGTranslatorOverlay.Boot.install(root, {
+          engine: 'mz',
+          bundle: {
+            manifest: {
+              schema_version: 1,
+              key_schema_version: 'v1',
+              source_language: 'ja',
+              target_language: 'ko',
+            },
+            config: {
+              startup_toast_enabled: true,
+              startup_toast_text: 'RPG-Translator 작동중',
+            },
+            records: [{
+              cache_key: cacheKey,
+              source_text_id: 1,
+              source_hash: '0'.repeat(64),
+              source_language: 'ja',
+              target_language: 'ko',
+              normalized_text: '世界',
+              visible_text: '世界',
+              translation: '세계',
+              control_code_signature: '',
+              context_hash: null,
+            }],
+          },
+        });
+        new root.Window_Message().startMessage();
+        new root.Window_Base().drawText('世界', 0, 0, 100);
+        new root.Window_Base().drawTextEx('missing', 0, 0);
+
+        const toast = Array.from(document.body.children).some((node) => node.textContent === 'RPG-Translator 작동중');
+        const passed = JSON.stringify(calls) === JSON.stringify([
+          ['message', '세계'],
+          ['drawText', '세계'],
+          ['drawTextEx', 'missing'],
+        ]) && toast && root.RPGTranslatorOverlay.installed === true;
+        const status = document.querySelector('#status');
+        status.textContent = passed ? 'pass' : `fail ${JSON.stringify(calls)} toast=${toast}`;
+      })().catch((error) => {
+        document.querySelector('#status').textContent = `fail ${error.message}`;
+      });
+    </script>
+  </body>
+</html>
