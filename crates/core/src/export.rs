@@ -154,6 +154,7 @@ impl ExportBuilder {
             target_language,
             &output_dir.to_string_lossy(),
             &manifest_hash,
+            records.len() as i64,
         )?;
 
         Ok(ExportReport {
