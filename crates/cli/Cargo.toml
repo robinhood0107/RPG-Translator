@@ -1,0 +1,16 @@
+[package]
+name = "rpg-translator-cli"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "rpg-translator"
+path = "src/main.rs"
+
+[dependencies]
+rpg-translator-core.workspace = true
+
+[lints]
+workspace = true
