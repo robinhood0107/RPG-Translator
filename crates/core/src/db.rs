@@ -3,9 +3,10 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    Engine, ExportableTranslationRecord, GameSnapshotRecord, InstallRecord, NewInstallRecord,
-    NewOccurrence, NewProject, NewProviderRun, NewQaFinding, NewSourceText, NewTranslation,
-    ProjectRecord, QaFindingRecord, Result, SourceTextRecord, TranslationRecord,
+    Engine, ExportStatusRecord, ExportableTranslationRecord, GameSnapshotRecord, InstallRecord,
+    InstallStatusRecord, NewInstallRecord, NewOccurrence, NewProject, NewProviderRun, NewQaFinding,
+    NewSourceText, NewTranslation, ProjectRecord, ProviderRunStatusRecord, QaFindingRecord, Result,
+    ReviewQueueRow, SourceTextRecord, TranslationRecord, WorkbenchDashboardSummary,
 };
 
 pub struct TranslationDb {
@@ -61,6 +62,7 @@ impl TranslationDb {
 
             CREATE TABLE IF NOT EXISTS occurrences (
                 id INTEGER PRIMARY KEY,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
                 source_text_id INTEGER NOT NULL REFERENCES source_texts(id) ON DELETE CASCADE,
                 file_path TEXT NOT NULL,
                 json_path TEXT NOT NULL,
@@ -135,6 +137,7 @@ impl TranslationDb {
         )?;
         self.ensure_exports_included_count_column()?;
         self.ensure_installs_export_id_column()?;
+        self.ensure_occurrences_project_id_column()?;
         Ok(())
     }
 
@@ -170,6 +173,25 @@ impl TranslationDb {
         if !has_export_id {
             self.conn
                 .execute("ALTER TABLE installs ADD COLUMN export_id INTEGER", [])?;
+        }
+        Ok(())
+    }
+
+    fn ensure_occurrences_project_id_column(&self) -> Result<()> {
+        let mut statement = self.conn.prepare("PRAGMA table_info(occurrences)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_project_id = false;
+        for column in columns {
+            if column? == "project_id" {
+                has_project_id = true;
+                break;
+            }
+        }
+        if !has_project_id {
+            self.conn.execute(
+                "ALTER TABLE occurrences ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE",
+                [],
+            )?;
         }
         Ok(())
     }
@@ -218,6 +240,30 @@ impl TranslationDb {
             )
             .optional()?;
         Ok(record)
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT id, game_root, display_name, engine
+            FROM projects
+            ORDER BY display_name, id
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let engine: String = row.get(3)?;
+            Ok(ProjectRecord {
+                id: row.get(0)?,
+                game_root: row.get(1)?,
+                display_name: row.get(2)?,
+                engine: Engine::from_key(&engine),
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
     }
 
     pub fn record_game_snapshot(
@@ -315,10 +361,27 @@ impl TranslationDb {
     }
 
     pub fn insert_occurrence(&mut self, input: &NewOccurrence) -> Result<i64> {
+        self.insert_occurrence_with_project(input.project_id, input)
+    }
+
+    pub fn insert_project_occurrence(
+        &mut self,
+        project_id: i64,
+        input: &NewOccurrence,
+    ) -> Result<i64> {
+        self.insert_occurrence_with_project(Some(project_id), input)
+    }
+
+    fn insert_occurrence_with_project(
+        &mut self,
+        project_id: Option<i64>,
+        input: &NewOccurrence,
+    ) -> Result<i64> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "
             INSERT INTO occurrences (
+                project_id,
                 source_text_id,
                 file_path,
                 json_path,
@@ -331,9 +394,10 @@ impl TranslationDb {
                 object_key,
                 extraction_rule_id
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ",
             params![
+                project_id,
                 input.source_text_id,
                 input.file_path,
                 input.json_path,
@@ -350,6 +414,122 @@ impl TranslationDb {
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn workbench_dashboard_summary(
+        &self,
+        project_id: i64,
+        target_language: &str,
+    ) -> Result<WorkbenchDashboardSummary> {
+        let source_text_count = self.count_project_source_texts(project_id)?;
+        let occurrence_count = self.count_project_occurrences(project_id)?;
+        let translated_count =
+            self.count_project_translations(project_id, target_language, None)?;
+        let accepted_count =
+            self.count_project_translations(project_id, target_language, Some("accepted"))?;
+        let reviewed_count =
+            self.count_project_translations(project_id, target_language, Some("reviewed"))?;
+        let review_queue_count = self.count_project_review_queue(project_id, target_language)?;
+        let qa_finding_count = self.count_project_qa_findings(project_id)?;
+        Ok(WorkbenchDashboardSummary {
+            project_id,
+            target_language: target_language.to_string(),
+            source_text_count,
+            occurrence_count,
+            translated_count,
+            accepted_count,
+            reviewed_count,
+            review_queue_count,
+            qa_finding_count,
+            latest_export: self.latest_export_status(project_id)?,
+            latest_install: self.latest_install_status(project_id)?,
+            latest_provider_run: self.latest_provider_run_status()?,
+        })
+    }
+
+    pub fn review_queue_rows(
+        &self,
+        project_id: i64,
+        target_language: &str,
+        review_state_filter: Option<&str>,
+    ) -> Result<Vec<ReviewQueueRow>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                source_texts.id,
+                source_texts.source_language,
+                source_texts.normalized_text,
+                source_texts.visible_text,
+                source_texts.control_code_signature,
+                COUNT(occurrences.id) AS occurrence_count,
+                MIN(occurrences.file_path) AS first_file_path,
+                MIN(occurrences.json_path) AS first_json_path,
+                translations.id,
+                translations.translated_text,
+                translations.provider,
+                translations.model,
+                translations.review_state,
+                translations.qa_state,
+                (
+                    SELECT COUNT(*)
+                    FROM qa_findings
+                    WHERE qa_findings.source_text_id = source_texts.id
+                ) AS qa_finding_count
+            FROM source_texts
+            INNER JOIN occurrences ON occurrences.source_text_id = source_texts.id
+            LEFT JOIN translations
+                ON translations.source_text_id = source_texts.id
+               AND translations.target_language = ?2
+            WHERE occurrences.project_id = ?1
+            GROUP BY
+                source_texts.id,
+                source_texts.source_language,
+                source_texts.normalized_text,
+                source_texts.visible_text,
+                source_texts.control_code_signature,
+                translations.id,
+                translations.translated_text,
+                translations.provider,
+                translations.model,
+                translations.review_state,
+                translations.qa_state
+            ORDER BY source_texts.id
+            ",
+        )?;
+        let rows = statement.query_map(params![project_id, target_language], |row| {
+            let review_state = row
+                .get::<_, Option<String>>(12)?
+                .unwrap_or_else(|| "missing".to_string());
+            let qa_state = row
+                .get::<_, Option<String>>(13)?
+                .unwrap_or_else(|| "unchecked".to_string());
+            Ok(ReviewQueueRow {
+                source_text_id: row.get(0)?,
+                source_language: row.get(1)?,
+                normalized_text: row.get(2)?,
+                visible_text: row.get(3)?,
+                control_code_signature: row.get(4)?,
+                occurrence_count: row.get(5)?,
+                first_file_path: row.get(6)?,
+                first_json_path: row.get(7)?,
+                translation_id: row.get(8)?,
+                target_language: target_language.to_string(),
+                translated_text: row.get(9)?,
+                provider: row.get(10)?,
+                model: row.get(11)?,
+                review_state,
+                qa_state,
+                qa_finding_count: row.get(14)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let record = row?;
+            if review_state_filter.is_none_or(|filter| record.review_state == filter) {
+                records.push(record);
+            }
+        }
+        Ok(records)
     }
 
     pub fn upsert_translation(&mut self, input: &NewTranslation) -> Result<i64> {
@@ -753,6 +933,160 @@ impl TranslationDb {
                         export_id: row.get(3)?,
                         backup_manifest_path: row.get(4)?,
                         status: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn count_project_source_texts(&self, project_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(DISTINCT source_text_id)
+            FROM occurrences
+            WHERE project_id = ?1
+            ",
+            params![project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn count_project_occurrences(&self, project_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM occurrences
+            WHERE project_id = ?1
+            ",
+            params![project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn count_project_translations(
+        &self,
+        project_id: i64,
+        target_language: &str,
+        review_state: Option<&str>,
+    ) -> Result<i64> {
+        let mut count = 0;
+        let mut statement = self.conn.prepare(
+            "
+            SELECT DISTINCT translations.source_text_id, translations.review_state
+            FROM translations
+            INNER JOIN occurrences ON occurrences.source_text_id = translations.source_text_id
+            WHERE occurrences.project_id = ?1
+              AND translations.target_language = ?2
+            ",
+        )?;
+        let rows = statement.query_map(params![project_id, target_language], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (_, state) = row?;
+            if review_state.is_none_or(|expected| state == expected) {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn count_project_review_queue(&self, project_id: i64, target_language: &str) -> Result<i64> {
+        let mut count = 0;
+        for row in self.review_queue_rows(project_id, target_language, None)? {
+            if row.review_state != "accepted" && row.review_state != "reviewed" {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn count_project_qa_findings(&self, project_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM qa_findings
+            WHERE source_text_id IN (
+                SELECT DISTINCT source_text_id
+                FROM occurrences
+                WHERE project_id = ?1
+            )
+            ",
+            params![project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn latest_export_status(&self, project_id: i64) -> Result<Option<ExportStatusRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "
+                SELECT id, project_id, target_language, export_path, manifest_hash, included_count
+                FROM exports
+                WHERE project_id = ?1
+                ORDER BY id DESC
+                LIMIT 1
+                ",
+                params![project_id],
+                |row| {
+                    Ok(ExportStatusRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        target_language: row.get(2)?,
+                        export_path: row.get(3)?,
+                        manifest_hash: row.get(4)?,
+                        included_count: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn latest_install_status(&self, project_id: i64) -> Result<Option<InstallStatusRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "
+                SELECT id, project_id, game_root, export_id, backup_manifest_path, status
+                FROM installs
+                WHERE project_id = ?1
+                ORDER BY id DESC
+                LIMIT 1
+                ",
+                params![project_id],
+                |row| {
+                    Ok(InstallStatusRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        game_root: row.get(2)?,
+                        export_id: row.get(3)?,
+                        backup_manifest_path: row.get(4)?,
+                        status: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn latest_provider_run_status(&self) -> Result<Option<ProviderRunStatusRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "
+                SELECT id, provider, model, status, failure_detail
+                FROM provider_runs
+                ORDER BY id DESC
+                LIMIT 1
+                ",
+                [],
+                |row| {
+                    Ok(ProviderRunStatusRecord {
+                        id: row.get(0)?,
+                        provider: row.get(1)?,
+                        model: row.get(2)?,
+                        status: row.get(3)?,
+                        failure_detail: row.get(4)?,
                     })
                 },
             )

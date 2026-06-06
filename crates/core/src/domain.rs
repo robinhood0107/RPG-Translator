@@ -67,6 +67,16 @@ pub struct ProjectRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportStatusRecord {
+    pub id: i64,
+    pub project_id: Option<i64>,
+    pub target_language: String,
+    pub export_path: String,
+    pub manifest_hash: String,
+    pub included_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSnapshotRecord {
     pub id: i64,
     pub project_id: i64,
@@ -142,6 +152,7 @@ pub struct ScanReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewOccurrence {
+    pub project_id: Option<i64>,
     pub source_text_id: i64,
     pub file_path: String,
     pub json_path: String,
@@ -234,4 +245,69 @@ pub struct InstallRecord {
     pub export_id: Option<i64>,
     pub backup_manifest_path: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallStatusRecord {
+    pub id: i64,
+    pub project_id: Option<i64>,
+    pub game_root: String,
+    pub export_id: Option<i64>,
+    pub backup_manifest_path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRunStatusRecord {
+    pub id: i64,
+    pub provider: String,
+    pub model: Option<String>,
+    pub status: String,
+    pub failure_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchDashboardSummary {
+    pub project_id: i64,
+    pub target_language: String,
+    pub source_text_count: i64,
+    pub occurrence_count: i64,
+    pub translated_count: i64,
+    pub accepted_count: i64,
+    pub reviewed_count: i64,
+    pub review_queue_count: i64,
+    pub qa_finding_count: i64,
+    pub latest_export: Option<ExportStatusRecord>,
+    pub latest_install: Option<InstallStatusRecord>,
+    pub latest_provider_run: Option<ProviderRunStatusRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewQueueRow {
+    pub source_text_id: i64,
+    pub source_language: String,
+    pub normalized_text: String,
+    pub visible_text: String,
+    pub control_code_signature: String,
+    pub occurrence_count: i64,
+    pub first_file_path: String,
+    pub first_json_path: String,
+    pub translation_id: Option<i64>,
+    pub target_language: String,
+    pub translated_text: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub review_state: String,
+    pub qa_state: String,
+    pub qa_finding_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanPersistenceReport {
+    pub project_id: i64,
+    pub snapshot_id: i64,
+    pub source_text_count: i64,
+    pub occurrence_count: i64,
+    pub rejected_count: i64,
+    pub skipped_count: i64,
 }
