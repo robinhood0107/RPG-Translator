@@ -4,6 +4,7 @@ mod db;
 mod domain;
 mod error;
 mod export;
+mod install;
 mod scanner;
 mod text_codec;
 
@@ -26,6 +27,10 @@ pub use error::{Error, Result};
 pub use export::{
     ExportBuilder, ExportPolicy, ExportReport, OverlayConfig, RuntimeCacheRecord,
     RuntimeExportManifest,
+};
+pub use install::{
+    InstallManifest, InstallOptions, InstallReport, InstalledFileRecord, Installer,
+    RollbackManager, RollbackOptions, RollbackReport,
 };
 pub use scanner::{ExtractionRuleSet, GameScanner, RpgMakerDetector, ScanOptions};
 pub use text_codec::{ProviderTextState, TextCodec};
