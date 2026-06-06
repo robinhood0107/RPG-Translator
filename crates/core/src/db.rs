@@ -584,6 +584,49 @@ impl TranslationDb {
             .query_row("SELECT COUNT(*) FROM qa_findings", [], |row| row.get(0))?)
     }
 
+    pub fn record_export(
+        &mut self,
+        project_id: i64,
+        target_language: &str,
+        export_path: &str,
+        manifest_hash: &str,
+    ) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "
+            INSERT INTO exports (
+                project_id,
+                target_language,
+                export_path,
+                manifest_hash
+            )
+            VALUES (?1, ?2, ?3, ?4)
+            ",
+            params![project_id, target_language, export_path, manifest_hash],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn export_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM exports", [], |row| row.get(0))?)
+    }
+
+    pub fn translation_count_for_target(&self, target_language: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM translations
+            WHERE target_language = ?1
+            ",
+            params![target_language],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn source_text_count(&self) -> Result<i64> {
         Ok(self
             .conn

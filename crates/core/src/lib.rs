@@ -3,6 +3,7 @@ mod cache_key;
 mod db;
 mod domain;
 mod error;
+mod export;
 mod scanner;
 mod text_codec;
 
@@ -22,6 +23,10 @@ pub use domain::{
 };
 pub use domain::{ExportableTranslationRecord, GameSnapshotRecord};
 pub use error::{Error, Result};
+pub use export::{
+    ExportBuilder, ExportPolicy, ExportReport, OverlayConfig, RuntimeCacheRecord,
+    RuntimeExportManifest,
+};
 pub use scanner::{ExtractionRuleSet, GameScanner, RpgMakerDetector, ScanOptions};
 pub use text_codec::{ProviderTextState, TextCodec};
 
