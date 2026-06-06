@@ -86,6 +86,7 @@ fn migrations_are_idempotent_and_source_texts_dedupe() -> Result<()> {
     assert_eq!(db.source_text_count()?, 2);
 
     db.insert_occurrence(&NewOccurrence {
+        project_id: None,
         source_text_id: source_id,
         file_path: "data/Map001.json".to_string(),
         json_path: "$.events[3].pages[0].list[1].parameters[0]".to_string(),
