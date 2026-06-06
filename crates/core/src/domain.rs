@@ -58,6 +58,15 @@ pub struct NewSourceText {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceTextRecord {
+    pub id: i64,
+    pub source_language: String,
+    pub normalized_text: String,
+    pub visible_text: String,
+    pub control_code_signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataFileRecord {
     pub file_path: String,
 }
@@ -142,4 +151,20 @@ pub struct TranslationRecord {
     pub model: Option<String>,
     pub review_state: String,
     pub qa_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewProviderRun {
+    pub provider: String,
+    pub model: Option<String>,
+    pub request_settings_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewQaFinding {
+    pub source_text_id: i64,
+    pub translation_id: Option<i64>,
+    pub finding_type: String,
+    pub severity: String,
+    pub message: String,
 }
