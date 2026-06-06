@@ -1,1 +1,3 @@
-fn main() {}
+fn main() {
+    rpg_translator_desktop::run();
+}
