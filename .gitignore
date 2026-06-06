@@ -19,3 +19,52 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Never upload local test games or test-only model/runtime files.
+dontupload/
+docker-compose.gemma-*-speed.yml
+
+# Secrets and local provider config.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Local LLM/model artifacts.
+*.gguf
+*.safetensors
+*.ckpt
+*.bin
+models/
+
+# Node/frontend/Tauri build outputs.
+node_modules/
+dist/
+build/
+.vite/
+.turbo/
+.next/
+src-tauri/target/
+
+# Generated app/runtime state.
+*.db
+*.sqlite
+*.sqlite3
+exports/
+out/
+generated/
+coverage/
+playwright-report/
+test-results/
+screenshots/
+
+# Logs and metrics.
+*.log
+*.trace
+*.tmp
+translation-cache.log
+translation-metrics*.json
+translation-metrics*.log
