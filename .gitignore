@@ -48,6 +48,7 @@ build/
 .turbo/
 .next/
 src-tauri/target/
+apps/desktop/src-tauri/gen/
 
 # Generated app/runtime state.
 *.db
