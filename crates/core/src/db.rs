@@ -3,8 +3,9 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    NewOccurrence, NewProject, NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, Result,
-    SourceTextRecord, TranslationRecord,
+    Engine, ExportableTranslationRecord, GameSnapshotRecord, NewOccurrence, NewProject,
+    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, ProjectRecord, QaFindingRecord,
+    Result, SourceTextRecord, TranslationRecord,
 };
 
 pub struct TranslationDb {
@@ -153,6 +154,83 @@ impl TranslationDb {
         )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn get_project(&self, project_id: i64) -> Result<Option<ProjectRecord>> {
+        let record = self
+            .conn
+            .query_row(
+                "
+                SELECT id, game_root, display_name, engine
+                FROM projects
+                WHERE id = ?1
+                ",
+                params![project_id],
+                |row| {
+                    let engine: String = row.get(3)?;
+                    Ok(ProjectRecord {
+                        id: row.get(0)?,
+                        game_root: row.get(1)?,
+                        display_name: row.get(2)?,
+                        engine: Engine::from_key(&engine),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(record)
+    }
+
+    pub fn record_game_snapshot(
+        &mut self,
+        project_id: i64,
+        snapshot_hash: &str,
+        data_root_hash: &str,
+    ) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "
+            INSERT INTO game_snapshots (project_id, snapshot_hash, data_root)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(project_id, snapshot_hash) DO UPDATE SET
+                data_root = excluded.data_root
+            ",
+            params![project_id, snapshot_hash, data_root_hash],
+        )?;
+        let id = tx.query_row(
+            "
+            SELECT id
+            FROM game_snapshots
+            WHERE project_id = ?1
+              AND snapshot_hash = ?2
+            ",
+            params![project_id, snapshot_hash],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn get_game_snapshot(&self, snapshot_id: i64) -> Result<Option<GameSnapshotRecord>> {
+        let record = self
+            .conn
+            .query_row(
+                "
+                SELECT id, project_id, snapshot_hash, data_root
+                FROM game_snapshots
+                WHERE id = ?1
+                ",
+                params![snapshot_id],
+                |row| {
+                    Ok(GameSnapshotRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        snapshot_hash: row.get(2)?,
+                        data_root_hash: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(record)
     }
 
     pub fn upsert_source_text(&mut self, input: &NewSourceText) -> Result<i64> {
@@ -356,6 +434,53 @@ impl TranslationDb {
         Ok(records)
     }
 
+    pub fn exportable_translations(
+        &self,
+        target_language: &str,
+        review_states: &[&str],
+    ) -> Result<Vec<ExportableTranslationRecord>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                source_texts.id,
+                source_texts.source_language,
+                translations.target_language,
+                source_texts.normalized_text,
+                source_texts.visible_text,
+                source_texts.control_code_signature,
+                translations.translated_text,
+                translations.review_state,
+                translations.qa_state
+            FROM translations
+            INNER JOIN source_texts ON source_texts.id = translations.source_text_id
+            WHERE translations.target_language = ?1
+            ORDER BY source_texts.id
+            ",
+        )?;
+        let rows = statement.query_map(params![target_language], |row| {
+            Ok(ExportableTranslationRecord {
+                source_text_id: row.get(0)?,
+                source_language: row.get(1)?,
+                target_language: row.get(2)?,
+                normalized_text: row.get(3)?,
+                visible_text: row.get(4)?,
+                control_code_signature: row.get(5)?,
+                translated_text: row.get(6)?,
+                review_state: row.get(7)?,
+                qa_state: row.get(8)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let record = row?;
+            if review_states.contains(&record.review_state.as_str()) {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
     pub fn start_provider_run(&mut self, input: &NewProviderRun) -> Result<i64> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -418,6 +543,39 @@ impl TranslationDb {
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn qa_findings_for_source(&self, source_text_id: i64) -> Result<Vec<QaFindingRecord>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                id,
+                source_text_id,
+                translation_id,
+                finding_type,
+                severity,
+                message
+            FROM qa_findings
+            WHERE source_text_id = ?1
+            ORDER BY id
+            ",
+        )?;
+        let rows = statement.query_map(params![source_text_id], |row| {
+            Ok(QaFindingRecord {
+                id: row.get(0)?,
+                source_text_id: row.get(1)?,
+                translation_id: row.get(2)?,
+                finding_type: row.get(3)?,
+                severity: row.get(4)?,
+                message: row.get(5)?,
+            })
+        })?;
+
+        let mut findings = Vec::new();
+        for row in rows {
+            findings.push(row?);
+        }
+        Ok(findings)
     }
 
     pub fn qa_finding_count(&self) -> Result<i64> {

@@ -16,6 +16,15 @@ impl Engine {
             Self::Unknown => "unknown",
         }
     }
+
+    #[must_use]
+    pub fn from_key(value: &str) -> Self {
+        match value {
+            "mv" => Self::Mv,
+            "mz" => Self::Mz,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +56,22 @@ pub struct NewProject {
     pub game_root: String,
     pub display_name: String,
     pub engine: Engine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    pub id: i64,
+    pub game_root: String,
+    pub display_name: String,
+    pub engine: Engine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameSnapshotRecord {
+    pub id: i64,
+    pub project_id: i64,
+    pub snapshot_hash: String,
+    pub data_root_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +179,19 @@ pub struct TranslationRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportableTranslationRecord {
+    pub source_text_id: i64,
+    pub source_language: String,
+    pub target_language: String,
+    pub normalized_text: String,
+    pub visible_text: String,
+    pub control_code_signature: String,
+    pub translated_text: String,
+    pub review_state: String,
+    pub qa_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewProviderRun {
     pub provider: String,
     pub model: Option<String>,
@@ -162,6 +200,16 @@ pub struct NewProviderRun {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewQaFinding {
+    pub source_text_id: i64,
+    pub translation_id: Option<i64>,
+    pub finding_type: String,
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QaFindingRecord {
+    pub id: i64,
     pub source_text_id: i64,
     pub translation_id: Option<i64>,
     pub finding_type: String,

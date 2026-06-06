@@ -282,7 +282,14 @@ pub struct BatchRunReport {
     pub provider_run_id: i64,
     pub completed_source_text_ids: Vec<i64>,
     pub failed_source_text_ids: Vec<i64>,
+    pub failure_details: Vec<BatchFailureDetail>,
     pub split_batches: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchFailureDetail {
+    pub source_text_ids: Vec<i64>,
+    pub message: String,
 }
 
 pub struct BatchTranslator;
@@ -347,6 +354,7 @@ impl BatchTranslator {
             provider_run_id,
             completed_source_text_ids: Vec::new(),
             failed_source_text_ids: Vec::new(),
+            failure_details: Vec::new(),
             split_batches: 0,
         };
 
@@ -503,6 +511,7 @@ impl BatchProcessor<'_> {
         }
 
         let failed_job = &batch[0];
+        let message = last_error.to_string();
         for source_text_id in &failed_job.source_text_ids {
             push_unique(&mut self.report.failed_source_text_ids, *source_text_id);
             push_unique(&mut self.checkpoint.failed_source_text_ids, *source_text_id);
@@ -511,9 +520,13 @@ impl BatchProcessor<'_> {
                 translation_id: None,
                 finding_type: "batch-validation".to_string(),
                 severity: "error".to_string(),
-                message: last_error.to_string(),
+                message: message.clone(),
             })?;
         }
+        self.report.failure_details.push(BatchFailureDetail {
+            source_text_ids: failed_job.source_text_ids.clone(),
+            message,
+        });
         if let Some(path) = self.checkpoint_path {
             CheckpointWriter::write_atomic(path, self.checkpoint)?;
         }
@@ -576,13 +589,14 @@ fn build_batches(jobs: &[BatchJob], config: &BatchPlannerConfig) -> Vec<Vec<Batc
 fn parse_rows(raw: &str) -> Result<Vec<Value>> {
     if raw.starts_with('[') {
         let rows: Vec<Value> = serde_json::from_str(raw).map_err(|error| {
-            Error::invalid_input(format!("invalid provider JSON array: {error}"))
+            Error::invalid_input(format!("invalid provider output JSON array: {error}"))
         })?;
         return Ok(rows);
     }
     if raw.starts_with('{') && !raw.contains('\n') {
-        let row: Value = serde_json::from_str(raw)
-            .map_err(|error| Error::invalid_input(format!("invalid provider JSON row: {error}")))?;
+        let row: Value = serde_json::from_str(raw).map_err(|error| {
+            Error::invalid_input(format!("invalid provider output JSON row: {error}"))
+        })?;
         return Ok(vec![row]);
     }
 
@@ -593,7 +607,7 @@ fn parse_rows(raw: &str) -> Result<Vec<Value>> {
             continue;
         }
         let row = serde_json::from_str(trimmed).map_err(|error| {
-            Error::invalid_input(format!("invalid provider JSONL row: {error}"))
+            Error::invalid_input(format!("invalid provider output JSONL row: {error}"))
         })?;
         rows.push(row);
     }
