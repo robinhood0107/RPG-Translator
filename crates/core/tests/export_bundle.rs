@@ -1,4 +1,5 @@
 use std::fs;
+use std::process::Command;
 
 use rpg_translator_core::{
     CacheKeyBuilder, CacheKeyParts, Engine, ExportBuilder, ExportPolicy, NewProject, NewSourceText,
@@ -169,4 +170,46 @@ fn export_verification_rejects_malformed_runtime_bundle() -> Result<()> {
     assert!(error.to_string().contains("cache_key"));
 
     Ok(())
+}
+
+#[test]
+fn runtime_js_cache_key_builder_matches_rust_schema() {
+    let expected_key = CacheKeyBuilder::build(&CacheKeyParts {
+        engine: Engine::Mz,
+        source_language: "ja".to_string(),
+        target_language: "ko".to_string(),
+        normalized_text: "\\C[2]名前".to_string(),
+        control_code_signature: "\\C[2]".to_string(),
+        context_hash: None,
+    });
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let script = r#"
+const { CacheKeyBuilder } = require('./runtime/overlay-plugin/lookup-index');
+process.stdout.write(CacheKeyBuilder.build({
+  engine: 'mz',
+  sourceLanguage: 'ja',
+  targetLanguage: 'ko',
+  normalizedText: '\\C[2]名前',
+  controlCodeSignature: '\\C[2]',
+  contextHash: null,
+}));
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(script)
+        .current_dir(repo_root)
+        .output()
+        .expect("run node cache key check");
+
+    assert!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 node output"),
+        expected_key
+    );
 }

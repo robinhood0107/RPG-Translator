@@ -235,5 +235,5 @@ fn runtime_overlay_does_not_import_provider_modules() {
         assert!(!content.contains("apiKey"));
         assert!(!content.contains("Authorization"));
     }
-    assert_eq!(checked_js_files, 0);
+    assert!(checked_js_files > 0);
 }
