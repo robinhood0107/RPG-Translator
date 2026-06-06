@@ -69,6 +69,7 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
     assert_eq!(report.included_count, 2);
     assert_eq!(report.skipped_count, 1);
     assert_eq!(db.export_count()?, 1);
+    assert_eq!(db.last_export_included_count()?, Some(2));
 
     let mut files = fs::read_dir(temp.path())
         .expect("read export dir")

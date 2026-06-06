@@ -116,6 +116,7 @@ impl TranslationDb {
                 target_language TEXT NOT NULL,
                 export_path TEXT NOT NULL,
                 manifest_hash TEXT NOT NULL DEFAULT '',
+                included_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -131,6 +132,26 @@ impl TranslationDb {
             PRAGMA user_version = 1;
             ",
         )?;
+        self.ensure_exports_included_count_column()?;
+        Ok(())
+    }
+
+    fn ensure_exports_included_count_column(&self) -> Result<()> {
+        let mut statement = self.conn.prepare("PRAGMA table_info(exports)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_included_count = false;
+        for column in columns {
+            if column? == "included_count" {
+                has_included_count = true;
+                break;
+            }
+        }
+        if !has_included_count {
+            self.conn.execute(
+                "ALTER TABLE exports ADD COLUMN included_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -590,6 +611,7 @@ impl TranslationDb {
         target_language: &str,
         export_path: &str,
         manifest_hash: &str,
+        included_count: i64,
     ) -> Result<i64> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -598,11 +620,18 @@ impl TranslationDb {
                 project_id,
                 target_language,
                 export_path,
-                manifest_hash
+                manifest_hash,
+                included_count
             )
-            VALUES (?1, ?2, ?3, ?4)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ",
-            params![project_id, target_language, export_path, manifest_hash],
+            params![
+                project_id,
+                target_language,
+                export_path,
+                manifest_hash,
+                included_count
+            ],
         )?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
@@ -613,6 +642,22 @@ impl TranslationDb {
         Ok(self
             .conn
             .query_row("SELECT COUNT(*) FROM exports", [], |row| row.get(0))?)
+    }
+
+    pub fn last_export_included_count(&self) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "
+                SELECT included_count
+                FROM exports
+                ORDER BY id DESC
+                LIMIT 1
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     pub fn translation_count_for_target(&self, target_language: &str) -> Result<i64> {

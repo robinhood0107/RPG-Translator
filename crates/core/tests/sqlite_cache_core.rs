@@ -2,6 +2,8 @@ use rpg_translator_core::{
     CacheKeyBuilder, CacheKeyParts, Engine, NewOccurrence, NewProject, NewSourceText,
     NewTranslation, Result, TextCodec, TranslationDb,
 };
+use rusqlite::Connection;
+use tempfile::NamedTempFile;
 
 #[test]
 fn text_codec_normalizes_lines_and_signs_control_codes() {
@@ -97,6 +99,36 @@ fn migrations_are_idempotent_and_source_texts_dedupe() -> Result<()> {
         extraction_rule_id: "event.message.line".to_string(),
     })?;
     assert_eq!(db.occurrence_count()?, 1);
+
+    Ok(())
+}
+
+#[test]
+fn migration_adds_export_included_count_to_existing_exports_table() -> Result<()> {
+    let file = NamedTempFile::new().expect("create temp db");
+    {
+        let conn = Connection::open(file.path()).expect("open temp sqlite");
+        conn.execute_batch(
+            "
+            CREATE TABLE exports (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                target_language TEXT NOT NULL,
+                export_path TEXT NOT NULL,
+                manifest_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO exports (target_language, export_path, manifest_hash)
+            VALUES ('ko', '/tmp/export', 'hash');
+            ",
+        )
+        .expect("create legacy exports table");
+    }
+
+    let mut db = TranslationDb::open(file.path())?;
+    db.migrate()?;
+
+    assert_eq!(db.last_export_included_count()?, Some(0));
 
     Ok(())
 }
