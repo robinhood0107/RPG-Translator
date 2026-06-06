@@ -2,7 +2,10 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{NewOccurrence, NewProject, NewSourceText, NewTranslation, Result, TranslationRecord};
+use crate::{
+    NewOccurrence, NewProject, NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, Result,
+    SourceTextRecord, TranslationRecord,
+};
 
 pub struct TranslationDb {
     conn: Connection,
@@ -315,6 +318,112 @@ impl TranslationDb {
             )
             .optional()?;
         Ok(record)
+    }
+
+    pub fn pending_source_texts(&self, target_language: &str) -> Result<Vec<SourceTextRecord>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                id,
+                source_language,
+                normalized_text,
+                visible_text,
+                control_code_signature
+            FROM source_texts
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM translations
+                WHERE translations.source_text_id = source_texts.id
+                  AND translations.target_language = ?1
+            )
+            ORDER BY id
+            ",
+        )?;
+        let rows = statement.query_map(params![target_language], |row| {
+            Ok(SourceTextRecord {
+                id: row.get(0)?,
+                source_language: row.get(1)?,
+                normalized_text: row.get(2)?,
+                visible_text: row.get(3)?,
+                control_code_signature: row.get(4)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn start_provider_run(&mut self, input: &NewProviderRun) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "
+            INSERT INTO provider_runs (
+                provider,
+                model,
+                request_settings_json,
+                status
+            )
+            VALUES (?1, ?2, ?3, 'running')
+            ",
+            params![input.provider, input.model, input.request_settings_json],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn finish_provider_run(
+        &mut self,
+        provider_run_id: i64,
+        status: &str,
+        failure_detail: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "
+            UPDATE provider_runs
+            SET status = ?2,
+                finished_at = CURRENT_TIMESTAMP,
+                failure_detail = ?3
+            WHERE id = ?1
+            ",
+            params![provider_run_id, status, failure_detail],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_qa_finding(&mut self, input: &NewQaFinding) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "
+            INSERT INTO qa_findings (
+                source_text_id,
+                translation_id,
+                finding_type,
+                severity,
+                message
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
+            params![
+                input.source_text_id,
+                input.translation_id,
+                input.finding_type,
+                input.severity,
+                input.message
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn qa_finding_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM qa_findings", [], |row| row.get(0))?)
     }
 
     pub fn source_text_count(&self) -> Result<i64> {
