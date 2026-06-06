@@ -1,0 +1,12 @@
+[package]
+name = "rpg-translator-core"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
