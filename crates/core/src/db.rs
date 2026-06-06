@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    Engine, ExportableTranslationRecord, GameSnapshotRecord, NewOccurrence, NewProject,
-    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, ProjectRecord, QaFindingRecord,
-    Result, SourceTextRecord, TranslationRecord,
+    Engine, ExportableTranslationRecord, GameSnapshotRecord, InstallRecord, NewInstallRecord,
+    NewOccurrence, NewProject, NewProviderRun, NewQaFinding, NewSourceText, NewTranslation,
+    ProjectRecord, QaFindingRecord, Result, SourceTextRecord, TranslationRecord,
 };
 
 pub struct TranslationDb {
@@ -124,6 +124,7 @@ impl TranslationDb {
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
                 game_root TEXT NOT NULL,
+                export_id INTEGER,
                 backup_manifest_path TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -133,6 +134,7 @@ impl TranslationDb {
             ",
         )?;
         self.ensure_exports_included_count_column()?;
+        self.ensure_installs_export_id_column()?;
         Ok(())
     }
 
@@ -151,6 +153,23 @@ impl TranslationDb {
                 "ALTER TABLE exports ADD COLUMN included_count INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_installs_export_id_column(&self) -> Result<()> {
+        let mut statement = self.conn.prepare("PRAGMA table_info(installs)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_export_id = false;
+        for column in columns {
+            if column? == "export_id" {
+                has_export_id = true;
+                break;
+            }
+        }
+        if !has_export_id {
+            self.conn
+                .execute("ALTER TABLE installs ADD COLUMN export_id INTEGER", [])?;
         }
         Ok(())
     }
@@ -670,6 +689,74 @@ impl TranslationDb {
             params![target_language],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn record_install(&mut self, input: &NewInstallRecord) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "
+            INSERT INTO installs (
+                project_id,
+                game_root,
+                export_id,
+                backup_manifest_path,
+                status
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
+            params![
+                input.project_id,
+                input.game_root,
+                input.export_id,
+                input.backup_manifest_path,
+                input.status
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn update_install_status(&mut self, install_id: i64, status: &str) -> Result<()> {
+        self.conn.execute(
+            "
+            UPDATE installs
+            SET status = ?2
+            WHERE id = ?1
+            ",
+            params![install_id, status],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_install_record(&self, install_id: i64) -> Result<Option<InstallRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "
+                SELECT
+                    id,
+                    project_id,
+                    game_root,
+                    export_id,
+                    backup_manifest_path,
+                    status
+                FROM installs
+                WHERE id = ?1
+                ",
+                params![install_id],
+                |row| {
+                    Ok(InstallRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        game_root: row.get(2)?,
+                        export_id: row.get(3)?,
+                        backup_manifest_path: row.get(4)?,
+                        status: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn source_text_count(&self) -> Result<i64> {

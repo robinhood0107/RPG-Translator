@@ -8,6 +8,7 @@ const { CacheKeyBuilder, LookupIndex } = require('../lookup-index');
 const { CacheLoader } = require('../cache-loader');
 const { MessageAdapter } = require('../message-adapter');
 const { RenderGuard } = require('../render-guard');
+const { RuntimeEntry } = require('../RPGTranslator');
 const { StartupToast } = require('../startup-toast');
 const { TextCodec } = require('../text-codec');
 const { WindowTextAdapter } = require('../window-text-adapter');
@@ -244,6 +245,42 @@ test('boot installs cache-only overlay without provider surfaces', async () => {
   assert.equal(root.RPGTranslatorOverlay.installed, true);
   assert.equal(root.RPGTranslatorOverlay.provider, undefined);
   assert.equal(root.RPGTranslatorOverlay.translationQueue, undefined);
+});
+
+test('RPG Maker plugin entry loads support modules in deterministic order and boots overlay', async () => {
+  const loaded = [];
+  const baseUrl = 'file:///game/js/plugins/rpg-translator/';
+  const root = {
+    Utils: { RPGMAKER_NAME: 'MZ' },
+    RPGTranslatorOverlay: {
+      Boot: {
+        async install(scope, options) {
+          loaded.push(['boot', options.baseUrl, options.engine]);
+          scope.bootOptions = options;
+          return { installed: true };
+        },
+      },
+    },
+  };
+
+  await RuntimeEntry.install(root, {
+    baseUrl,
+    loadScript: async (url) => {
+      loaded.push(url);
+    },
+  });
+
+  assert.deepEqual(loaded, [
+    `${baseUrl}text-codec.js`,
+    `${baseUrl}lookup-index.js`,
+    `${baseUrl}cache-loader.js`,
+    `${baseUrl}message-adapter.js`,
+    `${baseUrl}window-text-adapter.js`,
+    `${baseUrl}startup-toast.js`,
+    `${baseUrl}boot.js`,
+    ['boot', baseUrl, 'mz'],
+  ]);
+  assert.equal(root.bootOptions.baseUrl, baseUrl);
 });
 
 test('runtime source files do not contain provider or launcher surfaces', () => {
