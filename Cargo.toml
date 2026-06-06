@@ -13,7 +13,11 @@ repository = "https://github.com/robinhood0107/RPG-Translator"
 version = "0.1.0"
 
 [workspace.dependencies]
+hex = "0.4"
 rpg-translator-core = { path = "crates/core" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
