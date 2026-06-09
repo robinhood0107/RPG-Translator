@@ -501,6 +501,97 @@ test('orchestrator diagnostics snapshots detached and archived item lifecycle', 
   ]]);
 });
 
+test('orchestrator updates items through cache-only request contract', async () => {
+  const surface = {};
+  const lookups = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      lookups.push(request.text);
+      if (request.text === 'Fresh source') return '새 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'update',
+    text: 'Old source',
+    renderStrategy: 'window-text',
+  });
+  assert.equal(command.status, 'miss');
+
+  const updated = orchestrator.updateItem(command.itemId, {
+    sourceText: 'Fresh source',
+    contextHash: 'status-menu',
+    renderStrategy: 'window-text',
+  }, {
+    eventType: 'item.updated',
+    message: 'same slot source changed',
+  });
+  assert.equal(updated.id, command.itemId);
+  assert.equal(updated.sourceText, 'Fresh source');
+  assert.equal(updated.translationState, '');
+
+  const handle = orchestrator.requestItemTranslation(command.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  assert.equal(handle.getStatus(), 'completed');
+  assert.equal(handle.getSourceHint(), 'cache-only');
+  assert.equal(await handle.promise, '새 번역');
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.deepEqual(lookups, ['Old source', 'Fresh source']);
+  assert.equal(diagnostics.cache_hits, 1);
+  assert.equal(diagnostics.cache_misses, 1);
+  assert.equal(diagnostics.active[0].sourceText, 'Fresh source');
+  assert.equal(diagnostics.active[0].translationState, 'hit');
+  assert.equal(diagnostics.active[0].translationReceived, '새 번역');
+  assert.equal(diagnostics.renderQueue.at(-1).translatedText, '새 번역');
+  assert.deepEqual(diagnostics.recent_events.slice(-4).map((event) => [event.type, event.reason]), [
+    ['item.updated', 'same slot source changed'],
+    ['requestCacheHit', 'cache-hit'],
+    ['renderQueued', 'hit'],
+    ['requestCompleted', 'cache-only'],
+  ]);
+});
+
+test('orchestrator cache-only request records miss without provider handle', async () => {
+  const orchestrator = new TextOrchestrator({ translate: () => null }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const command = orchestrator.observeRecord({
+    adapter: 'pixi-text',
+    kind: 'PIXI.Text',
+    surface: {},
+    slotKey: 'missing',
+    text: 'Missing source',
+  });
+
+  const handle = orchestrator.requestItemTranslation(command.itemId, {
+    sourceHint: 'cache-only',
+  });
+  assert.equal(handle.getStatus(), 'miss');
+  assert.equal(handle.cancel(), false);
+  assert.equal(await handle.promise, 'Missing source');
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.cache_hits, 0);
+  assert.equal(diagnostics.cache_misses, 2);
+  assert.equal(diagnostics.active[0].translationState, 'miss');
+  assert.deepEqual(diagnostics.recent_events.slice(-2).map((event) => [event.type, event.reason]), [
+    ['requestCacheMiss', 'cache-miss'],
+    ['requestSkipped', 'cache-only-miss'],
+  ]);
+});
+
 test('orchestrator routes render commands through record subscriptions', () => {
   const surface = {};
   const routed = [];

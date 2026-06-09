@@ -112,6 +112,78 @@
       return String(record.text ?? '');
     }
 
+    updateItem(itemId, patch = {}, options = {}) {
+      const item = this.getItemById(itemId);
+      if (!item) return null;
+      const source = patch && typeof patch === 'object' ? patch : {};
+      const previousSourceText = item.sourceText;
+      if (Object.prototype.hasOwnProperty.call(source, 'text')) item.sourceText = String(source.text ?? '');
+      if (Object.prototype.hasOwnProperty.call(source, 'sourceText')) item.sourceText = String(source.sourceText ?? '');
+      if (Object.prototype.hasOwnProperty.call(source, 'contextHash')) item.contextHash = source.contextHash || null;
+      if (Object.prototype.hasOwnProperty.call(source, 'renderStrategy')) item.renderStrategy = String(source.renderStrategy || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'strategy')) item.renderStrategy = String(source.strategy || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'translationState')) item.translationState = String(source.translationState || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'translationReceived')) item.translationReceived = String(source.translationReceived || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'translation')) item.translation = String(source.translation || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'status')) item.status = String(source.status || item.state || '');
+      if (previousSourceText !== item.sourceText) {
+        item.translationState = '';
+        item.translationReceived = '';
+        item.translation = '';
+        item.lastRenderStatus = '';
+        item.generation = this.guard ? this.guard.generationFor(item.surface) : item.generation;
+      }
+      this.emit(options.eventType || 'item.updated', Object.assign({
+        reason: options.message || options.reason || 'item-updated',
+      }, item));
+      return cloneItemForDiagnostics(item);
+    }
+
+    requestItemTranslation(itemId, requestOptions = {}) {
+      const item = this.activeItems.get(String(itemId || ''));
+      if (!item) {
+        throw new Error(`[TextOrchestrator] Cannot request cache translation for unknown text item: ${itemId || '(missing id)'}`);
+      }
+      const sourceHint = String(requestOptions.sourceHint || 'cache-only');
+      const text = String(requestOptions.text ?? item.sourceText ?? '');
+      const strategy = String(requestOptions.renderStrategy || item.renderStrategy || '');
+      const lookupItem = Object.assign({}, item, { sourceText: text });
+      const translatedText = this.measure('cache.lookup.ms', () => this.lookup(lookupItem), { domain: 'runtime' });
+      if (!translatedText || translatedText === text) {
+        this.diagnosticState.cache_misses += 1;
+        item.translationState = 'miss';
+        item.sourceHint = sourceHint;
+        this.emit('requestCacheMiss', Object.assign({
+          reason: 'cache-miss',
+          status: 'miss',
+        }, item));
+        this.emit('requestSkipped', Object.assign({
+          reason: 'cache-only-miss',
+          status: 'miss',
+        }, item));
+        return createCacheOnlyHandle(text, 'miss', sourceHint);
+      }
+      this.diagnosticState.cache_hits += 1;
+      item.translationState = 'hit';
+      item.translationReceived = String(translatedText);
+      item.translation = String(translatedText);
+      item.sourceHint = sourceHint;
+      this.emit('requestCacheHit', Object.assign({
+        reason: 'cache-hit',
+        status: 'hit',
+        translatedText,
+      }, item));
+      if (requestOptions.queueRender !== false && strategy) {
+        this.queueRenderCommand(item, translatedText, 'hit');
+      }
+      this.emit('requestCompleted', Object.assign({
+        reason: sourceHint,
+        status: 'completed',
+        translatedText,
+      }, item));
+      return createCacheOnlyHandle(String(translatedText), 'completed', sourceHint);
+    }
+
     acceptRender(command, surface, currentText) {
       if (!command) return false;
       const item = this.activeItems.get(command.itemId);
@@ -227,6 +299,11 @@
 
     markSurfaceChanged(surface) {
       if (this.guard) this.guard.markSurfaceChanged(surface);
+    }
+
+    getItemById(itemId) {
+      const key = String(itemId || '');
+      return this.activeItems.get(key) || this.detachedItems.get(key) || this.archivedItems.get(key) || null;
     }
 
     diagnostics() {
@@ -584,7 +661,10 @@
       renderStrategy: stringValue(source.renderStrategy),
       state: stringValue(source.state),
       translationState: stringValue(source.translationState),
+      translationReceived: limitText(source.translationReceived),
+      translation: limitText(source.translation),
       lastRenderStatus: stringValue(source.lastRenderStatus),
+      sourceHint: stringValue(source.sourceHint),
       history: Array.isArray(source.history)
         ? source.history.map((event) => Object.assign({}, event))
         : [],
@@ -604,6 +684,17 @@
       reason: stringValue(source.reason),
       strategy: stringValue(source.strategy),
       generation: numberOrDefault(source.generation, 0),
+    };
+  }
+
+  function createCacheOnlyHandle(text, status, sourceHint) {
+    return {
+      promise: Promise.resolve(String(text ?? '')),
+      cancel: () => false,
+      setPriority: () => false,
+      getPriority: () => 0,
+      getStatus: () => String(status || ''),
+      getSourceHint: () => String(sourceHint || ''),
     };
   }
 
