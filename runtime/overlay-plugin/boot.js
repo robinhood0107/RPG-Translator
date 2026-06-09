@@ -162,9 +162,50 @@
       throw new Error(`runtime config schema_version ${schemaVersion} is unsupported`);
     }
 
+    const diagnosticsEnabled = getObjectValue(config, 'diagnostics_enabled', 'diagnosticsEnabled');
+    if (diagnosticsEnabled !== undefined && typeof diagnosticsEnabled !== 'boolean') {
+      throw new Error('runtime config diagnostics_enabled must be a boolean when present');
+    }
+
     const startupToastEnabled = getObjectValue(config, 'startup_toast_enabled', 'startupToastEnabled');
     if (startupToastEnabled !== undefined && typeof startupToastEnabled !== 'boolean') {
       throw new Error('runtime config startup_toast_enabled must be a boolean when present');
+    }
+
+    const startupToastText = getObjectValue(config, 'startup_toast_text', 'startupToastText');
+    if (startupToastText !== undefined && typeof startupToastText !== 'string') {
+      throw new Error('runtime config startup_toast_text must be a string when present');
+    }
+
+    const foresightCommandCatalog = getObjectValue(
+      config,
+      'foresight_command_catalog',
+      'foresightCommandCatalog',
+    );
+    if (foresightCommandCatalog !== undefined) {
+      validateForesightCommandCatalog(foresightCommandCatalog);
+    }
+  }
+
+  function validateForesightCommandCatalog(catalog) {
+    if (!catalog || typeof catalog !== 'object') {
+      throw new Error('runtime foresight command catalog must be an object when present');
+    }
+    const schemaVersion = getObjectValue(catalog, 'schema_version', 'schemaVersion');
+    if (Number(schemaVersion) !== 4) {
+      throw new Error('runtime foresight command catalog schema_version must be 4');
+    }
+    const eventCommands = getObjectValue(catalog, 'event_commands', 'eventCommands');
+    if (eventCommands !== undefined && !isPlainObject(eventCommands)) {
+      throw new Error('runtime foresight command catalog event_commands must be an object when present');
+    }
+    const movementRouteCommands = getObjectValue(
+      catalog,
+      'movement_route_commands',
+      'movementRouteCommands',
+    );
+    if (movementRouteCommands !== undefined && !isPlainObject(movementRouteCommands)) {
+      throw new Error('runtime foresight command catalog movement_route_commands must be an object when present');
     }
   }
 
@@ -209,6 +250,10 @@
 
   function isNonEmptyString(value) {
     return typeof value === 'string' && value.trim().length > 0;
+  }
+
+  function isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
   }
 
   function getContractValue(contract, snakeName, camelName) {

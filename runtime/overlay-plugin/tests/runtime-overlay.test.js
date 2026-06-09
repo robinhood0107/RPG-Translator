@@ -6846,6 +6846,39 @@ test('boot rejects malformed runtime manifest and config before installing adapt
       },
       error: /runtime config schema_version 99 is unsupported/,
     },
+    {
+      name: 'diagnostics flag',
+      bundle: {
+        manifest: validManifest,
+        config: Object.assign({}, validConfig, { diagnostics_enabled: 'yes' }),
+        records: [],
+      },
+      error: /runtime config diagnostics_enabled must be a boolean when present/,
+    },
+    {
+      name: 'startup toast text',
+      bundle: {
+        manifest: validManifest,
+        config: Object.assign({}, validConfig, { startup_toast_text: 123 }),
+        records: [],
+      },
+      error: /runtime config startup_toast_text must be a string when present/,
+    },
+    {
+      name: 'foresight catalog schema',
+      bundle: {
+        manifest: validManifest,
+        config: Object.assign({}, validConfig, {
+          foresight_command_catalog: {
+            schemaVersion: 3,
+            eventCommands: {},
+            movementRouteCommands: {},
+          },
+        }),
+        records: [],
+      },
+      error: /runtime foresight command catalog schema_version must be 4/,
+    },
   ];
 
   for (const testCase of cases) {
@@ -6960,6 +6993,8 @@ test('boot passes exported foresight command catalog to scanner', async () => {
       config: {
         startup_toast_enabled: false,
         foresight_command_catalog: {
+          schemaVersion: 4,
+          eventCommands: {},
           movementRouteCommands: {
             999: {
               label: 'Custom Route Advance',
