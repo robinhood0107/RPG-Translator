@@ -947,6 +947,40 @@ test('message adapter exposes processCompleteMessage for completed payload trans
   assert.equal(orchestrator.diagnostics().active_items, 1);
 });
 
+test('message adapter falls back to processCharacter completed text capture', () => {
+  const requests = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['Fallback JP'] },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.processCharacter = function processCharacter(textState) {
+    textState.index = textState.text.length;
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      requests.push(request.text);
+      if (request.text === 'Fallback JP') return 'Fallback KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  const textState = { text: 'Fallback JP', index: 0 };
+  messageWindow.processCharacter(textState);
+  messageWindow.processCharacter(textState);
+
+  assert.deepEqual(requests, ['Fallback JP']);
+  assert.deepEqual(root.$gameMessage._texts, ['Fallback KO']);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+});
+
 test('foresight scanner predicts message blocks choices and common events through cache only', () => {
   const requests = [];
   const index = {

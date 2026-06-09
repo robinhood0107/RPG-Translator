@@ -3,6 +3,7 @@
   const STATE_KEY = '__rpgTranslatorMessageAdapterState';
   const INSTALL_TOKEN = 'rpg-translator-message-v2';
   const CLEAR_TOKEN = 'rpg-translator-message-clear-v1';
+  const PROCESS_TOKEN = 'rpg-translator-message-process-v1';
 
   class MessageAdapter {
     static install(scope, translator) {
@@ -17,6 +18,11 @@
         const message = scope.$gameMessage;
         if (message && Array.isArray(message._texts)) {
           const originalText = readMessageBlock(message);
+          const state = ensureState(this);
+          state.startMessageHandled = true;
+          state.processCharacterText = '';
+          state.processCharacterTextState = null;
+          state.processCharacterCompletedState = null;
           const translated = applyMessageTranslation(translator, scope, originalText, this);
           if (translated && translated !== originalText) {
             message._texts = translatedLines(translated, originalText, this);
@@ -38,6 +44,7 @@
         }
         return translated;
       };
+      installProcessCharacterFallback(prototype, scope, translator, trackedWindows);
       prototype.__rpgTranslatorMessageInstalled = INSTALL_TOKEN;
       wrapGameMessageClear(scope, translator, trackedWindows);
       return true;
@@ -89,6 +96,57 @@
       state.surfaceOwner = result.surfaceOwner;
     }
     return translated;
+  }
+
+  function installProcessCharacterFallback(prototype, scope, translator, trackedWindows) {
+    if (!prototype || typeof prototype.processCharacter !== 'function') return false;
+    if (prototype.processCharacter.__rpgTranslatorMessageProcess === PROCESS_TOKEN) return true;
+    const originalProcessCharacter = prototype.processCharacter;
+    prototype.processCharacter = function processCharacterWithMessageCapture(textState) {
+      trackedWindows.add(this);
+      const state = ensureState(this);
+      const sourceText = textState && typeof textState.text === 'string'
+        ? String(textState.text)
+        : '';
+      if (!sourceText || state.startMessageHandled) {
+        return originalProcessCharacter.call(this, textState);
+      }
+      if (state.processCharacterTextState !== textState) {
+        state.processCharacterText = sourceText;
+        state.processCharacterTextState = textState;
+      }
+
+      const result = originalProcessCharacter.call(this, textState);
+      if (textState && typeof textState.text === 'string' && Number(textState.index) >= textState.text.length) {
+        completeProcessCharacterFallback(scope, translator, this, state, textState);
+      }
+      return result;
+    };
+    prototype.processCharacter.__rpgTranslatorOriginal = originalProcessCharacter;
+    prototype.processCharacter.__rpgTranslatorMessageProcess = PROCESS_TOKEN;
+    return true;
+  }
+
+  function completeProcessCharacterFallback(scope, translator, windowInstance, state, textState) {
+    if (!state || state.processCharacterCompletedState === textState) return;
+    const sourceText = state.processCharacterText || (textState && textState.text) || '';
+    state.processCharacterText = '';
+    state.processCharacterTextState = null;
+    if (!String(sourceText || '').trim()) return;
+    if (windowInstance && typeof windowInstance.processCompleteMessage === 'function') {
+      windowInstance.processCompleteMessage({
+        visible: sourceText,
+        resolved: sourceText,
+        translationSource: sourceText,
+      }, state.windowId);
+      state.processCharacterCompletedState = textState;
+      return;
+    }
+    const translated = applyMessageTranslation(translator, scope, sourceText, windowInstance);
+    if (translated && translated !== sourceText && scope.$gameMessage && Array.isArray(scope.$gameMessage._texts)) {
+      scope.$gameMessage._texts = translatedLines(translated, sourceText, windowInstance);
+    }
+    state.processCharacterCompletedState = textState;
   }
 
   function translateText(translator, scope, text, surface) {
@@ -196,6 +254,10 @@
     state.slotKey = '';
     state.textOwner = '';
     state.surfaceOwner = '';
+    state.startMessageHandled = false;
+    state.processCharacterText = '';
+    state.processCharacterTextState = null;
+    state.processCharacterCompletedState = null;
     return true;
   }
 
@@ -210,6 +272,10 @@
         slotKey: '',
         textOwner: '',
         surfaceOwner: '',
+        startMessageHandled: false,
+        processCharacterText: '',
+        processCharacterTextState: null,
+        processCharacterCompletedState: null,
       };
     }
     return windowInstance[STATE_KEY];
