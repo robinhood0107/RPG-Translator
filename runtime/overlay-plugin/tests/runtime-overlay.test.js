@@ -1333,6 +1333,45 @@ test('message adapter prefers native message replay when engine hooks are availa
   assert.equal(messageWindow._lineShowFast, true);
 });
 
+test('message adapter converts escapes while preserving origin-aware hard breaks', () => {
+  const requests = [];
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      config: { gameMessage: { originAwareLineBreaks: true } },
+    },
+    $gameMessage: {
+      _texts: ['Value \\V[1]', 'Second line'],
+    },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.convertEscapeCharacters = function convertEscapeCharacters(text) {
+    return String(text).replace(/\\V\[1\]/g, '42').replace(/\n/g, ' ');
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      requests.push(request.text);
+      if (request.text === 'Value 42\nSecond line') return '값 42\n두 번째 줄';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.startMessage();
+
+  assert.deepEqual(requests, ['Value 42\nSecond line']);
+  assert.deepEqual(root.$gameMessage._texts, ['값 42', '두 번째 줄']);
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {

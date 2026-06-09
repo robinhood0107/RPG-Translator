@@ -5,6 +5,8 @@
   const CLEAR_TOKEN = 'rpg-translator-message-clear-v1';
   const PROCESS_TOKEN = 'rpg-translator-message-process-v1';
   const LIFECYCLE_TOKEN = 'rpg-translator-message-lifecycle-v1';
+  const BREAK_SENTINEL_PREFIX = '\uE000RPGT_BR_';
+  const BREAK_SENTINEL_SUFFIX = '_RPGT\uE001';
 
   class MessageAdapter {
     static install(scope, translator) {
@@ -18,7 +20,7 @@
         retireMessageWindow(translator, this, 'message-session-replaced');
         const message = scope.$gameMessage;
         if (message && Array.isArray(message._texts)) {
-          const originalText = readMessageBlock(message);
+          const originalText = readResolvedMessageBlock(scope, message, this);
           const state = ensureState(this);
           state.startMessageHandled = true;
           state.processCharacterText = '';
@@ -62,6 +64,115 @@
       return String(message.allText() || '');
     }
     return message._texts.map((text) => String(text || '')).join('\n');
+  }
+
+  function readResolvedMessageBlock(scope, message, windowInstance) {
+    const rawText = readMessageBlock(message);
+    if (!windowInstance || typeof windowInstance.convertEscapeCharacters !== 'function') return rawText;
+    if (!resolveOriginAwareLineBreaks(scope)) {
+      try { return String(windowInstance.convertEscapeCharacters(rawText) || ''); } catch (_) { return rawText; }
+    }
+    const breakMap = createBreakMap(rawText);
+    try {
+      const converted = String(windowInstance.convertEscapeCharacters(breakMap.markedText) || '');
+      return normalizeConvertedMessageText(converted, breakMap).text;
+    } catch (_) {
+      return rawText;
+    }
+  }
+
+  function resolveOriginAwareLineBreaks(scope) {
+    const settings = overlay(scope).config || overlay(scope).settings || {};
+    const gameMessage = settings && settings.gameMessage && typeof settings.gameMessage === 'object'
+      ? settings.gameMessage
+      : {};
+    const raw = gameMessage.originAwareLineBreaks;
+    return raw === true || (typeof raw === 'string' && raw.trim().toLowerCase() === 'true');
+  }
+
+  function createBreakMap(rawText) {
+    const breaks = [];
+    const markedText = String(rawText || '').replace(/\r\n?|\n/g, (value) => {
+      const token = `${BREAK_SENTINEL_PREFIX}${breaks.length}${BREAK_SENTINEL_SUFFIX}`;
+      breaks.push({ token, value });
+      return token;
+    });
+    return {
+      markedText,
+      breaks,
+      hadHardMessageBreaks: breaks.length > 0,
+    };
+  }
+
+  function normalizeConvertedMessageText(convertedText, breakMap) {
+    if (!breakMap || !Array.isArray(breakMap.breaks)) {
+      return { reliable: false, text: String(convertedText || '') };
+    }
+    for (const item of breakMap.breaks) {
+      if (!item || countTokenOccurrences(convertedText, item.token) !== 1) {
+        return { reliable: false, text: String(convertedText || '') };
+      }
+    }
+    let text = collapseGameMessageSoftBreaks(convertedText);
+    for (const item of breakMap.breaks) {
+      text = text.replace(item.token, item.value);
+    }
+    return { reliable: true, text };
+  }
+
+  function countTokenOccurrences(text, token) {
+    if (!token) return 0;
+    let count = 0;
+    let index = String(text || '').indexOf(token);
+    while (index !== -1) {
+      count += 1;
+      index = String(text || '').indexOf(token, index + token.length);
+    }
+    return count;
+  }
+
+  function collapseGameMessageSoftBreaks(text) {
+    const source = String(text || '');
+    return source
+      .replace(/[ \t\v]*\r?\n[ \t\v]*/g, (match, offset) => {
+        const before = previousNonHorizontalWhitespace(source, offset);
+        const after = nextNonHorizontalWhitespace(source, offset + match.length);
+        return shouldJoinSoftBreakWithoutSpace(before, after) ? '' : ' ';
+      })
+      .replace(/[ \t\v]{2,}/g, ' ');
+  }
+
+  function previousNonHorizontalWhitespace(text, index) {
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const character = text.charAt(cursor);
+      if (character !== ' ' && character !== '\t' && character !== '\v') return character;
+    }
+    return '';
+  }
+
+  function nextNonHorizontalWhitespace(text, index) {
+    for (let cursor = index; cursor < text.length; cursor += 1) {
+      const character = text.charAt(cursor);
+      if (character !== ' ' && character !== '\t' && character !== '\v') return character;
+    }
+    return '';
+  }
+
+  function shouldJoinSoftBreakWithoutSpace(before, after) {
+    if (!before || !after) return true;
+    if (before.indexOf(BREAK_SENTINEL_SUFFIX) !== -1 || after.indexOf(BREAK_SENTINEL_PREFIX) !== -1) return true;
+    return isCjkCharacter(before) && isCjkCharacter(after);
+  }
+
+  function isCjkCharacter(character) {
+    const code = String(character || '').codePointAt(0);
+    return Number.isFinite(code) && (
+      (code >= 0x1100 && code <= 0x11ff)
+      || (code >= 0x2e80 && code <= 0xa4cf)
+      || (code >= 0xac00 && code <= 0xd7af)
+      || (code >= 0xf900 && code <= 0xfaff)
+      || (code >= 0xff01 && code <= 0xff60)
+    );
   }
 
   function readCompletedMessage(message) {
