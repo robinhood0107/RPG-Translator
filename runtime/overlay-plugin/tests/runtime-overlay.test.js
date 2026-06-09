@@ -638,6 +638,70 @@ test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG
   ]);
 });
 
+test('bitmap text adapter aggregates same-line fragments and retires on mutation', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Hello World') return '안녕 세계';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 320;
+      this.height = 80;
+      this.fontSize = 20;
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['frame']);
+      },
+    },
+  };
+  root.Bitmap.prototype.textWidth = function textWidth(text) {
+    return String(text).length * 10;
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+  root.Bitmap.prototype.clearRect = function clearRect(x, y, width, height) {
+    calls.push(['clearRect', x, y, width, height]);
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+  bitmap.drawText('Hello ', 0, 0, 80, 24, 'left');
+  bitmap.drawText('World', 61, 0, 80, 24, 'left');
+
+  assert.deepEqual(calls, [
+    ['drawText', 'Hello ', 0, 0, 80, 24, 'left'],
+    ['drawText', 'World', 61, 0, 80, 24, 'left'],
+  ]);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(requests, ['Hello World']);
+  assert.deepEqual(calls.slice(2), [
+    ['frame'],
+    ['drawText', '안녕 세계', 0, 0, 111, 24, 'left'],
+  ]);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  bitmap.clearRect(0, 0, 160, 24);
+
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+});
+
 test('pixi text adapter retires removed objects and restores translated text scale', () => {
   const index = {
     translate({ text }) {
