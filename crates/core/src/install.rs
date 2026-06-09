@@ -10,12 +10,12 @@ use crate::{
 };
 
 const INSTALL_SCHEMA_VERSION: u32 = 1;
-const SUPPORT_DIRECTORY: &str = "rpg-translator";
-const PLUGIN_ENTRY_FILE: &str = "RPGTranslator.js";
+pub(crate) const SUPPORT_DIRECTORY: &str = "rpg-translator";
+pub(crate) const PLUGIN_ENTRY_FILE: &str = "RPGTranslator.js";
 const PLUGIN_ENTRY_NAME: &str = "RPGTranslator";
 const INSTALL_MANIFEST_FILE: &str = "install-manifest.json";
 const PLUGINS_BACKUP_FILE: &str = "plugins.js.backup";
-const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
+pub(crate) const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
     "text-codec.js",
     "runtime-miss-logger.js",
     "lookup-index.js",
@@ -32,7 +32,7 @@ const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
     "startup-toast.js",
     "boot.js",
 ];
-const RUNTIME_SUPPORT_FILES: &[&str] = &[
+pub(crate) const RUNTIME_SUPPORT_FILES: &[&str] = &[
     "text-codec.js",
     "runtime-miss-logger.js",
     "lookup-index.js",

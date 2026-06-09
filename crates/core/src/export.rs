@@ -71,6 +71,8 @@ pub struct OverlayConfig {
     pub diagnostics_enabled: bool,
     pub startup_toast_enabled: bool,
     pub startup_toast_text: String,
+    #[serde(default)]
+    pub runtime_load_contract: RuntimeLoadContract,
     pub foresight_command_catalog: ForesightCommandCatalog,
 }
 
@@ -82,7 +84,36 @@ impl OverlayConfig {
             diagnostics_enabled: false,
             startup_toast_enabled: true,
             startup_toast_text: STARTUP_TOAST_TEXT.to_string(),
+            runtime_load_contract: RuntimeLoadContract::runtime_default(),
             foresight_command_catalog: ForesightCommandCatalog::runtime_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeLoadContract {
+    pub schema_version: u32,
+    pub support_directory: String,
+    pub plugin_entry_file: String,
+    pub script_load_order: Vec<String>,
+    pub required_runtime_files: Vec<String>,
+}
+
+impl RuntimeLoadContract {
+    #[must_use]
+    pub fn runtime_default() -> Self {
+        let mut required_runtime_files = vec![crate::install::PLUGIN_ENTRY_FILE.to_string()];
+        required_runtime_files.extend(
+            crate::install::RUNTIME_SUPPORT_FILES
+                .iter()
+                .map(|file| (*file).to_string()),
+        );
+        Self {
+            schema_version: EXPORT_SCHEMA_VERSION,
+            support_directory: crate::install::SUPPORT_DIRECTORY.to_string(),
+            plugin_entry_file: crate::install::PLUGIN_ENTRY_FILE.to_string(),
+            script_load_order: string_vec(crate::install::RUNTIME_SCRIPT_LOAD_ORDER),
+            required_runtime_files,
         }
     }
 }
@@ -345,6 +376,7 @@ impl ExportBuilder {
                 config.schema_version
             )));
         }
+        validate_runtime_load_contract(&config.runtime_load_contract)?;
         if config.foresight_command_catalog.schema_version != 4 {
             return Err(Error::invalid_input(format!(
                 "unsupported foresight command catalog schema version {}",
@@ -397,6 +429,45 @@ impl ExportBuilder {
             manifest_hash: sha256_hex(manifest_text.as_bytes()),
         })
     }
+}
+
+fn validate_runtime_load_contract(contract: &RuntimeLoadContract) -> Result<()> {
+    if contract.schema_version != EXPORT_SCHEMA_VERSION {
+        return Err(Error::invalid_input(format!(
+            "runtime load contract schema version {} is unsupported",
+            contract.schema_version
+        )));
+    }
+    if contract.support_directory != crate::install::SUPPORT_DIRECTORY {
+        return Err(Error::invalid_input(format!(
+            "runtime load contract support_directory must be {}",
+            crate::install::SUPPORT_DIRECTORY
+        )));
+    }
+    if contract.plugin_entry_file != crate::install::PLUGIN_ENTRY_FILE {
+        return Err(Error::invalid_input(format!(
+            "runtime load contract plugin_entry_file must be {}",
+            crate::install::PLUGIN_ENTRY_FILE
+        )));
+    }
+    let expected_load_order = string_vec(crate::install::RUNTIME_SCRIPT_LOAD_ORDER);
+    if contract.script_load_order != expected_load_order {
+        return Err(Error::invalid_input(
+            "runtime load contract script_load_order does not match the cache-only runtime",
+        ));
+    }
+    let mut expected_required_files = vec![crate::install::PLUGIN_ENTRY_FILE.to_string()];
+    expected_required_files.extend(
+        crate::install::RUNTIME_SUPPORT_FILES
+            .iter()
+            .map(|file| (*file).to_string()),
+    );
+    if contract.required_runtime_files != expected_required_files {
+        return Err(Error::invalid_input(
+            "runtime load contract required_runtime_files does not match the cache-only runtime",
+        ));
+    }
+    Ok(())
 }
 
 fn runtime_cache_record(
@@ -562,4 +633,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+fn string_vec(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }

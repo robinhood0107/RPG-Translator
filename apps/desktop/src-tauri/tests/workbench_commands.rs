@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use rpg_translator_core::{
     BatchCheckpoint, CheckpointWriter, Engine, GameLayoutKind, NewOccurrence, NewProject,
-    NewSourceText, NewTranslation, NewTranslationSpeedSample, ScanProgressEvent, TextCodec,
-    TranslateProgressEvent, TranslateProgressSnapshot, TranslationDb, WorkbenchSettingsUpdate,
-    translation_prompt_hash,
+    NewSourceText, NewTranslation, NewTranslationSpeedSample, OverlayConfig, ScanProgressEvent,
+    TextCodec, TranslateProgressEvent, TranslateProgressSnapshot, TranslationDb,
+    WorkbenchSettingsUpdate, translation_prompt_hash,
 };
 use rpg_translator_desktop::commands::{
     diagnostics::{self, DiagnosticsRequest},
@@ -157,7 +157,7 @@ fn make_export_bundle(root: &Path) {
     );
     write_text(
         &root.join("overlay-config.json"),
-        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중","foresight_command_catalog":{"schemaVersion":4,"eventCommands":{},"movementRouteCommands":{}}}"#,
+        &serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
     );
     write_text(
         &root.join("cache.jsonl"),

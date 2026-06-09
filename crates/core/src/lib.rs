@@ -40,7 +40,7 @@ pub use domain::{
 pub use error::{Error, Result};
 pub use export::{
     ExportBuilder, ExportPolicy, ExportReport, ForesightCommandCatalog, ForesightCommandMetadata,
-    OverlayConfig, RuntimeCacheRecord, RuntimeExportManifest,
+    OverlayConfig, RuntimeCacheRecord, RuntimeExportManifest, RuntimeLoadContract,
 };
 pub use install::{
     InstallManifest, InstallOptions, InstallReport, InstalledFileRecord, Installer,

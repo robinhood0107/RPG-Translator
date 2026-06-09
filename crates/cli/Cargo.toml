@@ -13,6 +13,7 @@ path = "src/main.rs"
 rpg-translator-core.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

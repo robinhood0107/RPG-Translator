@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use rpg_translator_core::OverlayConfig;
 use tempfile::tempdir;
 
 fn write_text(path: &Path, text: &str) {
@@ -23,7 +24,7 @@ fn make_export_bundle(root: &Path) {
     );
     write_text(
         &root.join("overlay-config.json"),
-        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중","foresight_command_catalog":{"schemaVersion":4,"eventCommands":{},"movementRouteCommands":{}}}"#,
+        &serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
     );
     write_text(
         &root.join("cache.jsonl"),
