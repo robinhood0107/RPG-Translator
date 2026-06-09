@@ -151,6 +151,22 @@ fn adaptive_tuning_uses_speed_history_for_initial_batch_and_delay() {
 }
 
 #[test]
+fn adaptive_tuning_uses_real_prompt_benchmark_samples() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let benchmark_samples = vec![
+        speed_sample("benchmark", 16, 2_000),
+        speed_sample("benchmark", 16, 2_500),
+        speed_sample("benchmark", 16, 3_000),
+    ];
+
+    let tuning = adaptive_translation_tuning_from_samples(&benchmark_samples, 8, 4096, spacing);
+
+    assert_eq!(tuning.max_items_per_batch, 32);
+    assert_eq!(tuning.provider_spacing.base_success_spacing_ms, 1250);
+    assert!(tuning.decision_reason.contains("accelerating"));
+}
+
+#[test]
 fn fake_provider_success_persists_batch_translations() {
     let mut db = TranslationDb::open_in_memory().expect("open db");
     db.migrate().expect("migrate db");

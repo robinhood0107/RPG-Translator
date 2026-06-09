@@ -416,7 +416,7 @@ pub fn adaptive_translation_tuning_from_samples(
     let mut spacing = default_spacing;
     let success_samples = samples
         .iter()
-        .filter(|sample| sample.status.starts_with("success") && sample.total_elapsed_ms > 0)
+        .filter(|sample| is_success_speed_sample(sample) && sample.total_elapsed_ms > 0)
         .collect::<Vec<_>>();
     if success_samples.is_empty() {
         let success_floor_ms = spacing.base_success_spacing_ms;
@@ -433,7 +433,7 @@ pub fn adaptive_translation_tuning_from_samples(
 
     let failure_count = samples
         .iter()
-        .filter(|sample| !sample.status.starts_with("success"))
+        .filter(|sample| !is_success_speed_sample(sample))
         .count();
     let failure_rate = failure_count as f64 / samples.len().max(1) as f64;
     let p95_ms = percentile_i64(
@@ -486,6 +486,10 @@ pub fn adaptive_translation_tuning_from_samples(
             spacing.base_success_spacing_ms
         ),
     }
+}
+
+fn is_success_speed_sample(sample: &TranslationSpeedSample) -> bool {
+    sample.status.starts_with("success") || sample.status == "benchmark"
 }
 
 fn suggested_token_budget(

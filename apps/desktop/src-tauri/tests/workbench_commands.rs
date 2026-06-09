@@ -1333,6 +1333,24 @@ fn provider_benchmark_uses_real_prompt_and_does_not_write_translation_state() {
                 .expect("job lookup")
                 .is_none()
         );
+        let prompt_hash = translation_prompt_hash("en", "ko", "Custom RPG prompt");
+        let samples = db
+            .recent_translation_speed_samples(Some("fixture-model"), Some(&prompt_hash), 10)
+            .expect("benchmark speed samples");
+        assert_eq!(
+            samples.len(),
+            5,
+            "only measured benchmark runs should seed adaptive speed history"
+        );
+        assert!(samples.iter().all(|sample| sample.status == "benchmark"));
+        assert!(samples.iter().all(|sample| sample.lane == "benchmark"));
+        assert!(samples.iter().all(|sample| sample.provider_run_id > 0));
+        assert!(samples.iter().all(|sample| sample.item_count == 1));
+        assert!(samples.iter().all(|sample| {
+            sample
+                .adaptive_decision_reason
+                .contains("real prompt benchmark")
+        }));
     });
 }
 

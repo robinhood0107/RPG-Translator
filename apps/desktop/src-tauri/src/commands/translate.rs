@@ -8,16 +8,16 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use rpg_translator_core::{
     BatchFailureDetail, BatchTranslator, BatchTranslatorConfig, Error, LocalOpenAiConfig,
-    LocalOpenAiProvider, LocalProviderTransport, ProviderBatchItem, ProviderBatchRequest,
-    ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
-    ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result, TextCodec,
-    TranslateProgressEvent, TranslateProgressSnapshot, adaptive_translation_tuning_from_samples,
-    translation_prompt_hash,
+    LocalOpenAiProvider, LocalProviderTransport, NewProviderRun, NewTranslationSpeedSample,
+    ProviderBatchItem, ProviderBatchRequest, ProviderClient, ProviderRequestSpacingConfig,
+    ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result,
+    TextCodec, TranslateProgressEvent, TranslateProgressSnapshot,
+    adaptive_translation_tuning_from_samples, translation_prompt_hash,
 };
 
 use super::shared::{
@@ -436,40 +436,163 @@ pub async fn benchmark_provider_translation_speed(
     request: ProviderSpeedBenchmarkRequest,
 ) -> CommandResult<ProviderSpeedBenchmarkReport> {
     run_blocking(move || {
-        let db = open_db_existing(&request.db_path)?;
+        let mut db = open_db_existing(&request.db_path)?;
+        let source_language = request.source_language.clone();
+        let target_language = request.target_language.clone();
+        let system_prompt = request.system_prompt.clone();
+        let requested_batch_size = request.batch_size.unwrap_or(16).max(1);
         let items = benchmark_provider_items(
             &db,
             request.project_id,
-            &request.source_language,
-            request.batch_size.unwrap_or(16),
+            &source_language,
+            requested_batch_size,
         )?;
         let mut provider = LocalOpenAiProvider::new(
             LocalOpenAiConfig {
                 base_url: request.base_url,
                 model: request.model,
-                source_language: request.source_language,
-                target_language: request.target_language,
-                system_prompt: request.system_prompt,
+                source_language: source_language.clone(),
+                target_language: target_language.clone(),
+                system_prompt: system_prompt.clone(),
                 temperature: request.temperature.or(Some(0.0)),
                 top_p: request.top_p,
                 max_output_tokens: request.max_output_tokens,
             },
             ReqwestTransport::default(),
         )?;
-        Ok(ProviderSpeedBenchmark::run(
+        let resolved_model = provider.model_name().map(str::to_string);
+        let prompt_hash =
+            translation_prompt_hash(&source_language, &target_language, &system_prompt);
+        let provider_run_id = db.start_provider_run(&NewProviderRun {
+            provider: "local-openai-compatible-benchmark".to_string(),
+            model: resolved_model.clone(),
+            request_settings_json: json!({
+                "mode": "real_prompt_benchmark",
+                "source_language": source_language,
+                "target_language": target_language,
+                "batch_size": requested_batch_size,
+                "warmup_runs": request.warmup_runs.unwrap_or(1),
+                "measured_runs": request.measured_runs.unwrap_or(5),
+            })
+            .to_string(),
+        })?;
+        let spacing = ProviderRequestSpacingConfig::stable();
+        let benchmark_result = ProviderSpeedBenchmark::run(
             &mut provider,
             &ProviderBatchRequest {
-                items,
+                items: items.clone(),
                 instruction: None,
             },
             ProviderSpeedBenchmarkConfig {
                 warmup_runs: request.warmup_runs.unwrap_or(1),
                 measured_runs: request.measured_runs.unwrap_or(5),
             },
-            &ProviderRequestSpacingConfig::stable(),
-        )?)
+            &spacing,
+        );
+        match benchmark_result {
+            Ok(report) => {
+                if let Err(error) = persist_benchmark_speed_samples(
+                    provider_run_id,
+                    &mut db,
+                    BenchmarkSpeedSamplePersistence {
+                        report: &report,
+                        items: &items,
+                        prompt_hash: &prompt_hash,
+                        model: resolved_model.as_deref(),
+                        effective_batch_size: requested_batch_size,
+                        spacing: &spacing,
+                    },
+                ) {
+                    let failure_detail = error.to_string();
+                    let _ =
+                        db.finish_provider_run(provider_run_id, "failed", Some(&failure_detail));
+                    return Err(error.into());
+                }
+                db.finish_provider_run(provider_run_id, "completed", None)?;
+                Ok(report)
+            }
+            Err(error) => {
+                let failure_detail = error.to_string();
+                let _ = db.finish_provider_run(provider_run_id, "failed", Some(&failure_detail));
+                Err(error.into())
+            }
+        }
     })
     .await
+}
+
+struct BenchmarkSpeedSamplePersistence<'a> {
+    report: &'a ProviderSpeedBenchmarkReport,
+    items: &'a [ProviderBatchItem],
+    prompt_hash: &'a str,
+    model: Option<&'a str>,
+    effective_batch_size: usize,
+    spacing: &'a ProviderRequestSpacingConfig,
+}
+
+fn persist_benchmark_speed_samples(
+    provider_run_id: i64,
+    db: &mut rpg_translator_core::TranslationDb,
+    context: BenchmarkSpeedSamplePersistence<'_>,
+) -> Result<()> {
+    let estimated_token_count = context
+        .items
+        .iter()
+        .map(|item| estimate_provider_tokens(&item.text))
+        .sum::<usize>();
+    for run in &context.report.runs {
+        let success_delay_ms = benchmark_success_delay_ms(run.latency_ms, context.spacing);
+        db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+            provider_run_id,
+            batch_index: usize_to_i64(run.run_index),
+            lane: "benchmark".to_string(),
+            item_count: usize_to_i64(run.item_count),
+            char_count: usize_to_i64(run.char_count),
+            estimated_token_count: usize_to_i64(estimated_token_count),
+            request_elapsed_ms: u64_to_i64(run.latency_ms),
+            success_delay_ms: u64_to_i64(success_delay_ms),
+            total_elapsed_ms: u64_to_i64(run.latency_ms.saturating_add(success_delay_ms)),
+            status: "benchmark".to_string(),
+            failure_type: None,
+            effective_batch_size: usize_to_i64(context.effective_batch_size),
+            adaptive_decision_reason: format!(
+                "adaptive: real prompt benchmark run {} seeded speed history",
+                run.run_index
+            ),
+            model: context.model.map(str::to_string),
+            prompt_hash: context.prompt_hash.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+fn benchmark_success_delay_ms(
+    request_elapsed_ms: u64,
+    spacing: &ProviderRequestSpacingConfig,
+) -> u64 {
+    if spacing.base_success_spacing_ms == 0 && spacing.min_success_spacing_ms == 0 {
+        return 0;
+    }
+    let floor = spacing
+        .base_success_spacing_ms
+        .max(spacing.min_success_spacing_ms);
+    request_elapsed_ms
+        .saturating_mul(20)
+        .saturating_div(100)
+        .max(floor)
+        .min(spacing.max_success_spacing_ms.max(floor))
+}
+
+fn estimate_provider_tokens(text: &str) -> usize {
+    ((text.chars().count() as f64) * 1.15).ceil() as usize
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
 }
 
 fn benchmark_provider_items(
