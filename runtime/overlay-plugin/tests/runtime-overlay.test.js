@@ -978,6 +978,61 @@ test('orchestrator validates record-backed render subscriptions and reports deci
   ]);
 });
 
+test('orchestrator contains record-backed render missing-record callback errors', () => {
+  const records = new Map();
+  const routed = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Missing render target') return '없는 렌더 대상';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'missing-render-target',
+    text: 'Missing render target',
+    renderStrategy: 'window-text',
+  });
+
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    onRenderQueued() {
+      routed.push(['queued']);
+      return true;
+    },
+    onRenderRejected(record, decision, route) {
+      routed.push(['rejected', record && record.name || 'missing', decision.reason, route.commandId]);
+    },
+    onMissingRecord() {
+      throw new Error('missing callback exploded');
+    },
+  });
+
+  orchestrator.requestItemTranslation(command.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  unsubscribe();
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.deepEqual(routed, [
+    ['rejected', 'missing', 'missing-adapter-record', command.id],
+  ]);
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.render_queued.missing'
+    && event.itemId === command.itemId
+  )));
+});
+
 test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', () => {
   const orchestrator = new TextOrchestrator({
     translate(request) {

@@ -580,7 +580,11 @@
         const decision = createSubscriptionRenderDecision('rejected', 'missing-adapter-record', command, route);
         this.dispatchSubscriptionRenderRejected(source, null, decision, route);
         if (typeof source.onMissingRecord === 'function') {
-          source.onMissingRecord(Object.assign({}, route, { reason: decision.reason }), { type: 'item.render_queued' }, command);
+          try {
+            source.onMissingRecord(Object.assign({}, route, { reason: decision.reason }), { type: 'item.render_queued' }, command);
+          } catch (error) {
+            this.recordAdapterCallbackError('render_queued.missing', command.itemId || route.recordId, error);
+          }
         }
         return false;
       }
