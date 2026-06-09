@@ -82,6 +82,15 @@
       return text;
     }
 
+    const owner = `${adapterName}:${state.objectId}`;
+    const slotKey = `pixi:${state.objectId}:text`;
+    if (translator && typeof translator.claimSurface === 'function' && !translator.claimSurface(surface, owner)) {
+      return text;
+    }
+    if (translator && typeof translator.claimText === 'function' && !translator.claimText(slotKey, owner)) {
+      return text;
+    }
+
     const request = {
       engine: overlay(scope).engine || 'unknown',
       sourceLanguage: overlay(scope).sourceLanguage,
@@ -91,7 +100,7 @@
       surface,
       adapter: adapterName,
       kind: 'text-setter',
-      slotKey: 'text',
+      slotKey,
       generation: state.revision,
       visible: state.visible,
       screenState: state.screenState,

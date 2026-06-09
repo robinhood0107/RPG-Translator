@@ -575,6 +575,45 @@ test('pixi text adapter retires removed objects and restores translated text sca
   assert.equal(orchestrator.diagnostics().archived_items, 1);
 });
 
+test('pixi text adapter leaves native text when another owner claimed the surface', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Pixi JP') return 'Pixi KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+    },
+    PIXI: {},
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const pixiText = new root.PIXI.Text('');
+  assert.equal(orchestrator.claimSurface(pixiText, 'window-text'), true);
+
+  pixiText.text = 'Pixi JP';
+
+  assert.equal(pixiText.text, 'Pixi JP');
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+});
+
 test('boot installs cache-only overlay without provider surfaces', async () => {
   const root = {
     document: { body: null },
