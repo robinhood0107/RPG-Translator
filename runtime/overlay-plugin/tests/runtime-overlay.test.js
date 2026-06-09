@@ -481,6 +481,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}text-codec.js`,
     `${baseUrl}runtime-miss-logger.js`,
     `${baseUrl}lookup-index.js`,
+    `${baseUrl}render-guard.js`,
     `${baseUrl}cache-loader.js`,
     `${baseUrl}message-adapter.js`,
     `${baseUrl}window-text-adapter.js`,

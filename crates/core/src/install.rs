@@ -15,14 +15,31 @@ const PLUGIN_ENTRY_FILE: &str = "RPGTranslator.js";
 const PLUGIN_ENTRY_NAME: &str = "RPGTranslator";
 const INSTALL_MANIFEST_FILE: &str = "install-manifest.json";
 const PLUGINS_BACKUP_FILE: &str = "plugins.js.backup";
+const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
+    "text-codec.js",
+    "runtime-miss-logger.js",
+    "lookup-index.js",
+    "render-guard.js",
+    "cache-loader.js",
+    "message-adapter.js",
+    "window-text-adapter.js",
+    "bitmap-text-adapter.js",
+    "sprite-text-adapter.js",
+    "pixi-text-adapter.js",
+    "startup-toast.js",
+    "boot.js",
+];
 const RUNTIME_SUPPORT_FILES: &[&str] = &[
     "text-codec.js",
     "runtime-miss-logger.js",
     "lookup-index.js",
+    "render-guard.js",
     "cache-loader.js",
     "message-adapter.js",
     "window-text-adapter.js",
-    "render-guard.js",
+    "bitmap-text-adapter.js",
+    "sprite-text-adapter.js",
+    "pixi-text-adapter.js",
     "startup-toast.js",
     "boot.js",
 ];
@@ -63,11 +80,21 @@ pub struct InstallManifest {
     pub export_id: Option<i64>,
     pub game_root: String,
     pub layout: String,
+    #[serde(default)]
+    pub support_directory: String,
+    #[serde(default)]
+    pub plugin_entry_file: String,
     pub plugin_entry_name: String,
     pub plugin_entry_status: bool,
     pub plugins_file: String,
     pub plugins_backup_path: String,
     pub plugins_backup_sha256: String,
+    #[serde(default)]
+    pub runtime_script_load_order: Vec<String>,
+    #[serde(default)]
+    pub runtime_support_files: Vec<String>,
+    #[serde(default)]
+    pub required_asset_files: Vec<String>,
     pub installed_files: Vec<InstalledFileRecord>,
 }
 
@@ -113,6 +140,8 @@ impl Installer {
             .runtime_dir
             .clone()
             .unwrap_or_else(default_runtime_dir);
+        let export_files = export_files(&options.export_dir)?;
+        validate_required_install_sources(&runtime_dir, &options.export_dir, &export_files)?;
 
         fs::create_dir_all(&support_dir).map_err(|error| {
             Error::invalid_input(format!(
@@ -144,9 +173,9 @@ impl Installer {
                 &mut installed_files,
             )?;
         }
-        for file in export_files(&options.export_dir)? {
+        for file in &export_files {
             copy_recorded(
-                &options.export_dir.join(&file),
+                &options.export_dir.join(file),
                 &support_dir.join(file),
                 &options.game_root,
                 &mut installed_files,
@@ -167,11 +196,19 @@ impl Installer {
             export_id: options.export_id,
             game_root: normalize_path(&options.game_root),
             layout: layout_key(&detected.layout).to_string(),
+            support_directory: SUPPORT_DIRECTORY.to_string(),
+            plugin_entry_file: PLUGIN_ENTRY_FILE.to_string(),
             plugin_entry_name: PLUGIN_ENTRY_NAME.to_string(),
             plugin_entry_status: true,
             plugins_file: normalize_path(&plugins_file),
             plugins_backup_path: normalize_path(&plugins_backup_path),
             plugins_backup_sha256: sha256_file(&plugins_backup_path)?,
+            runtime_script_load_order: string_vec(RUNTIME_SCRIPT_LOAD_ORDER),
+            runtime_support_files: string_vec(RUNTIME_SUPPORT_FILES),
+            required_asset_files: export_files
+                .iter()
+                .map(|file| normalize_path(file))
+                .collect(),
             installed_files,
         };
         write_json_pretty(&install_manifest_path, &manifest)?;
@@ -374,6 +411,29 @@ fn export_files(export_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn validate_required_install_sources(
+    runtime_dir: &Path,
+    export_dir: &Path,
+    export_files: &[PathBuf],
+) -> Result<()> {
+    let mut required = vec![runtime_dir.join(PLUGIN_ENTRY_FILE)];
+    required.extend(
+        RUNTIME_SUPPORT_FILES
+            .iter()
+            .map(|file| runtime_dir.join(file)),
+    );
+    required.extend(export_files.iter().map(|file| export_dir.join(file)));
+    for file in required {
+        if !file.is_file() {
+            return Err(Error::invalid_input(format!(
+                "required install asset is missing: {}",
+                file.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn copy_recorded(
     source: &Path,
     target: &Path,
@@ -503,4 +563,8 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn string_vec(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }
