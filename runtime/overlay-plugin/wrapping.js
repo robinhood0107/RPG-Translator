@@ -204,13 +204,39 @@
   }
 
   function resolveMessageStartX(windowInstance) {
-    if (!windowInstance || typeof windowInstance.newLineX !== 'function') return 0;
+    if (!windowInstance) return 0;
+    const stored = finiteNonNegative(windowInstance._trMsgStartX);
+    if (Number.isFinite(stored)) return stored;
+    const state = windowInstance._textState || null;
+    const stateStart = state
+      ? finiteNonNegative(Number.isFinite(Number(state.startX)) ? state.startX : state.x)
+      : NaN;
+    if (Number.isFinite(stateStart)) return stateStart;
     try {
-      const value = Number(windowInstance.newLineX());
-      return Number.isFinite(value) ? Math.max(0, value) : 0;
+      if (typeof windowInstance.newLineX === 'function') {
+        const value = finiteNonNegative(windowInstance.newLineX(state || undefined));
+        if (Number.isFinite(value)) return value;
+      }
     } catch (_) {
-      return 0;
+      const padding = fallbackTextPadding(windowInstance);
+      return Number.isFinite(padding) ? padding : 0;
     }
+    const padding = fallbackTextPadding(windowInstance);
+    return Number.isFinite(padding) ? padding : 0;
+  }
+
+  function fallbackTextPadding(windowInstance) {
+    try {
+      if (windowInstance && typeof windowInstance.textPadding === 'function') {
+        return finiteNonNegative(windowInstance.textPadding());
+      }
+    } catch (_) {}
+    return NaN;
+  }
+
+  function finiteNonNegative(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, number) : NaN;
   }
 
   function measureTokenWidth(windowInstance, token) {

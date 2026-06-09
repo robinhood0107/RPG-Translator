@@ -445,6 +445,20 @@ test('message wrapper accounts for message start x when measuring wrap width', (
   );
 });
 
+test('message wrapper falls back to text padding for message start x', () => {
+  const messageWindow = {
+    contents: { width: 100, height: 96 },
+    lineHeight() { return 24; },
+    textPadding() { return 40; },
+    textWidth(text) { return String(text).length * 10; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('abcdefg', { window: messageWindow }),
+    ['abcdef', 'g'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
