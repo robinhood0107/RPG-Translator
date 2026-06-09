@@ -97,7 +97,7 @@
   function readEscapeToken(line, start) {
     const prefix = line[start];
     const rest = line.slice(start + 1);
-    const match = rest.match(/^([A-Za-z{}.$|!><^])(?:\[(\d+)\])?/u);
+    const match = rest.match(/^([A-Za-z]+|[{}.$|!><^\\])(?:\[(\d+)\])?/u);
     if (!match) {
       return { type: 'text', raw: prefix, width: 0, breakable: false };
     }

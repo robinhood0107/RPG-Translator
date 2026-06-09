@@ -352,6 +352,13 @@ test('message wrapper uses contents font size when lineHeight is unavailable', (
   );
 });
 
+test('message wrapper treats multi-letter RPG Maker escapes as one zero-width token', () => {
+  assert.deepEqual(
+    MessageWrapper.wrap('\\MSG[12] Alpha beta', { capacity: 6 }),
+    ['\\MSG[12] Alpha', 'beta'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
