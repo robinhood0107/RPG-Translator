@@ -568,7 +568,14 @@
       route.recordId = command.itemId || '';
       route.commandId = command.id || '';
       route.commandGeneration = numberOrDefault(command.generation, 0);
-      const target = resolveSubscriptionRecord(source, route.recordId, command, route);
+      let target = null;
+      try {
+        target = resolveSubscriptionRecord(source, route.recordId, command, route);
+      } catch (error) {
+        const decision = createAdapterRenderErrorDecision(command, route, error);
+        this.dispatchSubscriptionRenderRejected(source, null, decision, route);
+        return false;
+      }
       if (!target) {
         const decision = createSubscriptionRenderDecision('rejected', 'missing-adapter-record', command, route);
         this.dispatchSubscriptionRenderRejected(source, null, decision, route);
@@ -578,8 +585,13 @@
         return false;
       }
 
-      const lifecycleRecord = resolveLifecycleRecord(source, target, command, route);
-      const validationFailure = this.validateSubscriptionRenderCommand(source, target, lifecycleRecord, command, route);
+      let validationFailure = null;
+      try {
+        const lifecycleRecord = resolveLifecycleRecord(source, target, command, route);
+        validationFailure = this.validateSubscriptionRenderCommand(source, target, lifecycleRecord, command, route);
+      } catch (error) {
+        validationFailure = createAdapterRenderErrorDecision(command, route, error);
+      }
       if (validationFailure) {
         this.dispatchSubscriptionRenderRejected(source, target, validationFailure, route);
         return false;
@@ -1203,6 +1215,13 @@
       commandGeneration: numberOrDefault((command && command.generation) || (route && route.commandGeneration), 0),
       details: sanitizeDetails(details) || {},
     };
+  }
+
+  function createAdapterRenderErrorDecision(command, route, error) {
+    return createSubscriptionRenderDecision('rejected', 'adapter-render-error', command, route, {
+      message: error && error.message ? String(error.message) : String(error || ''),
+      name: error && error.name ? String(error.name) : '',
+    });
   }
 
   function normalizeSubscriptionRenderCallbackDecision(value, command, route) {

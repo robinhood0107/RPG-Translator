@@ -823,6 +823,7 @@ test('orchestrator validates record-backed render subscriptions and reports deci
       if (request.text === 'Stale target') return '오래된 대상';
       if (request.text === 'Missing target') return '없는 대상';
       if (request.text === 'Inactive target') return '비활성 대상';
+      if (request.text === 'Validator throws') return '검증기 오류';
       return null;
     },
   }, {
@@ -888,6 +889,21 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     decision: true,
   });
 
+  const validatorThrowCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'validator-throws',
+    text: 'Validator throws',
+    renderStrategy: 'window-text',
+  });
+  records.set(validatorThrowCommand.itemId, {
+    name: 'validator-throws',
+    generation: validatorThrowCommand.generation,
+    current: 'throws',
+    decision: true,
+  });
+
   const unsubscribe = orchestrator.subscribeRecords({
     renderStrategy: 'window-text',
     records,
@@ -895,6 +911,9 @@ test('orchestrator validates record-backed render subscriptions and reports deci
       return record.generation;
     },
     isRenderTargetCurrent(record) {
+      if (record.current === 'throws') {
+        throw new Error('current validator exploded');
+      }
       return record.current === true ? true : { reason: 'target-not-current' };
     },
     onRenderQueued(record, command, route) {
@@ -928,6 +947,10 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     renderStrategy: 'window-text',
     sourceHint: 'cache-only',
   });
+  orchestrator.requestItemTranslation(validatorThrowCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
   unsubscribe();
 
   const diagnostics = orchestrator.diagnostics();
@@ -937,11 +960,12 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     ['rejected', 'stale', 'generation-mismatch', staleCommand.id],
     ['rejected', 'missing', 'missing-adapter-record', missingCommand.id],
     ['rejected', 'inactive', 'inactive-record', inactiveCommand.id],
+    ['rejected', 'validator-throws', 'adapter-render-error', validatorThrowCommand.id],
   ]);
   assert.deepEqual(misses, [[missingCommand.itemId, missingCommand.id, 'missing-adapter-record']]);
   assert.equal(diagnostics.render_accepted, 1);
-  assert.equal(diagnostics.render_rejected, 3);
-  assert.deepEqual(diagnostics.renderQueue.slice(-4).map((entry) => [
+  assert.equal(diagnostics.render_rejected, 4);
+  assert.deepEqual(diagnostics.renderQueue.slice(-5).map((entry) => [
     entry.id,
     entry.renderStatus,
     entry.renderReason,
@@ -950,6 +974,7 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     [staleCommand.id, 'rejected', 'generation-mismatch'],
     [missingCommand.id, 'rejected', 'missing-adapter-record'],
     [inactiveCommand.id, 'rejected', 'inactive-record'],
+    [validatorThrowCommand.id, 'rejected', 'adapter-render-error'],
   ]);
 });
 
