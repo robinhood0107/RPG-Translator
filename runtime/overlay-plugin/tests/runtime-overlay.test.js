@@ -3180,6 +3180,56 @@ test('window text adapter retires entries when window contents are mutated', () 
   );
 });
 
+test('window text adapter retires entries when window contents are recreated', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Recreate Menu JP') return 'Recreate Menu KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.contents = {};
+    },
+  };
+  root.Window_Base.prototype.drawText = function drawText(text, x, y) {
+    calls.push(['drawText', text, x, y]);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    calls.push(['drawTextEx', text]);
+    return text.length;
+  };
+  root.Window_Base.prototype.createContents = function createContents() {
+    this.contents = {};
+    calls.push(['createContents']);
+  };
+
+  WindowTextAdapter.install(root, orchestrator);
+  const windowInstance = new root.Window_Base();
+  windowInstance.drawText('Recreate Menu JP', 3, 4);
+
+  assert.deepEqual(calls, [['drawText', 'Recreate Menu KO', 3, 4]]);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  windowInstance.createContents();
+
+  assert.deepEqual(calls, [['drawText', 'Recreate Menu KO', 3, 4], ['createContents']]);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.claimSurface(windowInstance, 'bitmap-text'), true);
+  assert.equal(
+    orchestrator.claimText(`window:${windowInstance.__rpgTranslatorWindowTextState.windowId}:drawText:3:4::`, 'bitmap-text:slot'),
+    true,
+  );
+});
+
 test('window text adapter respects ownership and stale render rejection', () => {
   const staleIndex = {
     translate({ text }) {

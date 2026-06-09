@@ -108,6 +108,7 @@
 
   function wrapWindowLifecycle(prototype, translator) {
     wrapLifecycleMethod(prototype, 'refresh', translator, 'window-refresh');
+    wrapLifecycleMethod(prototype, 'createContents', translator, 'window-contents-recreated');
     wrapLifecycleMethod(prototype, 'destroy', translator, 'window-destroyed');
     wrapLifecycleMethod(prototype, 'close', translator, 'window-closed');
   }
