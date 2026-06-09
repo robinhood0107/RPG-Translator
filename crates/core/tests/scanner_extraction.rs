@@ -128,19 +128,22 @@ fn scanner_extracts_schema_aware_event_and_database_text() {
         .accepted
         .iter()
         .find(|item| item.raw_text == "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\\N[1]")
-        .expect("message line occurrence");
+        .expect("message block occurrence");
     assert_eq!(hello.context.file_path, "data/Map001.json");
-    assert_eq!(
-        hello.context.json_path,
-        "$.events[1].pages[0].list[1].parameters[0]"
-    );
+    assert_eq!(hello.context.json_path, "$.events[1].pages[0].list[0]");
     assert_eq!(hello.context.entity_type, "event.command");
     assert_eq!(hello.context.event_id, Some(7));
     assert_eq!(hello.context.page_index, Some(0));
-    assert_eq!(hello.context.command_index, Some(1));
-    assert_eq!(hello.context.command_code, Some(401));
-    assert_eq!(hello.context.parameter_index, Some(0));
-    assert_eq!(hello.context.extraction_rule_id, "event.message.line");
+    assert_eq!(hello.context.command_index, Some(0));
+    assert_eq!(hello.context.command_code, Some(101));
+    assert_eq!(hello.context.parameter_index, None);
+    assert_eq!(hello.context.extraction_rule_id, "event.message.block");
+    assert_eq!(hello.source_text.unit_kind, "message_block");
+    assert_eq!(hello.segments.len(), 1);
+    assert_eq!(
+        hello.segments[0].json_path,
+        "$.events[1].pages[0].list[1].parameters[0]"
+    );
 
     let rejected_reasons: Vec<&str> = report
         .rejected
@@ -304,16 +307,96 @@ fn scanner_extracts_common_event_commands_with_event_metadata() {
         .accepted
         .iter()
         .find(|item| item.raw_text == "Do you have something you need... err... Elly? ")
-        .expect("common event message line occurrence");
+        .expect("common event message block occurrence");
     assert_eq!(line.context.file_path, "data/CommonEvents.json");
-    assert_eq!(line.context.json_path, "$[1].list[1].parameters[0]");
+    assert_eq!(line.context.json_path, "$[1].list[0]");
     assert_eq!(line.context.entity_type, "event.command");
     assert_eq!(line.context.event_id, Some(103));
     assert_eq!(line.context.page_index, None);
-    assert_eq!(line.context.command_index, Some(1));
-    assert_eq!(line.context.command_code, Some(401));
-    assert_eq!(line.context.parameter_index, Some(0));
-    assert_eq!(line.context.extraction_rule_id, "event.message.line");
+    assert_eq!(line.context.command_index, Some(0));
+    assert_eq!(line.context.command_code, Some(101));
+    assert_eq!(line.context.parameter_index, None);
+    assert_eq!(line.context.extraction_rule_id, "event.message.block");
+    assert_eq!(line.source_text.unit_kind, "message_block");
+    assert_eq!(line.segments.len(), 1);
+    assert_eq!(line.segments[0].json_path, "$[1].list[1].parameters[0]");
+}
+
+#[test]
+fn scanner_groups_message_and_scroll_continuations_into_block_units() {
+    let temp = tempdir().expect("create temp dir");
+    write_json(
+        &temp.path().join("data/System.json"),
+        json!({ "gameTitle": "Fixture", "advanced": {}, "optAutosave": true }),
+    );
+    write_text(&temp.path().join("js/plugins.js"), "[]");
+    write_json(
+        &temp.path().join("data/CommonEvents.json"),
+        json!([
+            null,
+            {
+                "id": 64,
+                "name": "Emma_Block",
+                "list": [
+                    { "code": 101, "indent": 0, "parameters": ["", 0, 0, 2, "Emma"] },
+                    { "code": 401, "indent": 0, "parameters": ["Emma's mind has been warped irreversibly. She now has a growing"] },
+                    { "code": 401, "indent": 0, "parameters": ["obsession with futanari."] },
+                    { "code": 105, "indent": 0, "parameters": [2, false] },
+                    { "code": 405, "indent": 0, "parameters": ["First scroll line."] },
+                    { "code": 405, "indent": 0, "parameters": ["Second scroll line."] }
+                ]
+            }
+        ]),
+    );
+
+    let report = GameScanner::scan(
+        temp.path(),
+        ScanOptions {
+            source_language: "en".to_string(),
+            disable_cjk_filter: false,
+        },
+    )
+    .expect("scan block fixture");
+
+    let message = report
+        .accepted
+        .iter()
+        .find(|item| item.source_text.unit_kind == "message_block")
+        .expect("message block occurrence");
+    assert_eq!(
+        message.raw_text,
+        "Emma's mind has been warped irreversibly. She now has a growing\nobsession with futanari."
+    );
+    assert_eq!(message.context.json_path, "$[1].list[0]");
+    assert_eq!(message.context.command_code, Some(101));
+    assert_eq!(message.source_text.line_count, 2);
+    assert_eq!(message.source_text.newline_count, 1);
+    assert_eq!(message.segments.len(), 2);
+    assert_eq!(message.segments[0].json_path, "$[1].list[1].parameters[0]");
+    assert_eq!(message.segments[1].json_path, "$[1].list[2].parameters[0]");
+    assert_eq!(
+        message.segments[0].raw_text,
+        "Emma's mind has been warped irreversibly. She now has a growing"
+    );
+    assert_eq!(message.segments[1].raw_text, "obsession with futanari.");
+
+    assert!(
+        report
+            .accepted
+            .iter()
+            .all(|item| item.context.extraction_rule_id != "event.message.line")
+    );
+
+    let scroll = report
+        .accepted
+        .iter()
+        .find(|item| item.source_text.unit_kind == "scroll_block")
+        .expect("scroll block occurrence");
+    assert_eq!(scroll.raw_text, "First scroll line.\nSecond scroll line.");
+    assert_eq!(scroll.context.command_code, Some(105));
+    assert_eq!(scroll.segments.len(), 2);
+    assert_eq!(scroll.segments[0].json_path, "$[1].list[4].parameters[0]");
+    assert_eq!(scroll.segments[1].json_path, "$[1].list[5].parameters[0]");
 }
 
 #[test]

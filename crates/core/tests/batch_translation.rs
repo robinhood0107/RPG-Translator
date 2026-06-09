@@ -10,12 +10,28 @@ use rpg_translator_core::{
 use tempfile::tempdir;
 
 fn seed_source(db: &mut TranslationDb, source_language: &str, text: &str) -> i64 {
+    seed_source_with_kind(db, source_language, text, "text")
+}
+
+fn seed_source_with_kind(
+    db: &mut TranslationDb,
+    source_language: &str,
+    text: &str,
+    unit_kind: &str,
+) -> i64 {
     let analysis = TextCodec::analyze(text);
+    let provider_state = TextCodec::encode_for_provider(&analysis.normalized_text);
     db.upsert_source_text(&NewSourceText {
         source_language: source_language.to_string(),
-        normalized_text: analysis.normalized_text,
+        unit_kind: unit_kind.to_string(),
+        normalized_hash: String::new(),
+        normalized_text: analysis.normalized_text.clone(),
         visible_text: analysis.visible_text,
+        codec_text: provider_state.provider_text,
         control_code_signature: analysis.control_code_signature,
+        line_count: analysis.normalized_text.matches('\n').count() as i64 + 1,
+        newline_count: analysis.normalized_text.matches('\n').count() as i64,
+        placeholder_count: provider_state.control_codes.len() as i64,
     })
     .expect("insert source text")
 }
@@ -93,10 +109,10 @@ fn fake_provider_success_persists_batch_translations() {
     db.migrate().expect("migrate db");
     let first = seed_source(&mut db, "ja", "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}");
     let second = seed_source(&mut db, "ja", "\u{4e16}\u{754c}\\N[1]");
-    let mut provider = FakeProvider::from_outputs(vec![output(&[
-        (1, "\u{c548}\u{b155}"),
-        (2, "\u{c138}\u{acc4}\u{00a4}"),
-    ])]);
+    let mut provider = FakeProvider::from_outputs(vec![
+        output(&[(1, "\u{c548}\u{b155}")]),
+        output(&[(2, "\u{c138}\u{acc4}\u{00a4}")]),
+    ]);
 
     let report = BatchTranslator::run(
         &mut db,
@@ -109,7 +125,7 @@ fn fake_provider_success_persists_batch_translations() {
     )
     .expect("translate batch");
 
-    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.requests().len(), 2);
     assert_eq!(report.completed_source_text_ids, vec![first, second]);
     assert!(report.failed_source_text_ids.is_empty());
     assert_eq!(
@@ -193,7 +209,34 @@ fn planner_deduplicates_same_normalized_text_and_signature() {
             .iter()
             .any(|job| job.source_text_ids == vec![third])
     );
-    assert_eq!(plan.batches.len(), 1);
+    assert_eq!(plan.batches.len(), 2);
+}
+
+#[test]
+fn planner_separates_short_block_and_complex_lanes() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source(&mut db, "ja", "短文");
+    seed_source_with_kind(&mut db, "ja", "Line one\nLine two", "message_block");
+    seed_source(&mut db, "ja", "\\C[2]名前");
+
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            input_token_budget: 4096,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan lane batches");
+
+    assert_eq!(
+        plan.batches.len(),
+        3,
+        "short, block, and control-code texts should not share one provider JSONL batch"
+    );
+    assert!(plan.batches.iter().all(|batch| !batch.is_empty()));
 }
 
 #[test]
@@ -220,6 +263,20 @@ fn validator_rejects_bad_model_output_shapes() {
             "expected validator rejection for {raw}"
         );
     }
+}
+
+#[test]
+fn validator_rejects_message_block_line_break_mismatch() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "Line one\nLine two".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    assert!(
+        BatchValidator::validate(r#"{"id":1,"translation":"한 줄로 합침"}"#, &jobs).is_err(),
+        "message and scroll block translations must preserve hard newline count"
+    );
 }
 
 #[test]

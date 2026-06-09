@@ -23,11 +23,18 @@ fn seed_source(
     command_index: i64,
 ) -> Result<i64> {
     let analysis = TextCodec::analyze(text);
+    let provider_state = TextCodec::encode_for_provider(&analysis.normalized_text);
     let source_text_id = db.upsert_source_text(&NewSourceText {
         source_language: "ja".to_string(),
+        unit_kind: "text".to_string(),
+        normalized_hash: String::new(),
         normalized_text: analysis.normalized_text,
         visible_text: analysis.visible_text,
+        codec_text: provider_state.provider_text,
         control_code_signature: analysis.control_code_signature,
+        line_count: text.matches('\n').count() as i64 + 1,
+        newline_count: text.matches('\n').count() as i64,
+        placeholder_count: provider_state.control_codes.len() as i64,
     })?;
     db.insert_project_occurrence(
         project_id,
@@ -165,6 +172,29 @@ fn exported_cache_records_use_versioned_cache_key_schema() -> Result<()> {
     });
 
     assert_eq!(record.cache_key, expected_key);
+    assert!(
+        record.cache_aliases.contains(&expected_key),
+        "primary key should be included in cache aliases"
+    );
+    assert!(
+        record
+            .cache_aliases
+            .iter()
+            .any(|alias| alias != &expected_key),
+        "runtime cache should expose at least one normalized/codec alias"
+    );
+    let codec_lookup_key = CacheKeyBuilder::build(&CacheKeyParts {
+        engine: Engine::Mz,
+        source_language: "ja".to_string(),
+        target_language: "ko".to_string(),
+        normalized_text: "¤名前".to_string(),
+        control_code_signature: String::new(),
+        context_hash: None,
+    });
+    assert!(
+        record.cache_aliases.contains(&codec_lookup_key),
+        "codec text alias should match runtime TextCodec analysis"
+    );
     assert_eq!(record.source_text_id, source_text_id);
     assert_eq!(record.source_hash.len(), 64);
     assert_eq!(record.translation, "\\C[2]이름");

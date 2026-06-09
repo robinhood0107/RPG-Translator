@@ -3,11 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     DataFileRecord, DetectedGame, Engine, Error, ExtractedOccurrence, GameLayoutKind,
-    NewSourceText, OccurrenceContext, RejectedCandidate, Result, ScanProgressEvent, ScanReport,
-    SkippedDataFile, TextCodec,
+    NewSourceText, OccurrenceContext, OccurrenceSegment, RejectedCandidate, Result,
+    ScanProgressEvent, ScanReport, SkippedDataFile, TextCodec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +132,13 @@ impl GameScanner {
             );
             let visited = accepted[accepted_before..]
                 .iter()
-                .map(|item| item.context.json_path.clone())
+                .flat_map(|item| {
+                    std::iter::once(item.context.json_path.clone()).chain(
+                        item.segments
+                            .iter()
+                            .map(|segment| segment.json_path.clone()),
+                    )
+                })
                 .chain(
                     rejected[rejected_before..]
                         .iter()
@@ -355,7 +362,9 @@ fn extract_event_commands(
     accepted: &mut Vec<ExtractedOccurrence>,
     rejected: &mut Vec<RejectedCandidate>,
 ) {
-    for (command_index, command) in scope.commands.iter().enumerate() {
+    let mut command_index = 0;
+    while command_index < scope.commands.len() {
+        let command = &scope.commands[command_index];
         let code = command.get("code").and_then(Value::as_i64);
         let parameters = command.get("parameters").and_then(Value::as_array);
         let context = EventContext {
@@ -368,15 +377,33 @@ fn extract_event_commands(
         };
 
         match code {
-            Some(101) => accept_event_parameter(
-                parameters,
-                4,
-                "event.message.speaker",
-                &context,
-                options,
-                accepted,
-                rejected,
-            ),
+            Some(101) => {
+                accept_event_parameter(
+                    parameters,
+                    4,
+                    "event.message.speaker",
+                    &context,
+                    options,
+                    accepted,
+                    rejected,
+                );
+                if let Some(next_index) = accept_event_block(
+                    &scope,
+                    command_index,
+                    EventBlockRule {
+                        continuation_code: 401,
+                        rule_id: "event.message.block",
+                        unit_kind: "message_block",
+                    },
+                    &context,
+                    options,
+                    accepted,
+                    rejected,
+                ) {
+                    command_index = next_index;
+                    continue;
+                }
+            }
             Some(401) => accept_event_parameter(
                 parameters,
                 0,
@@ -386,6 +413,24 @@ fn extract_event_commands(
                 accepted,
                 rejected,
             ),
+            Some(105) => {
+                if let Some(next_index) = accept_event_block(
+                    &scope,
+                    command_index,
+                    EventBlockRule {
+                        continuation_code: 405,
+                        rule_id: "event.scroll.block",
+                        unit_kind: "scroll_block",
+                    },
+                    &context,
+                    options,
+                    accepted,
+                    rejected,
+                ) {
+                    command_index = next_index;
+                    continue;
+                }
+            }
             Some(405) => accept_event_parameter(
                 parameters,
                 0,
@@ -401,7 +446,81 @@ fn extract_event_commands(
             Some(118) => reject_event_strings(parameters, "label", &context, rejected),
             _ => {}
         }
+        command_index += 1;
     }
+}
+
+fn accept_event_block(
+    scope: &EventCommandScope<'_>,
+    starter_index: usize,
+    rule: EventBlockRule<'_>,
+    starter_context: &EventContext<'_>,
+    options: &ScanOptions,
+    accepted: &mut Vec<ExtractedOccurrence>,
+    rejected: &mut Vec<RejectedCandidate>,
+) -> Option<usize> {
+    let starter_indent = scope.commands[starter_index]
+        .get("indent")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let mut raw_lines = Vec::new();
+    let mut segments = Vec::new();
+    let mut index = starter_index + 1;
+    while index < scope.commands.len() {
+        let command = &scope.commands[index];
+        let code = command.get("code").and_then(Value::as_i64);
+        let indent = command.get("indent").and_then(Value::as_i64).unwrap_or(0);
+        if code != Some(rule.continuation_code) || indent != starter_indent {
+            break;
+        }
+        let Some(raw) = command
+            .get("parameters")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+        else {
+            break;
+        };
+        let segment_context = EventContext {
+            relative_path: scope.relative_path,
+            event_index: scope.event_index,
+            event_id: scope.event_id,
+            page_index: scope.page_index,
+            command_index: index,
+            command_code: Some(rule.continuation_code),
+        };
+        segments.push(OccurrenceSegment {
+            segment_index: segments.len() as i64,
+            command_code: Some(rule.continuation_code),
+            json_path: segment_context.parameter_json_path(0),
+            raw_text: raw.to_string(),
+            line_index: raw_lines.len() as i64,
+        });
+        raw_lines.push(raw.to_string());
+        index += 1;
+    }
+
+    if raw_lines.is_empty() {
+        return None;
+    }
+
+    let raw_block = raw_lines.join("\n");
+    let occurrence = starter_context.to_occurrence(
+        starter_context.command_json_path(),
+        None,
+        None,
+        rule.rule_id,
+    );
+    classify_and_push_with_unit(
+        &raw_block,
+        occurrence,
+        rule.unit_kind,
+        segments,
+        options,
+        accepted,
+        rejected,
+    );
+    Some(index)
 }
 
 fn accept_event_parameter(
@@ -589,6 +708,27 @@ fn classify_and_push(
     accepted: &mut Vec<ExtractedOccurrence>,
     rejected: &mut Vec<RejectedCandidate>,
 ) {
+    let unit_kind = unit_kind_for_rule(&context.extraction_rule_id).to_string();
+    classify_and_push_with_unit(
+        raw,
+        context,
+        &unit_kind,
+        Vec::new(),
+        options,
+        accepted,
+        rejected,
+    );
+}
+
+fn classify_and_push_with_unit(
+    raw: &str,
+    context: OccurrenceContext,
+    unit_kind: &str,
+    segments: Vec<OccurrenceSegment>,
+    options: &ScanOptions,
+    accepted: &mut Vec<ExtractedOccurrence>,
+    rejected: &mut Vec<RejectedCandidate>,
+) {
     if raw.contains("//") {
         push_rejected(raw, "comment", context, rejected);
         return;
@@ -602,7 +742,9 @@ fn classify_and_push(
         return;
     }
     if options.disable_cjk_filter {
-        accepted.push(new_accepted(raw, analysis, visible, context, options));
+        accepted.push(new_accepted(
+            raw, analysis, visible, context, unit_kind, segments, options,
+        ));
         return;
     }
     if !matches_source_language(&visible, &options.source_language) {
@@ -610,7 +752,9 @@ fn classify_and_push(
         return;
     }
 
-    accepted.push(new_accepted(raw, analysis, visible, context, options));
+    accepted.push(new_accepted(
+        raw, analysis, visible, context, unit_kind, segments, options,
+    ));
 }
 
 fn extract_unvisited_strings(
@@ -698,18 +842,71 @@ fn new_accepted(
     analysis: crate::TextAnalysis,
     visible: String,
     context: OccurrenceContext,
+    unit_kind: &str,
+    segments: Vec<OccurrenceSegment>,
     options: &ScanOptions,
 ) -> ExtractedOccurrence {
+    let provider_state = TextCodec::encode_for_provider(&analysis.normalized_text);
+    let normalized_hash = source_unit_hash(
+        &options.source_language,
+        unit_kind,
+        &analysis.normalized_text,
+        &analysis.control_code_signature,
+    );
+    let newline_count = analysis.normalized_text.matches('\n').count() as i64;
     ExtractedOccurrence {
         raw_text: raw.to_string(),
         source_text: NewSourceText {
             source_language: options.source_language.clone(),
+            unit_kind: unit_kind.to_string(),
+            normalized_hash,
             normalized_text: analysis.normalized_text,
             visible_text: visible,
+            codec_text: provider_state.provider_text,
             control_code_signature: analysis.control_code_signature,
+            line_count: newline_count + 1,
+            newline_count,
+            placeholder_count: provider_state.control_codes.len() as i64,
         },
         context,
+        segments,
     }
+}
+
+fn unit_kind_for_rule(rule_id: &str) -> &str {
+    match rule_id {
+        "event.message.speaker" => "message_speaker",
+        "event.message.line" => "message_line",
+        "event.scroll.line" => "scroll_line",
+        "event.choice.option" => "choice",
+        "generic.string" => "generic_candidate",
+        value if value.starts_with("database.") => "db_field",
+        value if value.starts_with("system.") => "system_term",
+        _ => "text",
+    }
+}
+
+fn source_unit_hash(
+    source_language: &str,
+    unit_kind: &str,
+    normalized_text: &str,
+    control_code_signature: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    for (name, value) in [
+        ("source_language", source_language),
+        ("unit_kind", unit_kind),
+        ("normalized_text", normalized_text),
+        ("control_code_signature", control_code_signature),
+    ] {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.len().to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0xff]);
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn push_rejected(
@@ -865,6 +1062,12 @@ struct EventCommandScope<'a> {
     event_id: Option<i64>,
     page_index: Option<usize>,
     commands: &'a [Value],
+}
+
+struct EventBlockRule<'a> {
+    continuation_code: i64,
+    rule_id: &'a str,
+    unit_kind: &'a str,
 }
 
 struct GenericStringVisit<'a> {

@@ -77,11 +77,10 @@ fn synthetic_full_flow_smoke_scans_translates_exports_installs_and_rolls_back() 
     assert_eq!(scan.source_text_count, 3);
     assert_eq!(scan.occurrence_count, 3);
 
-    let mut provider = rpg_translator_core::FakeProvider::from_outputs(vec![output(&[
-        (1, "안녕하세요¤"),
-        (2, "예"),
-        (3, "아니요"),
-    ])]);
+    let mut provider = rpg_translator_core::FakeProvider::from_outputs(vec![
+        output(&[(2, "예"), (3, "아니요")]),
+        output(&[(1, "안녕하세요¤")]),
+    ]);
     let batch = BatchTranslator::run(
         &mut db,
         &mut provider,

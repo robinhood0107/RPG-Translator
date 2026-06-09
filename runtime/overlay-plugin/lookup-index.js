@@ -33,6 +33,13 @@
         if (record && typeof record.cache_key === 'string') {
           this.byKey.set(record.cache_key, record);
         }
+        if (record && Array.isArray(record.cache_aliases)) {
+          for (const alias of record.cache_aliases) {
+            if (typeof alias === 'string' && alias.length > 0) {
+              this.byKey.set(alias, record);
+            }
+          }
+        }
       }
     }
 

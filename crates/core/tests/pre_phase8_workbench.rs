@@ -169,11 +169,18 @@ fn dashboard_reports_latest_export_install_and_provider_status() -> Result<()> {
         engine: Engine::Mz,
     })?;
     let analysis = TextCodec::analyze("世界");
+    let provider_state = TextCodec::encode_for_provider(&analysis.normalized_text);
     let source_id = db.upsert_source_text(&NewSourceText {
         source_language: "ja".to_string(),
+        unit_kind: "text".to_string(),
+        normalized_hash: String::new(),
         normalized_text: analysis.normalized_text,
         visible_text: analysis.visible_text,
+        codec_text: provider_state.provider_text,
         control_code_signature: analysis.control_code_signature,
+        line_count: 1,
+        newline_count: 0,
+        placeholder_count: provider_state.control_codes.len() as i64,
     })?;
     db.insert_project_occurrence(
         project_id,

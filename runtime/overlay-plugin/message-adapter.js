@@ -8,7 +8,15 @@
       prototype.startMessage = function startMessageWithTranslation(...args) {
         const message = scope.$gameMessage;
         if (message && Array.isArray(message._texts)) {
-          message._texts = message._texts.map((text) => translateText(index, scope, text));
+          const originalText = readMessageBlock(message);
+          const translated = translateText(index, scope, originalText);
+          if (
+            translated &&
+            translated !== originalText &&
+            countNewlines(translated) === countNewlines(originalText)
+          ) {
+            message._texts = translated.split('\n');
+          }
         }
         if (typeof originalStartMessage === 'function') {
           return originalStartMessage.apply(this, args);
@@ -18,6 +26,17 @@
       prototype.__rpgTranslatorMessageInstalled = true;
       return true;
     }
+  }
+
+  function readMessageBlock(message) {
+    if (typeof message.allText === 'function') {
+      return String(message.allText() || '');
+    }
+    return message._texts.map((text) => String(text || '')).join('\n');
+  }
+
+  function countNewlines(text) {
+    return String(text || '').split('\n').length - 1;
   }
 
   function translateText(index, scope, text) {

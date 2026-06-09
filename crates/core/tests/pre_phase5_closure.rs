@@ -59,9 +59,15 @@ fn db_exposes_project_snapshot_and_exportable_translation_rows() -> Result<()> {
     let snapshot_id = db.record_game_snapshot(project_id, "root-hash", "data-hash")?;
     let source_id = db.upsert_source_text(&NewSourceText {
         source_language: "ja".to_string(),
+        unit_kind: "text".to_string(),
+        normalized_hash: String::new(),
         normalized_text: "\\C[1]こんにちは".to_string(),
         visible_text: "こんにちは".to_string(),
+        codec_text: "¤こんにちは".to_string(),
         control_code_signature: "\\C[1]".to_string(),
+        line_count: 1,
+        newline_count: 0,
+        placeholder_count: 1,
     })?;
     db.insert_project_occurrence(
         project_id,
@@ -116,9 +122,15 @@ fn batch_report_preserves_validation_failure_detail() -> Result<()> {
     db.migrate()?;
     let source_id = db.upsert_source_text(&NewSourceText {
         source_language: "ja".to_string(),
+        unit_kind: "text".to_string(),
+        normalized_hash: String::new(),
         normalized_text: "失敗".to_string(),
         visible_text: "失敗".to_string(),
+        codec_text: "失敗".to_string(),
         control_code_signature: String::new(),
+        line_count: 1,
+        newline_count: 0,
+        placeholder_count: 0,
     })?;
     let mut provider =
         rpg_translator_core::FakeProvider::from_outputs(vec!["not json".to_string()]);

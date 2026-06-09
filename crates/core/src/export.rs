@@ -52,6 +52,7 @@ pub struct RuntimeExportManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCacheRecord {
     pub cache_key: String,
+    pub cache_aliases: Vec<String>,
     pub source_text_id: i64,
     pub source_hash: String,
     pub source_language: String,
@@ -243,15 +244,19 @@ fn runtime_cache_record(
     engine: &crate::Engine,
 ) -> RuntimeCacheRecord {
     let context_hash = None;
+    let primary_key = CacheKeyBuilder::build(&CacheKeyParts {
+        engine: engine.clone(),
+        source_language: row.source_language.clone(),
+        target_language: row.target_language.clone(),
+        normalized_text: row.normalized_text.clone(),
+        control_code_signature: row.control_code_signature.clone(),
+        context_hash: context_hash.clone(),
+    });
+    let cache_aliases =
+        cache_aliases_for_row(row, engine, context_hash.clone(), primary_key.clone());
     RuntimeCacheRecord {
-        cache_key: CacheKeyBuilder::build(&CacheKeyParts {
-            engine: engine.clone(),
-            source_language: row.source_language.clone(),
-            target_language: row.target_language.clone(),
-            normalized_text: row.normalized_text.clone(),
-            control_code_signature: row.control_code_signature.clone(),
-            context_hash: context_hash.clone(),
-        }),
+        cache_key: primary_key,
+        cache_aliases,
         source_text_id: row.source_text_id,
         source_hash: sha256_hex(row.normalized_text.as_bytes()),
         source_language: row.source_language.clone(),
@@ -261,6 +266,57 @@ fn runtime_cache_record(
         translation: row.translated_text.clone(),
         control_code_signature: row.control_code_signature.clone(),
         context_hash,
+    }
+}
+
+fn cache_aliases_for_row(
+    row: &ExportableTranslationRecord,
+    engine: &crate::Engine,
+    context_hash: Option<String>,
+    primary_key: String,
+) -> Vec<String> {
+    let mut aliases = vec![primary_key];
+    let alias_inputs = [
+        (
+            row.normalized_text
+                .replace("\r\n", "\n")
+                .replace('\r', "\n"),
+            row.control_code_signature.as_str(),
+        ),
+        (row.codec_text.clone(), row.control_code_signature.as_str()),
+        (row.codec_text.clone(), ""),
+    ];
+    for (normalized_text, control_code_signature) in alias_inputs {
+        push_cache_alias(
+            &mut aliases,
+            row,
+            engine,
+            context_hash.clone(),
+            normalized_text,
+            control_code_signature,
+        );
+    }
+    aliases
+}
+
+fn push_cache_alias(
+    aliases: &mut Vec<String>,
+    row: &ExportableTranslationRecord,
+    engine: &crate::Engine,
+    context_hash: Option<String>,
+    normalized_text: String,
+    control_code_signature: &str,
+) {
+    let alias = CacheKeyBuilder::build(&CacheKeyParts {
+        engine: engine.clone(),
+        source_language: row.source_language.clone(),
+        target_language: row.target_language.clone(),
+        normalized_text,
+        control_code_signature: control_code_signature.to_string(),
+        context_hash,
+    });
+    if !aliases.contains(&alias) {
+        aliases.push(alias);
     }
 }
 
@@ -281,6 +337,15 @@ fn single_source_language(rows: &[ExportableTranslationRecord]) -> Result<String
 fn validate_cache_record(record: &RuntimeCacheRecord) -> Result<()> {
     if !record.cache_key.starts_with("ck:v1:") {
         return Err(Error::invalid_input("cache_key must use ck:v1 schema"));
+    }
+    if !record
+        .cache_aliases
+        .iter()
+        .any(|alias| alias == &record.cache_key)
+    {
+        return Err(Error::invalid_input(
+            "cache_aliases must include the primary cache_key",
+        ));
     }
     if record.translation.trim().is_empty() {
         return Err(Error::invalid_input("cache record translation is empty"));

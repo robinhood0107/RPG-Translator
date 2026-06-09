@@ -329,6 +329,38 @@ test('message and window adapters translate cache hits in synthetic RPG Maker ha
   assert.equal(drawTextExResult, 'missing'.length);
 });
 
+test('message adapter translates joined message blocks instead of individual 401 lines', () => {
+  const requests = [];
+  const index = {
+    translate(request) {
+      requests.push(request.text);
+      if (request.text === 'Line one\nLine two') return '첫 줄\n둘째 줄';
+      if (request.text === 'Line one') return 'LINE SHOULD NOT BE USED';
+      return null;
+    },
+  };
+  const calls = [];
+  const root = {
+    $gameMessage: {
+      _texts: ['Line one', 'Line two'],
+      allText() {
+        return this._texts.join('\n');
+      },
+    },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {
+    calls.push(this.constructor.name, root.$gameMessage._texts.slice());
+  };
+
+  MessageAdapter.install(root, index);
+  new root.Window_Message().startMessage();
+
+  assert.deepEqual(requests, ['Line one\nLine two']);
+  assert.deepEqual(root.$gameMessage._texts, ['첫 줄', '둘째 줄']);
+  assert.deepEqual(calls, ['WindowMessage', ['첫 줄', '둘째 줄']]);
+});
+
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
   const index = {
     translate({ text }) {
