@@ -998,6 +998,64 @@ test('foresight scanner follows command catalog embedded nested lists', () => {
   assert.equal(scan.command_counts['900'], 1);
 });
 
+test('foresight scanner normalizes nested-list string specs and runtime order', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return text === 'First runtime nested text'
+        ? '첫 런타임 중첩 텍스트'
+        : '둘째 런타임 중첩 텍스트';
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commandCatalog: {
+      903: {
+        label: 'Ordered Inline Events',
+        scanBehavior: 'advance',
+        nestedLists: [
+          { path: 'parameters[0].second', name: 'Second runtime', runtimeOrder: 20 },
+          'parameters[0].first',
+          { path: 'parameters[0].first', name: 'Duplicate first', runtimeOrder: 0 },
+        ],
+      },
+    },
+  });
+  const list = [
+    {
+      code: 903,
+      indent: 0,
+      parameters: [{
+        first: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['First runtime nested text'] },
+        ],
+        second: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Second runtime nested text'] },
+        ],
+      }],
+    },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.rawText, block.translation, block.listId]), [
+    ['First runtime nested text', '첫 런타임 중첩 텍스트', 'map:nested:0:0'],
+    ['Second runtime nested text', '둘째 런타임 중첩 텍스트', 'map:nested:0:1'],
+  ]);
+  assert.deepEqual(requests, ['First runtime nested text', 'Second runtime nested text']);
+});
+
 test('foresight scanner does not follow barrier catalog nested lists', () => {
   const requests = [];
   const scanner = new ForesightScanner({

@@ -1194,11 +1194,35 @@
 
   function normalizeNestedListSpecs(value) {
     if (!Array.isArray(value)) return [];
-    return value.map((entry) => ({
-      path: nonEmptyString(entry && entry.path),
-      name: nonEmptyString(entry && entry.name),
-      optional: Boolean(entry && entry.optional),
-    })).filter((entry) => entry.path);
+    const seen = new Set();
+    const specs = [];
+    value.forEach((entry, index) => {
+      const source = typeof entry === 'string'
+        ? { path: entry }
+        : (entry && typeof entry === 'object' ? entry : null);
+      const path = nonEmptyString(source && source.path);
+      if (!path || seen.has(path)) return;
+      seen.add(path);
+      specs.push({
+        path,
+        name: nonEmptyString(source && source.name),
+        runtimeOrder: Number.isFinite(Number(source && source.runtimeOrder))
+          ? Number(source.runtimeOrder)
+          : index,
+        optional: Boolean(source && source.optional),
+        index,
+      });
+    });
+    specs.sort((left, right) => {
+      const byOrder = Number(left.runtimeOrder) - Number(right.runtimeOrder);
+      return byOrder || (Number(left.index) - Number(right.index));
+    });
+    return specs.map((spec) => ({
+      path: spec.path,
+      name: spec.name,
+      runtimeOrder: spec.runtimeOrder,
+      optional: spec.optional,
+    }));
   }
 
   function getEventCommandMetadata(code) {
