@@ -36,6 +36,7 @@
           sourceLanguage: bundle.manifest.source_language,
           targetLanguage: bundle.manifest.target_language,
           commonEvents: scope.$dataCommonEvents,
+          commandCatalog: resolveCommandCatalog(options, bundle),
         })
         : null;
       const nextOverlay = Object.assign(overlay, {
@@ -59,6 +60,19 @@
       }
       return nextOverlay;
     }
+  }
+
+  function resolveCommandCatalog(options, bundle) {
+    const config = bundle && bundle.config && typeof bundle.config === 'object'
+      ? bundle.config
+      : {};
+    return options.commandCatalog
+      || bundle.commandCatalog
+      || config.foresight_command_catalog
+      || config.foresightCommandCatalog
+      || config.command_catalog
+      || config.commandCatalog
+      || null;
   }
 
   function loadDependency(scope, modulePath) {

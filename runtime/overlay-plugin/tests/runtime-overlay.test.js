@@ -2207,6 +2207,67 @@ test('boot installs cache-only overlay without provider surfaces', async () => {
   assert.equal(root.RPGTranslatorOverlay.translationQueue, undefined);
 });
 
+test('boot passes exported foresight command catalog to scanner', async () => {
+  const root = {
+    document: { body: null },
+    $gameMessage: { _texts: [] },
+    Window_Message: function WindowMessage() {},
+    Window_Base: function WindowBase() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Base.prototype.drawText = function drawText() {};
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) { return text.length; };
+
+  await Boot.install(root, {
+    bundle: {
+      manifest: { schema_version: 1, key_schema_version: 'v1', source_language: 'en', target_language: 'ko' },
+      config: {
+        startup_toast_enabled: false,
+        foresight_command_catalog: {
+          movementRouteCommands: {
+            999: {
+              label: 'Custom Route Advance',
+              classification: 'linear',
+              scanBehavior: 'advance',
+            },
+          },
+        },
+      },
+      records: [],
+    },
+    engine: 'mz',
+  });
+
+  const list = [
+    {
+      code: 205,
+      indent: 0,
+      parameters: [0, {
+        list: [
+          { code: 999, parameters: [] },
+          { code: 0, parameters: [] },
+        ],
+      }],
+    },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Catalog-routed text'] },
+  ];
+
+  const blocks = root.RPGTranslatorOverlay.foresightScanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.kind, block.rawText, block.cacheStatus]), [
+    ['message_block', 'Catalog-routed text', 'miss'],
+  ]);
+  assert.equal(root.RPGTranslatorOverlay.foresightScanner.getSnapshot().recent_scans[0].route_barriers, 0);
+});
+
 test('RPG Maker plugin entry loads support modules in deterministic order and boots overlay', async () => {
   const loaded = [];
   const baseUrl = 'file:///game/js/plugins/rpg-translator/';
