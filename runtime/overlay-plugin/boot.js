@@ -1,4 +1,7 @@
 (function attach(root) {
+  const RUNTIME_MANIFEST_SCHEMA_VERSION = 1;
+  const RUNTIME_CONFIG_SCHEMA_VERSION = 1;
+  const RUNTIME_KEY_SCHEMA_VERSION = 'v1';
   const SUPPORT_DIRECTORY = 'rpg-translator';
   const PLUGIN_ENTRY_FILE = 'RPGTranslator.js';
   const RUNTIME_SCRIPT_LOAD_ORDER = [
@@ -42,6 +45,7 @@
       if (overlay.installed) return overlay;
 
       const bundle = options.bundle || await CacheLoader.load(options.baseUrl || '', options.fetch);
+      validateRuntimeBundle(bundle);
       validateRuntimeLoadContract(bundle.config || {});
       const missLogger = RuntimeMissLogger
         ? RuntimeMissLogger.fromConfig(bundle.config || {}, options.missLogger || {})
@@ -110,6 +114,60 @@
     }
   }
 
+  function validateRuntimeBundle(bundle) {
+    if (!bundle || typeof bundle !== 'object') {
+      throw new Error('runtime bundle is required');
+    }
+    validateRuntimeManifest(bundle.manifest || {});
+    validateRuntimeConfig(bundle.config || {});
+  }
+
+  function validateRuntimeManifest(manifest) {
+    if (!manifest || typeof manifest !== 'object') {
+      throw new Error('runtime manifest is required');
+    }
+
+    const schemaVersion = getObjectValue(manifest, 'schema_version', 'schemaVersion');
+    if (Number(schemaVersion) !== RUNTIME_MANIFEST_SCHEMA_VERSION) {
+      throw new Error(`runtime manifest schema_version ${schemaVersion} is unsupported`);
+    }
+
+    const keySchemaVersion = getObjectValue(manifest, 'key_schema_version', 'keySchemaVersion');
+    if (keySchemaVersion !== RUNTIME_KEY_SCHEMA_VERSION) {
+      throw new Error(`runtime manifest key_schema_version must be ${RUNTIME_KEY_SCHEMA_VERSION}`);
+    }
+
+    const sourceLanguage = getObjectValue(manifest, 'source_language', 'sourceLanguage');
+    if (!isNonEmptyString(sourceLanguage)) {
+      throw new Error('runtime manifest source_language is required');
+    }
+
+    const targetLanguage = getObjectValue(manifest, 'target_language', 'targetLanguage');
+    if (!isNonEmptyString(targetLanguage)) {
+      throw new Error('runtime manifest target_language is required');
+    }
+
+    const cacheFiles = getObjectValue(manifest, 'cache_files', 'cacheFiles');
+    if (cacheFiles !== undefined && !Array.isArray(cacheFiles)) {
+      throw new Error('runtime manifest cache_files must be an array when present');
+    }
+  }
+
+  function validateRuntimeConfig(config) {
+    if (!config || typeof config !== 'object') {
+      throw new Error('runtime config must be an object');
+    }
+    const schemaVersion = getObjectValue(config, 'schema_version', 'schemaVersion');
+    if (schemaVersion !== undefined && Number(schemaVersion) !== RUNTIME_CONFIG_SCHEMA_VERSION) {
+      throw new Error(`runtime config schema_version ${schemaVersion} is unsupported`);
+    }
+
+    const startupToastEnabled = getObjectValue(config, 'startup_toast_enabled', 'startupToastEnabled');
+    if (startupToastEnabled !== undefined && typeof startupToastEnabled !== 'boolean') {
+      throw new Error('runtime config startup_toast_enabled must be a boolean when present');
+    }
+  }
+
   function validateRuntimeLoadContract(config) {
     const contract = config.runtime_load_contract
       || config.runtimeLoadContract
@@ -141,6 +199,16 @@
     if (!sameStringArray(requiredRuntimeFiles, REQUIRED_RUNTIME_FILES)) {
       throw new Error('runtime load contract required_runtime_files does not match the cache-only runtime');
     }
+  }
+
+  function getObjectValue(object, snakeName, camelName) {
+    if (Object.prototype.hasOwnProperty.call(object, snakeName)) return object[snakeName];
+    if (Object.prototype.hasOwnProperty.call(object, camelName)) return object[camelName];
+    return undefined;
+  }
+
+  function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
   }
 
   function getContractValue(contract, snakeName, camelName) {

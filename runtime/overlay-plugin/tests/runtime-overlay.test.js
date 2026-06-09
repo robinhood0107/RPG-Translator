@@ -6788,6 +6788,82 @@ test('boot rejects runtime load contract mismatches before installing adapters',
   assert.equal(root.Window_Base.prototype.drawTextEx.call({}, 'Menu'), 4);
 });
 
+test('boot rejects malformed runtime manifest and config before installing adapters', async () => {
+  function makeRoot() {
+    const root = {
+      document: { body: null },
+      $gameMessage: { _texts: [] },
+      Window_Message: function WindowMessage() {},
+      Window_Base: function WindowBase() {},
+    };
+    root.Window_Message.prototype.startMessage = function startMessage() { return 'native-start'; };
+    root.Window_Base.prototype.drawText = function drawText() { return 'native-draw'; };
+    root.Window_Base.prototype.drawTextEx = function drawTextEx(text) { return text.length; };
+    return root;
+  }
+
+  const validManifest = {
+    schema_version: 1,
+    key_schema_version: 'v1',
+    source_language: 'ja',
+    target_language: 'ko',
+  };
+  const validConfig = { schema_version: 1, startup_toast_enabled: false };
+  const cases = [
+    {
+      name: 'manifest schema version',
+      bundle: {
+        manifest: Object.assign({}, validManifest, { schema_version: 99 }),
+        config: validConfig,
+        records: [],
+      },
+      error: /runtime manifest schema_version 99 is unsupported/,
+    },
+    {
+      name: 'key schema version',
+      bundle: {
+        manifest: Object.assign({}, validManifest, { key_schema_version: 'legacy' }),
+        config: validConfig,
+        records: [],
+      },
+      error: /runtime manifest key_schema_version must be v1/,
+    },
+    {
+      name: 'source language',
+      bundle: {
+        manifest: Object.assign({}, validManifest, { source_language: '' }),
+        config: validConfig,
+        records: [],
+      },
+      error: /runtime manifest source_language is required/,
+    },
+    {
+      name: 'config schema version',
+      bundle: {
+        manifest: validManifest,
+        config: Object.assign({}, validConfig, { schema_version: 99 }),
+        records: [],
+      },
+      error: /runtime config schema_version 99 is unsupported/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const root = makeRoot();
+    await assert.rejects(
+      Boot.install(root, {
+        bundle: testCase.bundle,
+        engine: 'mz',
+      }),
+      testCase.error,
+      testCase.name,
+    );
+    assert.equal(root.RPGTranslatorOverlay && root.RPGTranslatorOverlay.installed, undefined);
+    assert.equal(root.Window_Message.prototype.startMessage.call({}), 'native-start');
+    assert.equal(root.Window_Base.prototype.drawTextEx.call({}, 'Menu'), 4);
+  }
+});
+
 test('boot exposes runtime diagnostics and records adapter install timing', async () => {
   const root = {
     document: { body: null },
