@@ -90,6 +90,8 @@
     if (translator && typeof translator.claimText === 'function' && !translator.claimText(slotKey, owner)) {
       return text;
     }
+    state.owner = owner;
+    state.slotKey = slotKey;
 
     const request = {
       engine: overlay(scope).engine || 'unknown',
@@ -258,6 +260,12 @@
     } else if (surface && translator && typeof translator.retireSurface === 'function') {
       translator.retireSurface(surface, reason);
     }
+    if (state.slotKey && translator && typeof translator.releaseTextClaim === 'function') {
+      translator.releaseTextClaim(state.slotKey, state.owner);
+    }
+    if (surface && state.owner && translator && typeof translator.releaseSurface === 'function') {
+      translator.releaseSurface(surface, state.owner);
+    }
     if (invalidate !== false && surface && translator && typeof translator.markSurfaceChanged === 'function') {
       translator.markSurfaceChanged(surface);
     }
@@ -267,6 +275,8 @@
     state.renderedText = '';
     state.visible = false;
     state.screenState = 'inactive';
+    state.owner = '';
+    state.slotKey = '';
     exposeState(surface, state);
     return Boolean(itemId);
   }
@@ -288,6 +298,8 @@
         objectId: String(nextObjectId++),
         revision: 0,
         itemId: '',
+        owner: '',
+        slotKey: '',
         applyingNativeText: false,
         originalText: '',
         renderedText: '',

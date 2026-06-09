@@ -2237,6 +2237,8 @@ test('pixi text adapter retires removed objects and restores translated text sca
   assert.equal(pixiText.style.fontSize, 20);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.claimSurface(pixiText, 'window-text'), true);
+  assert.equal(orchestrator.claimText(`pixi:${pixiText._rpgTranslatorPixiObjectId}:text`, 'window-text:slot'), true);
 });
 
 test('pixi text adapter leaves native text when another owner claimed the surface', () => {
