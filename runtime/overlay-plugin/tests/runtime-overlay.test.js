@@ -1399,8 +1399,7 @@ test('adapter contract uses mycode-style ownership payload tokens', () => {
     priority: 50,
     metadata: { reason: 'parent run' },
   });
-  assert.equal(surfaceClaim.status, 'accepted');
-  assert.equal(surfaceClaim.accepted, true);
+  assert.equal(surfaceClaim.status, 'claimed');
   assert.equal(surfaceClaim.token.kind, 'surface');
   assert.equal(contract.isContractError({ code: 'RPG_TRANSLATOR_ADAPTER_CONTRACT' }), true);
   assert.equal(isAdapterContractError({ code: 'LIVE_TRANSLATOR_ADAPTER_CONTRACT' }), true);
@@ -1421,8 +1420,7 @@ test('adapter contract uses mycode-style ownership payload tokens', () => {
     slotKey: 'sprite:glyph',
     text: 'Owned glyph',
   });
-  assert.equal(finalized.status, 'accepted');
-  assert.equal(finalized.accepted, true);
+  assert.equal(finalized.status, 'claimed');
 
   const competing = competingContract.claimText({
     target: surface,
@@ -1436,6 +1434,64 @@ test('adapter contract uses mycode-style ownership payload tokens', () => {
   assert.equal(contract.releaseSurface(surfaceClaim.token, 'done'), true);
   assert.equal(orchestrator.diagnostics().text_releases, 1);
   assert.equal(orchestrator.diagnostics().surface_releases, 1);
+});
+
+test('adapter contract preempts lower-priority provisional ownership', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const bitmapContract = createAdapterContract({
+    adapterId: 'bitmap-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+  const spriteContract = createAdapterContract({
+    adapterId: 'sprite-text',
+    defaultHook: 'glyph',
+    orchestratorGateway: orchestrator,
+  });
+
+  const provisional = bitmapContract.claimText({
+    target: surface,
+    slotKey: 'bitmap:fallback',
+    text: 'Glyph',
+    provisional: true,
+    priority: 10,
+  });
+  assert.equal(provisional.status, 'provisional');
+  assert.equal(provisional.token.kind, 'text');
+
+  const surfaceClaim = spriteContract.claimSurface({
+    target: surface,
+    slotKey: 'sprite:parent',
+    priority: 50,
+  });
+  assert.equal(surfaceClaim.status, 'claimed');
+
+  const finalized = bitmapContract.finalizeTextClaim(provisional.token, {
+    target: surface,
+    slotKey: 'bitmap:fallback',
+    text: 'Glyph',
+  });
+  assert.equal(finalized.status, 'denied');
+  assert.equal(finalized.reason, 'stale-claim');
+  assert.equal(bitmapContract.releaseTextClaim(provisional.token, 'too late'), false);
+
+  const lowerSurface = bitmapContract.claimSurface({
+    target: surface,
+    slotKey: 'bitmap:surface',
+    priority: 10,
+  });
+  assert.equal(lowerSurface.status, 'denied');
+  assert.equal(lowerSurface.reason, 'surface-owned');
+  assert.equal(lowerSurface.ownerAdapter, 'sprite-text');
 });
 
 test('adapter contract deduplicates tokenized subscriptions', () => {
