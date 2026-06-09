@@ -279,25 +279,59 @@
             type: 'item.render_queued',
             reason: route && route.reason,
           });
-          return source.onRenderQueued(record, command, route);
+          try {
+            return source.onRenderQueued(record, command, route);
+          } catch (error) {
+            return createRenderDecision('rejected', 'adapter-render-error', command, route, describeCallbackError(error));
+          }
+        };
+      }
+      if (typeof source.onRenderAccepted === 'function') {
+        wrapped.onRenderAccepted = (record, decision, route) => {
+          try {
+            return source.onRenderAccepted(record, decision, route);
+          } catch (_error) {
+            return false;
+          }
+        };
+      }
+      if (typeof source.onRenderRejected === 'function') {
+        wrapped.onRenderRejected = (record, decision, route) => {
+          try {
+            return source.onRenderRejected(record, decision, route);
+          } catch (_error) {
+            return false;
+          }
         };
       }
       if (typeof source.onSkipped === 'function') {
         wrapped.onSkipped = (record, event, route) => {
           rememberRecordEvent(record, subscriptionRecordId(record, event, route), event || { type: 'item.skipped' });
-          return source.onSkipped(record, event, route);
+          try {
+            return source.onSkipped(record, event, route);
+          } catch (_error) {
+            return false;
+          }
         };
       }
       if (typeof source.onFailed === 'function') {
         wrapped.onFailed = (record, event, route) => {
           rememberRecordEvent(record, subscriptionRecordId(record, event, route), event || { type: 'item.failed' });
-          return source.onFailed(record, event, route);
+          try {
+            return source.onFailed(record, event, route);
+          } catch (_error) {
+            return false;
+          }
         };
       }
       if (typeof source.onEvent === 'function') {
         wrapped.onEvent = (record, event, route) => {
           rememberRecordEvent(record, subscriptionRecordId(record, event, route), event || {});
-          return source.onEvent(record, event, route);
+          try {
+            return source.onEvent(record, event, route);
+          } catch (_error) {
+            return false;
+          }
         };
       }
       return wrapped;

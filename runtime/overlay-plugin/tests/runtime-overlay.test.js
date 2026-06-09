@@ -2025,6 +2025,70 @@ test('adapter contract deduplicates tokenized subscriptions', () => {
   assert.equal(counts.records, 1);
 });
 
+test('adapter contract contains direct subscribeRecords render callback errors', () => {
+  let wrapped = null;
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe() {
+      return () => {};
+    },
+    subscribeRecords(subscription) {
+      wrapped = subscription;
+      return () => {};
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = {};
+
+  contract.observeRecord(record, {
+    id: 'direct-error-record',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'direct-error-slot',
+    text: 'Direct error source',
+    renderStrategy: 'window-text',
+  });
+  assert.equal(contract.subscribeRecords({
+    token: 'direct-error-records',
+    renderStrategy: 'window-text',
+    onRenderQueued() {
+      throw new Error('direct render callback exploded');
+    },
+  }), true);
+  assert.equal(typeof wrapped.onRenderQueued, 'function');
+
+  let decision = null;
+  assert.doesNotThrow(() => {
+    decision = wrapped.onRenderQueued(record, {
+      id: 'direct-command',
+      itemId: 'direct-error-record',
+      strategy: 'window-text',
+      text: 'Direct error source',
+      generation: 1,
+    }, {
+      recordId: 'direct-error-record',
+      itemId: 'direct-error-record',
+      commandId: 'direct-command',
+      strategy: 'window-text',
+      commandGeneration: 1,
+    });
+  });
+  assert.equal(decision.status, 'rejected');
+  assert.equal(decision.reason, 'adapter-render-error');
+  assert.equal(decision.itemId, 'direct-error-record');
+  assert.equal(decision.commandId, 'direct-command');
+  assert.equal(decision.details.errorMessage, 'direct render callback exploded');
+});
+
 test('adapter contract maps mycode public methods onto gateway backing subscribe', () => {
   const records = new Map();
   const routed = [];
