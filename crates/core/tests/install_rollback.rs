@@ -92,7 +92,7 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .is_file()
     );
     assert!(report.install_manifest_path.is_file());
-    assert_eq!(report.installed_files.len(), 19);
+    assert_eq!(report.installed_files.len(), 20);
 
     let plugins = fs::read_to_string(game.join("js/plugins.js")).expect("read plugins");
     assert_eq!(plugins.matches("\"name\": \"RPGTranslator\"").count(), 1);
@@ -114,6 +114,7 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             "lookup-index.js",
             "render-guard.js",
             "wrapping.js",
+            "runtime-diagnostics.js",
             "orchestrator.js",
             "foresight-scanner.js",
             "cache-loader.js",
@@ -330,6 +331,7 @@ fn installer_rejects_missing_runtime_support_file_before_mutating_game() {
         "lookup-index.js",
         "render-guard.js",
         "wrapping.js",
+        "runtime-diagnostics.js",
         "orchestrator.js",
         "foresight-scanner.js",
         "cache-loader.js",

@@ -13,6 +13,7 @@ const { TextOrchestrator } = require('../orchestrator');
 const { PixiTextAdapter } = require('../pixi-text-adapter');
 const { RenderGuard } = require('../render-guard');
 const { RuntimeEntry } = require('../RPGTranslator');
+const { RuntimeDiagnostics } = require('../runtime-diagnostics');
 const { RuntimeMissLogger } = require('../runtime-miss-logger');
 const { SpriteTextAdapter } = require('../sprite-text-adapter');
 const { StartupToast } = require('../startup-toast');
@@ -254,6 +255,72 @@ test('render guard rejects stale render operations after surface changes', () =>
   assert.equal(guard.canRender(token, surface, 'こんばんは'), false);
   guard.markSurfaceChanged(surface);
   assert.equal(guard.canRender(token, surface, 'こんにちは'), false);
+});
+
+test('runtime diagnostics records hook timing and bounded draw trace summaries', () => {
+  let now = 1000;
+  const diagnostics = new RuntimeDiagnostics({
+    now: () => {
+      now += 10;
+      return now;
+    },
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: {
+        enabled: true,
+        record_all: true,
+        limit: 2,
+      },
+    },
+  });
+
+  diagnostics.recordDraw('native-draw', {
+    adapter: 'window-text',
+    methodName: 'drawText',
+    rawText: 'こんにちは',
+    reason: 'cache-miss',
+  });
+  diagnostics.recordDraw('native-draw', {
+    adapter: 'bitmap-text',
+    methodName: 'drawText',
+    rawText: '世界',
+    reason: 'cache-hit',
+  });
+  diagnostics.recordDraw('skip', {
+    adapter: 'pixi-text',
+    methodName: 'text',
+    rawText: 'Plain',
+    reason: 'ownership-conflict',
+  });
+  diagnostics.time('adapter.window.draw.ms', 7.5, { domain: 'runtime' });
+  diagnostics.recordAdapterInstall('window-text', 'installed', 5.2);
+
+  const snapshot = diagnostics.snapshot({ detailView: true });
+  assert.equal(snapshot.drawTrace.size, 2);
+  assert.deepEqual(snapshot.drawTrace.summary.byAdapter, {
+    'bitmap-text': 1,
+    'pixi-text': 1,
+  });
+  assert.deepEqual(snapshot.drawTrace.summary.byReason, {
+    'cache-hit': 1,
+    'ownership-conflict': 1,
+  });
+  assert.deepEqual(snapshot.hookTimingSummary, {
+    'hook.install.window-text.ms': {
+      count: 1,
+      totalMs: 5.2,
+      avgMs: 5.2,
+      maxMs: 5.2,
+    },
+  });
+  assert.deepEqual(snapshot.adapterInstallStatus, [
+    {
+      adapter: 'window-text',
+      status: 'installed',
+      elapsedMs: 5.2,
+    },
+  ]);
+  assert.equal(snapshot.performance.timings.some((entry) => entry.name === 'adapter.window.draw.ms'), true);
 });
 
 test('orchestrator records canonical items and rejects stale render commands', () => {
@@ -2395,6 +2462,49 @@ test('boot installs cache-only overlay without provider surfaces', async () => {
   assert.equal(root.RPGTranslatorOverlay.translationQueue, undefined);
 });
 
+test('boot exposes runtime diagnostics and records adapter install timing', async () => {
+  const root = {
+    document: { body: null },
+    $gameMessage: { _texts: [] },
+    Window_Message: function WindowMessage() {},
+    Window_Base: function WindowBase() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Base.prototype.drawText = function drawText() {};
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) { return text.length; };
+
+  await Boot.install(root, {
+    now: (() => {
+      let value = 0;
+      return () => {
+        value += 3;
+        return value;
+      };
+    })(),
+    bundle: {
+      manifest: { schema_version: 1, key_schema_version: 'v1', source_language: 'ja', target_language: 'ko' },
+      config: {
+        diagnostics_enabled: true,
+        startup_toast_enabled: false,
+      },
+      records: [],
+    },
+    engine: 'mz',
+  });
+
+  const diagnostics = root.RPGTranslatorOverlay.runtimeDiagnostics;
+  assert.ok(diagnostics);
+  const snapshot = diagnostics.snapshot({ detailView: true });
+  assert.deepEqual(snapshot.adapterInstallStatus.map((entry) => entry.adapter), [
+    'message',
+    'window-text',
+    'bitmap-text',
+    'sprite-text',
+    'pixi-text',
+  ]);
+  assert.equal(snapshot.performance.timings.some((entry) => entry.name === 'hook.install.message.ms'), true);
+});
+
 test('boot passes exported foresight command catalog to scanner', async () => {
   const root = {
     document: { body: null },
@@ -2485,6 +2595,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}lookup-index.js`,
     `${baseUrl}render-guard.js`,
     `${baseUrl}wrapping.js`,
+    `${baseUrl}runtime-diagnostics.js`,
     `${baseUrl}orchestrator.js`,
     `${baseUrl}foresight-scanner.js`,
     `${baseUrl}cache-loader.js`,

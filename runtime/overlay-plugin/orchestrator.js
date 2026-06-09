@@ -8,6 +8,7 @@
       this.sourceLanguage = options.sourceLanguage || '';
       this.targetLanguage = options.targetLanguage || '';
       this.guard = options.renderGuard || (RenderGuard ? new RenderGuard() : null);
+      this.runtimeDiagnostics = options.diagnostics || null;
       this.nextItemId = 1;
       this.nextSurfaceId = 1;
       this.activeItems = new Map();
@@ -53,16 +54,40 @@
       this.activeItems.set(item.id, item);
       this.slotIndex.set(slotId, item.id);
       this.diagnosticState.observed_items += 1;
+      this.recordDrawTrace('observe', {
+        adapter: item.adapter,
+        methodName: item.kind,
+        rawText: text,
+        visibleText: text,
+        reason: 'observed',
+        force: true,
+      });
       this.emit('observed', item);
 
-      const translatedText = this.lookup(item);
+      const translatedText = this.measure('cache.lookup.ms', () => this.lookup(item), { domain: 'runtime' });
       if (!translatedText || translatedText === text) {
         this.diagnosticState.cache_misses += 1;
         item.translationState = 'miss';
+        this.recordDrawTrace('cache-miss', {
+          adapter: item.adapter,
+          methodName: item.kind,
+          rawText: text,
+          visibleText: text,
+          reason: 'cache-miss',
+          force: true,
+        });
         return this.queueRenderCommand(item, text, 'miss');
       }
       this.diagnosticState.cache_hits += 1;
       item.translationState = 'hit';
+      this.recordDrawTrace('cache-hit', {
+        adapter: item.adapter,
+        methodName: item.kind,
+        rawText: text,
+        visibleText: translatedText,
+        reason: 'cache-hit',
+        force: true,
+      });
       return this.queueRenderCommand(item, translatedText, 'hit');
     }
 
@@ -178,12 +203,16 @@
     }
 
     diagnostics() {
-      return Object.assign({}, this.diagnosticState, {
+      const diagnostics = Object.assign({}, this.diagnosticState, {
         active_items: this.activeItems.size,
         detached_items: this.detachedItems.size,
         archived_items: this.archivedItems.size,
         queued_render_commands: this.renderQueue.length,
       });
+      if (this.runtimeDiagnostics && typeof this.runtimeDiagnostics.snapshot === 'function') {
+        diagnostics.runtime_diagnostics = this.runtimeDiagnostics.snapshot({ detailView: false });
+      }
+      return diagnostics;
     }
 
     subscribe(listener) {
@@ -218,6 +247,18 @@
       if (this.renderQueue.length > 256) this.renderQueue.shift();
       this.emit('renderQueued', command);
       return command;
+    }
+
+    recordDrawTrace(stage, details) {
+      if (!this.runtimeDiagnostics || typeof this.runtimeDiagnostics.recordDraw !== 'function') return null;
+      return this.runtimeDiagnostics.recordDraw(stage, details);
+    }
+
+    measure(name, callback, options) {
+      if (this.runtimeDiagnostics && typeof this.runtimeDiagnostics.measure === 'function') {
+        return this.runtimeDiagnostics.measure(name, callback, options);
+      }
+      return callback();
     }
 
     surfaceId(surface) {

@@ -6,6 +6,7 @@
     'lookup-index.js',
     'render-guard.js',
     'wrapping.js',
+    'runtime-diagnostics.js',
     'orchestrator.js',
     'foresight-scanner.js',
     'cache-loader.js',

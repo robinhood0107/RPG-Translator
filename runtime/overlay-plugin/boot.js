@@ -5,6 +5,7 @@
   const { MessageAdapter } = loadDependency(root, './message-adapter');
   const { PixiTextAdapter } = loadDependency(root, './pixi-text-adapter');
   const { RenderGuard } = loadDependency(root, './render-guard');
+  const { RuntimeDiagnostics } = loadDependency(root, './runtime-diagnostics');
   const { RuntimeMissLogger } = loadDependency(root, './runtime-miss-logger');
   const { TextOrchestrator } = loadDependency(root, './orchestrator');
   const { ForesightScanner } = loadDependency(root, './foresight-scanner');
@@ -22,12 +23,19 @@
         ? RuntimeMissLogger.fromConfig(bundle.config || {}, options.missLogger || {})
         : null;
       const index = new LookupIndex(Object.assign({}, bundle, { missLogger }));
+      const runtimeDiagnostics = RuntimeDiagnostics
+        ? new RuntimeDiagnostics({
+          settings: bundle.config || {},
+          now: options.now,
+        })
+        : null;
       const orchestrator = TextOrchestrator
         ? new TextOrchestrator(index, {
           engine: options.engine || 'unknown',
           sourceLanguage: bundle.manifest.source_language,
           targetLanguage: bundle.manifest.target_language,
           renderGuard: RenderGuard ? new RenderGuard() : null,
+          diagnostics: runtimeDiagnostics,
         })
         : index;
       const foresightScanner = ForesightScanner
@@ -47,14 +55,15 @@
         index,
         orchestrator,
         foresightScanner,
+        runtimeDiagnostics,
       });
       scope.RPGTranslatorOverlay = nextOverlay;
 
-      MessageAdapter.install(scope, orchestrator);
-      WindowTextAdapter.install(scope, orchestrator);
-      BitmapTextAdapter.install(scope, orchestrator);
-      SpriteTextAdapter.install(scope, orchestrator);
-      PixiTextAdapter.install(scope, orchestrator);
+      installAdapter(runtimeDiagnostics, 'message', () => MessageAdapter.install(scope, orchestrator));
+      installAdapter(runtimeDiagnostics, 'window-text', () => WindowTextAdapter.install(scope, orchestrator));
+      installAdapter(runtimeDiagnostics, 'bitmap-text', () => BitmapTextAdapter.install(scope, orchestrator));
+      installAdapter(runtimeDiagnostics, 'sprite-text', () => SpriteTextAdapter.install(scope, orchestrator));
+      installAdapter(runtimeDiagnostics, 'pixi-text', () => PixiTextAdapter.install(scope, orchestrator));
       if (bundle.config && bundle.config.startup_toast_enabled !== false) {
         new StartupToast({ document: scope.document, setTimeout: scope.setTimeout }).show(bundle.config);
       }
@@ -84,6 +93,7 @@
       './message-adapter': 'MessageAdapter',
       './pixi-text-adapter': 'PixiTextAdapter',
       './render-guard': 'RenderGuard',
+      './runtime-diagnostics': 'RuntimeDiagnostics',
       './runtime-miss-logger': 'RuntimeMissLogger',
       './orchestrator': 'TextOrchestrator',
       './foresight-scanner': 'ForesightScanner',
@@ -97,6 +107,13 @@
       return require(modulePath);
     }
     return overlay;
+  }
+
+  function installAdapter(runtimeDiagnostics, adapter, callback) {
+    if (runtimeDiagnostics && typeof runtimeDiagnostics.measureAdapterInstall === 'function') {
+      return runtimeDiagnostics.measureAdapterInstall(adapter, callback);
+    }
+    return callback();
   }
 
   publish(root, { Boot });
