@@ -1440,6 +1440,66 @@ test('message adapter attaches interpreter message origin for cache-only foresig
   assert.equal(blocks[0].cacheStatus, 'hit');
 });
 
+test('message adapter schedules cache-only foresight scan when message starts', () => {
+  const list = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Current message'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Next message'] },
+    { code: 0, indent: 0, parameters: [] },
+  ];
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Next message') return '다음 메시지';
+      return null;
+    },
+  };
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'en',
+      targetLanguage: 'ko',
+      foresightScanner: scanner,
+    },
+    $gameMessage: {
+      _texts: ['Current message'],
+      isBusy() { return false; },
+    },
+    Game_Interpreter: function GameInterpreter() {
+      this._list = list;
+      this._index = 0;
+    },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Game_Interpreter.prototype.command101 = function command101() {
+    return true;
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const interpreter = new root.Game_Interpreter();
+  assert.equal(interpreter.command101(), true);
+
+  new root.Window_Message().startMessage();
+
+  assert.equal(scanner.getSnapshot().recent_scans.length, 1);
+  assert.equal(scanner.getSnapshot().cache_hits, 1);
+  assert.deepEqual(requests, ['Current message', 'Next message']);
+});
+
 test('message adapter preserves child interpreter parent frames for cache-only foresight', () => {
   const parentList = [
     { code: 117, indent: 0, parameters: [5] },

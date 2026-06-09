@@ -32,6 +32,7 @@
           if (translated && translated !== originalText) {
             message._texts = translatedLines(translated, originalText, this);
           }
+          scheduleForesightScan(scope, message);
         }
         if (typeof originalStartMessage === 'function') {
           return originalStartMessage.apply(this, args);
@@ -50,6 +51,7 @@
         if (translated && translated !== originalText) {
           redrawMessageFallback(scope, this, translated, originalText);
         }
+        scheduleForesightScan(scope, scope.$gameMessage);
         return translated;
       };
       installProcessCharacterFallback(prototype, scope, translator, trackedWindows);
@@ -486,6 +488,17 @@
       } catch (_) {
         // Map transfer must remain game-safe even if diagnostics state is unavailable.
       }
+    }
+  }
+
+  function scheduleForesightScan(scope, gameMessage) {
+    const scanner = scope && scope.RPGTranslatorOverlay && scope.RPGTranslatorOverlay.foresightScanner;
+    const origin = gameMessage && gameMessage._trMessageOrigin;
+    if (!origin || !scanner || typeof scanner.collectUpcomingMessageBlocks !== 'function') return [];
+    try {
+      return scanner.collectUpcomingMessageBlocks({ currentMessageOrigin: origin });
+    } catch (_) {
+      return [];
     }
   }
 
