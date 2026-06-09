@@ -592,6 +592,70 @@ test('orchestrator cache-only request records miss without provider handle', asy
   ]);
 });
 
+test('orchestrator records adapter render decisions against queued commands', () => {
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Decision source') return '결정 번역';
+      if (request.text === 'Reject source') return '거절 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const acceptedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'decision-a',
+    text: 'Decision source',
+    renderStrategy: 'window-text',
+  });
+  const rejectedCommand = orchestrator.observeRecord({
+    adapter: 'bitmap-text',
+    kind: 'Bitmap.drawText',
+    surface: {},
+    slotKey: 'decision-b',
+    text: 'Reject source',
+    renderStrategy: 'bitmap-text',
+  });
+
+  assert.equal(orchestrator.recordRenderDeferred(acceptedCommand.itemId, {
+    commandId: acceptedCommand.id,
+    reason: 'window-hidden',
+  }), true);
+  assert.equal(orchestrator.recordRenderAccepted(acceptedCommand.itemId, {
+    commandId: acceptedCommand.id,
+    reason: 'bitmap-replay',
+    details: { textScale: 1.1 },
+  }), true);
+  assert.equal(orchestrator.recordRenderRejected(rejectedCommand.itemId, {
+    commandId: rejectedCommand.id,
+    reason: 'surface-generation-mismatch',
+    details: { currentGeneration: 2 },
+  }), true);
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.render_accepted, 1);
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [
+    entry.id,
+    entry.renderStatus,
+    entry.renderReason,
+    entry.renderDetails && entry.renderDetails.textScale || null,
+    entry.renderDetails && entry.renderDetails.currentGeneration || null,
+  ]), [
+    [acceptedCommand.id, 'accepted', 'bitmap-replay', 1.1, null],
+    [rejectedCommand.id, 'rejected', 'surface-generation-mismatch', null, 2],
+  ]);
+  assert.deepEqual(diagnostics.recent_events.slice(-3).map((event) => [event.type, event.reason]), [
+    ['renderDeferred', 'window-hidden'],
+    ['renderAccepted', 'bitmap-replay'],
+    ['renderRejected', 'surface-generation-mismatch'],
+  ]);
+});
+
 test('orchestrator routes render commands through record subscriptions', () => {
   const surface = {};
   const routed = [];

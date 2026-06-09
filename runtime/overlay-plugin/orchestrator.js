@@ -204,6 +204,52 @@
       return false;
     }
 
+    recordRenderAccepted(itemId, decision = {}) {
+      return this.recordRenderDecision('accepted', itemId, decision);
+    }
+
+    recordRenderDeferred(itemId, decision = {}) {
+      return this.recordRenderDecision('deferred', itemId, decision);
+    }
+
+    recordRenderRejected(itemId, decision = {}) {
+      return this.recordRenderDecision('rejected', itemId, decision);
+    }
+
+    recordRenderDecision(status, itemId, decision = {}) {
+      const normalizedStatus = normalizeRenderDecisionStatus(status);
+      const source = decision && typeof decision === 'object' ? decision : {};
+      const item = this.getItemById(itemId || source.itemId || source.recordId);
+      if (!item) return false;
+      const command = this.findRenderCommand(item.id, source.commandId);
+      const reason = String(source.reason || normalizedStatus);
+      const details = sanitizeDetails(source.details);
+      const previousStatus = command ? command.renderStatus : item.lastRenderStatus;
+      if (command) {
+        command.renderStatus = normalizedStatus;
+        command.renderReason = reason;
+        command.renderDetails = details;
+        command.reason = reason;
+      }
+      item.lastRenderStatus = normalizedStatus;
+      if (normalizedStatus === 'accepted' && previousStatus !== 'accepted') {
+        this.diagnosticState.render_accepted += 1;
+      }
+      if (normalizedStatus === 'rejected' && previousStatus !== 'rejected') {
+        this.diagnosticState.render_rejected += 1;
+      }
+      this.emit(renderDecisionEventType(normalizedStatus), Object.assign({
+        reason,
+        status: normalizedStatus,
+        translatedText: command ? command.translatedText : item.translation,
+        sourceText: command ? command.sourceText : item.sourceText,
+        renderStatus: normalizedStatus,
+        renderReason: reason,
+        renderDetails: details,
+      }, command || item));
+      return true;
+    }
+
     detachItem(itemId) {
       const item = this.activeItems.get(itemId);
       if (!item) return false;
@@ -304,6 +350,18 @@
     getItemById(itemId) {
       const key = String(itemId || '');
       return this.activeItems.get(key) || this.detachedItems.get(key) || this.archivedItems.get(key) || null;
+    }
+
+    findRenderCommand(itemId, commandId = '') {
+      const itemKey = String(itemId || '');
+      const commandKey = String(commandId || '');
+      for (let index = this.renderQueue.length - 1; index >= 0; index -= 1) {
+        const command = this.renderQueue[index];
+        if (!command) continue;
+        if (commandKey && command.id === commandKey) return command;
+        if (!commandKey && itemKey && command.itemId === itemKey) return command;
+      }
+      return null;
     }
 
     diagnostics() {
@@ -411,6 +469,9 @@
         translatedText: String(translatedText ?? ''),
         status,
         reason: status,
+        renderStatus: 'queued',
+        renderReason: '',
+        renderDetails: null,
         strategy: item.renderStrategy || '',
         generation: item.generation,
         renderToken: this.guard ? this.guard.capture(item.surface, item.sourceText) : null,
@@ -682,6 +743,11 @@
       translatedText: limitText(source.translatedText),
       status: stringValue(source.status),
       reason: stringValue(source.reason),
+      renderStatus: stringValue(source.renderStatus),
+      renderReason: stringValue(source.renderReason),
+      renderDetails: source.renderDetails && typeof source.renderDetails === 'object'
+        ? Object.assign({}, source.renderDetails)
+        : null,
       strategy: stringValue(source.strategy),
       generation: numberOrDefault(source.generation, 0),
     };
@@ -696,6 +762,31 @@
       getStatus: () => String(status || ''),
       getSourceHint: () => String(sourceHint || ''),
     };
+  }
+
+  function normalizeRenderDecisionStatus(status) {
+    const value = String(status || '').toLowerCase();
+    if (value === 'accepted') return 'accepted';
+    if (value === 'deferred') return 'deferred';
+    if (value === 'rejected') return 'rejected';
+    return 'rejected';
+  }
+
+  function renderDecisionEventType(status) {
+    if (status === 'accepted') return 'renderAccepted';
+    if (status === 'deferred') return 'renderDeferred';
+    return 'renderRejected';
+  }
+
+  function sanitizeDetails(details) {
+    if (!details || typeof details !== 'object') return null;
+    const output = {};
+    for (const [key, value] of Object.entries(details)) {
+      if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+        output[key] = value;
+      }
+    }
+    return output;
   }
 
   function normalizeSurfaceDrawDecision(input) {
