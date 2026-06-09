@@ -286,6 +286,11 @@ test('cache loader rejects malformed static bundle metadata before cache file fe
       error: /manifest cache_files must be an array/,
     },
     {
+      manifest: Object.assign({}, validManifest, { cache_files: ['../outside.jsonl'] }),
+      config: validConfig,
+      error: /manifest cache_files contains unsupported file ../,
+    },
+    {
       manifest: Object.assign({}, validManifest, { record_count: '1' }),
       config: validConfig,
       error: /manifest record_count must be a number/,
@@ -313,7 +318,9 @@ test('cache loader rejects malformed static bundle metadata before cache file fe
     await assert.rejects(
       CacheLoader.load('', async (url) => {
         fetched.push(url);
-        if (url === 'cache.jsonl') throw new Error('cache file should not be fetched');
+        if (url !== 'manifest.json' && url !== 'overlay-config.json') {
+          throw new Error(`cache file should not be fetched: ${url}`);
+        }
         return {
           ok: true,
           text: async () => files.get(url),

@@ -59,9 +59,25 @@
     if (!Array.isArray(manifest.cache_files)) {
       throw new Error('manifest cache_files must be an array');
     }
+    for (const cacheFile of manifest.cache_files) {
+      validateCacheFileName(cacheFile);
+    }
     const recordCount = getObjectValue(manifest, 'record_count', 'recordCount');
     if (!Number.isInteger(recordCount) || recordCount < 0) {
       throw new Error('manifest record_count must be a number');
+    }
+  }
+
+  function validateCacheFileName(cacheFile) {
+    if (typeof cacheFile !== 'string' || cacheFile.length === 0) {
+      throw new Error('manifest cache_files contains unsupported file');
+    }
+    if (cacheFile.includes('/') || cacheFile.includes('\\')) {
+      throw new Error(`manifest cache_files contains unsupported file ${cacheFile}`);
+    }
+    const isShardedCacheFile = cacheFile.startsWith('cache-') && cacheFile.endsWith('.jsonl');
+    if (cacheFile !== 'cache.jsonl' && !isShardedCacheFile) {
+      throw new Error(`manifest cache_files contains unsupported file ${cacheFile}`);
     }
   }
 
