@@ -3043,6 +3043,7 @@ async function closeWindowWithFallback(appWindow: CloseableAppWindow, startedAtM
   const destroyBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
   if (destroyBudgetMs <= 0) {
     void Promise.resolve(destroyWork).catch(() => {});
+    void Promise.resolve(invokeWindowCloseOperation(() => appWindow.close())).catch(() => {});
     return;
   }
   const destroyCompleted = await settleBeforeTimeout(destroyWork, destroyBudgetMs);
