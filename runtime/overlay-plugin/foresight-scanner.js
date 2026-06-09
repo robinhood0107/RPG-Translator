@@ -1,6 +1,7 @@
 (function attach(root) {
   const DEFAULT_MAX_BLOCKS = 24;
   const DEFAULT_MAX_COMMANDS = 512;
+  const DEFAULT_MAX_BRANCH_DEPTH = 8;
 
   class ForesightScanner {
     constructor(index, options = {}) {
@@ -11,6 +12,7 @@
       this.commonEvents = options.commonEvents || (root && root.$dataCommonEvents) || {};
       this.maxBlocks = positiveInteger(options.maxBlocks, DEFAULT_MAX_BLOCKS);
       this.maxCommands = positiveInteger(options.maxCommands, DEFAULT_MAX_COMMANDS);
+      this.maxBranchDepth = positiveInteger(options.maxBranchDepth, DEFAULT_MAX_BRANCH_DEPTH);
       this.recentScans = [];
       this.cacheHits = 0;
       this.cacheMisses = 0;
@@ -34,6 +36,8 @@
         indent: Number.isFinite(Number(origin.indent)) ? Number(origin.indent) : null,
         listId: origin.listId || origin.interpreterId || 'event',
         commonStack: cloneCommonStack(origin.commonStack || []),
+        branchDepth: 0,
+        branchPath: [],
       }];
 
       while (stack.length && blocks.length < this.maxBlocks && diagnostics.scanned_commands < this.maxCommands) {
@@ -109,7 +113,10 @@
   function scanFrame(scanner, frame, stack, blocks, diagnostics) {
     const list = frame.list;
     let index = Math.max(0, Math.floor(Number(frame.index) || 0));
-    while (index < list.length && blocks.length < scanner.maxBlocks && diagnostics.scanned_commands < scanner.maxCommands) {
+    const endIndex = Number.isFinite(Number(frame.endIndex))
+      ? Math.max(0, Math.floor(Number(frame.endIndex)))
+      : list.length;
+    while (index < list.length && index < endIndex && blocks.length < scanner.maxBlocks && diagnostics.scanned_commands < scanner.maxCommands) {
       const command = list[index];
       if (!isCommand(command)) {
         index += 1;
@@ -135,8 +142,30 @@
           if (blocks.length >= scanner.maxBlocks) return;
           blocks.push(createBlock(scanner, choice, 'choice', frame, index, { choiceIndex }));
         });
+        const branchRead = readChoiceBranches(list, index, command);
+        if (branchRead && branchRead.targets.length) {
+          index = scanBranchTargets(scanner, frame, stack, blocks, diagnostics, branchRead, 'choice');
+          continue;
+        }
         index += 1;
         continue;
+      }
+      if (code === 111) {
+        const branchRead = readConditionalBranches(list, index, command);
+        if (branchRead && branchRead.targets.length) {
+          index = scanBranchTargets(scanner, frame, stack, blocks, diagnostics, branchRead, 'conditional');
+          continue;
+        }
+        diagnostics.stop_reason = 'branch-structure-desync';
+        appendPathStop(diagnostics, {
+          index,
+          stop_reason: 'branch-structure-desync',
+          branch_depth: frame.branchDepth || 0,
+          branch_path: cloneBranchPath(frame.branchPath),
+          code,
+          label: 'Conditional Branch',
+        });
+        return;
       }
       if (code === 117) {
         const commonEventId = readCommonEventId(command);
@@ -148,6 +177,7 @@
             indent: frame.indent,
             listId: frame.listId,
             commonStack: cloneCommonStack(frame.commonStack),
+            ...inheritBranchContext(frame),
           });
           stack.push({
             list: commonEvent.list,
@@ -155,6 +185,7 @@
             indent: 0,
             listId: `common:${commonEventId}`,
             commonStack: cloneCommonStack(frame.commonStack).concat(commonEventId),
+            ...inheritBranchContext(frame),
           });
           diagnostics.common_event_pushes += 1;
           return;
@@ -171,6 +202,7 @@
 
   function createBlock(scanner, rawText, kind, frame, index, metadata) {
     const lookup = scanner.lookup(rawText, metadata);
+    const branchMetadata = createBranchMetadata(frame);
     return {
       kind,
       rawText,
@@ -178,7 +210,172 @@
       cacheStatus: lookup.cacheStatus,
       listId: frame.listId || '',
       commandIndex: index,
-      metadata: Object.assign({}, metadata || {}),
+      metadata: Object.assign({}, metadata || {}, branchMetadata),
+    };
+  }
+
+  function scanBranchTargets(scanner, frame, stack, blocks, diagnostics, branchRead, branchKind) {
+    const parentDepth = Math.max(0, Math.floor(Number(frame.branchDepth) || 0));
+    if (parentDepth >= scanner.maxBranchDepth) {
+      diagnostics.stop_reason = 'branch-depth-limit';
+      appendPathStop(diagnostics, {
+        index: branchRead.ownerIndex,
+        stop_reason: 'branch-depth-limit',
+        branch_depth: parentDepth,
+        branch_path: cloneBranchPath(frame.branchPath),
+        code: branchKind === 'conditional' ? 111 : 102,
+        label: branchKind,
+      });
+      return branchRead.joinIndex;
+    }
+    const branchCount = branchRead.targets.length;
+    diagnostics.branch_paths += branchCount;
+    branchRead.targets.forEach((target, branchIndex) => {
+      if (blocks.length >= scanner.maxBlocks || diagnostics.scanned_commands >= scanner.maxCommands) return;
+      const branchPath = cloneBranchPath(frame.branchPath).concat(branchIndex);
+      const branchFrame = {
+        list: frame.list,
+        index: target.startIndex,
+        endIndex: target.endIndex,
+        indent: target.bodyIndent,
+        listId: `${frame.listId || 'event'}:branch:${target.ownerIndex}:${branchIndex}`,
+        commonStack: cloneCommonStack(frame.commonStack),
+        branchKind,
+        branchDepth: parentDepth + 1,
+        branchPath,
+        branchIndex,
+        branchCount,
+        branchLabel: target.label,
+        parentCommandIndex: target.ownerIndex,
+      };
+      scanFrame(scanner, branchFrame, stack, blocks, diagnostics);
+      appendPathStop(diagnostics, {
+        index: target.endIndex,
+        stop_reason: 'branch-end',
+        branch_depth: branchFrame.branchDepth,
+        branch_path: branchPath,
+        code: branchKind === 'conditional' ? 111 : 102,
+        label: target.label,
+      });
+    });
+    return branchRead.joinIndex;
+  }
+
+  function readChoiceBranches(list, index, command) {
+    const expectedIndent = readIndent(command);
+    const endIndex = findBranchEndIndex(list, index, expectedIndent, 404);
+    if (endIndex === null) return null;
+    const branchCodes = new Set([402, 403]);
+    const targets = [];
+    for (let cursor = index + 1; cursor < endIndex; cursor += 1) {
+      const candidate = list[cursor];
+      if (!isCommand(candidate)) return null;
+      const indent = readIndent(candidate);
+      if (indent < expectedIndent) return null;
+      if (indent !== expectedIndent) continue;
+      const code = Number(candidate.code);
+      if (!branchCodes.has(code)) return null;
+      targets.push(createBranchTarget(list, cursor, index, expectedIndent, endIndex, branchCodes, 404, targets.length));
+    }
+    if (!targets.length) return null;
+    return { ownerIndex: index, targets, joinIndex: endIndex + 1 };
+  }
+
+  function readConditionalBranches(list, index, command) {
+    const expectedIndent = readIndent(command);
+    const endIndex = findBranchEndIndex(list, index, expectedIndent, 412);
+    if (endIndex === null) return null;
+    let elseIndex = null;
+    for (let cursor = index + 1; cursor < endIndex; cursor += 1) {
+      const candidate = list[cursor];
+      if (!isCommand(candidate)) return null;
+      const indent = readIndent(candidate);
+      if (indent < expectedIndent) return null;
+      if (indent !== expectedIndent) continue;
+      if (Number(candidate.code) !== 411 || elseIndex !== null) return null;
+      elseIndex = cursor;
+    }
+    const joinIndex = endIndex + 1;
+    return {
+      ownerIndex: index,
+      targets: [
+        {
+          ownerIndex: index,
+          startIndex: index + 1,
+          endIndex: elseIndex === null ? endIndex : elseIndex,
+          joinIndex,
+          bodyIndent: expectedIndent + 1,
+          label: 'Condition true',
+        },
+        {
+          ownerIndex: index,
+          startIndex: elseIndex === null ? endIndex : elseIndex + 1,
+          endIndex,
+          joinIndex,
+          bodyIndent: expectedIndent + 1,
+          label: elseIndex === null ? 'Condition false' : getBranchHeaderLabel(list[elseIndex], 'Condition false'),
+        },
+      ],
+      joinIndex,
+    };
+  }
+
+  function findBranchEndIndex(list, index, expectedIndent, endCode) {
+    if (!Array.isArray(list)) return null;
+    for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+      const command = list[cursor];
+      if (!isCommand(command)) return null;
+      const indent = readIndent(command);
+      if (indent < expectedIndent) return null;
+      if (indent === expectedIndent && Number(command.code) === Number(endCode)) return cursor;
+    }
+    return null;
+  }
+
+  function createBranchTarget(list, headerIndex, ownerIndex, expectedIndent, endIndex, branchCodes, endCode, branchIndex) {
+    const nextBoundary = findNextBranchBoundary(list, headerIndex + 1, expectedIndent, endIndex, branchCodes, endCode);
+    return {
+      ownerIndex,
+      startIndex: headerIndex + 1,
+      endIndex: nextBoundary === null ? endIndex : nextBoundary,
+      joinIndex: endIndex + 1,
+      bodyIndent: expectedIndent + 1,
+      label: getBranchHeaderLabel(list[headerIndex], `Branch ${branchIndex + 1}`),
+    };
+  }
+
+  function findNextBranchBoundary(list, startIndex, expectedIndent, endIndex, branchCodes, endCode) {
+    for (let cursor = startIndex; cursor <= endIndex && cursor < list.length; cursor += 1) {
+      const command = list[cursor];
+      if (!isCommand(command)) return null;
+      const indent = readIndent(command);
+      if (indent < expectedIndent) return null;
+      if (indent !== expectedIndent) continue;
+      const code = Number(command.code);
+      if (code === Number(endCode) || branchCodes.has(code)) return cursor;
+    }
+    return null;
+  }
+
+  function getBranchHeaderLabel(command, fallback) {
+    const code = Number(command && command.code);
+    const params = Array.isArray(command && command.parameters) ? command.parameters : [];
+    if (code === 402) return nonEmptyString(params[1]) || fallback;
+    if (code === 403) return 'Cancel';
+    if (code === 411) return 'Condition false';
+    return fallback;
+  }
+
+  function createBranchMetadata(frame) {
+    if (!frame || !frame.branchKind) return {};
+    return {
+      branchKind: frame.branchKind,
+      branchDepth: Math.max(0, Math.floor(Number(frame.branchDepth) || 0)),
+      branchPath: cloneBranchPath(frame.branchPath),
+      branchIndex: Math.max(0, Math.floor(Number(frame.branchIndex) || 0)),
+      branchCount: Math.max(0, Math.floor(Number(frame.branchCount) || 0)),
+      branchLabel: frame.branchLabel || '',
+      parentCommandIndex: Math.max(0, Math.floor(Number(frame.parentCommandIndex) || 0)),
     };
   }
 
@@ -234,6 +431,8 @@
       scanned_commands: 0,
       command_counts: Object.create(null),
       common_event_pushes: 0,
+      branch_paths: 0,
+      path_stops: [],
     };
   }
 
@@ -247,6 +446,12 @@
       scanned_commands: diagnostics.scanned_commands || 0,
       command_counts: Object.assign({}, diagnostics.command_counts),
       common_event_pushes: diagnostics.common_event_pushes || 0,
+      branch_paths: diagnostics.branch_paths || 0,
+      path_stops: Array.isArray(diagnostics.path_stops)
+        ? diagnostics.path_stops.map((stop) => Object.assign({}, stop, {
+          branch_path: cloneBranchPath(stop.branch_path),
+        }))
+        : [],
     };
   }
 
@@ -256,6 +461,49 @@
 
   function cloneCommonStack(stack) {
     return Array.isArray(stack) ? stack.slice() : [];
+  }
+
+  function inheritBranchContext(frame) {
+    const context = {
+      branchDepth: Math.max(0, Math.floor(Number(frame && frame.branchDepth) || 0)),
+      branchPath: cloneBranchPath(frame && frame.branchPath),
+    };
+    if (frame && frame.branchKind) {
+      context.branchKind = frame.branchKind;
+      context.branchIndex = Math.max(0, Math.floor(Number(frame.branchIndex) || 0));
+      context.branchCount = Math.max(0, Math.floor(Number(frame.branchCount) || 0));
+      context.branchLabel = frame.branchLabel || '';
+      context.parentCommandIndex = Math.max(0, Math.floor(Number(frame.parentCommandIndex) || 0));
+    }
+    return context;
+  }
+
+  function appendPathStop(diagnostics, stop) {
+    if (!diagnostics) return;
+    if (!Array.isArray(diagnostics.path_stops)) diagnostics.path_stops = [];
+    diagnostics.path_stops.push({
+      index: Math.max(0, Math.floor(Number(stop && stop.index) || 0)),
+      stop_reason: stop && stop.stop_reason ? String(stop.stop_reason) : '',
+      branch_depth: Math.max(0, Math.floor(Number(stop && stop.branch_depth) || 0)),
+      branch_path: cloneBranchPath(stop && stop.branch_path),
+      code: Number.isFinite(Number(stop && stop.code)) ? Number(stop.code) : null,
+      label: stop && stop.label ? String(stop.label) : '',
+    });
+  }
+
+  function cloneBranchPath(path) {
+    return Array.isArray(path)
+      ? path.map((value) => Math.max(0, Math.floor(Number(value) || 0)))
+      : [];
+  }
+
+  function readIndent(command) {
+    return Math.max(0, Math.floor(Number(command && command.indent) || 0));
+  }
+
+  function nonEmptyString(value) {
+    const text = String(value ?? '').trim();
+    return text || '';
   }
 
   function positiveInteger(value, fallback) {

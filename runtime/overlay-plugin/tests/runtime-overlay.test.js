@@ -634,6 +634,133 @@ test('foresight scanner predicts message blocks choices and common events throug
   assert.equal(snapshot.command_counts['117'], 1);
 });
 
+test('foresight scanner annotates choice and conditional branch paths', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Go branch') return '가기 분기';
+      if (text === 'Stay branch') return '대기 분기';
+      if (text === 'Condition true') return '조건 참';
+      if (text === 'Condition false') return '조건 거짓';
+      return null;
+    },
+  };
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const list = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Current block'] },
+    { code: 102, indent: 0, parameters: [['Go', 'Stay']] },
+    { code: 402, indent: 0, parameters: [0, 'Go'] },
+    { code: 101, indent: 1, parameters: [] },
+    { code: 401, indent: 1, parameters: ['Go branch'] },
+    { code: 402, indent: 0, parameters: [1, 'Stay'] },
+    { code: 101, indent: 1, parameters: [] },
+    { code: 401, indent: 1, parameters: ['Stay branch'] },
+    { code: 404, indent: 0, parameters: [] },
+    { code: 111, indent: 0, parameters: [0, 1, 0] },
+    { code: 101, indent: 1, parameters: [] },
+    { code: 401, indent: 1, parameters: ['Condition true'] },
+    { code: 411, indent: 0, parameters: [] },
+    { code: 101, indent: 1, parameters: [] },
+    { code: 401, indent: 1, parameters: ['Condition false'] },
+    { code: 412, indent: 0, parameters: [] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 2,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.kind, block.rawText, block.translation]), [
+    ['choice', 'Go', null],
+    ['choice', 'Stay', null],
+    ['message_block', 'Go branch', '가기 분기'],
+    ['message_block', 'Stay branch', '대기 분기'],
+    ['message_block', 'Condition true', '조건 참'],
+    ['message_block', 'Condition false', '조건 거짓'],
+  ]);
+  assert.deepEqual(
+    blocks.filter((block) => block.kind === 'message_block').map((block) => block.metadata),
+    [
+      { lineCount: 1, fromCommonEvent: false, branchKind: 'choice', branchDepth: 1, branchPath: [0], branchIndex: 0, branchCount: 2, branchLabel: 'Go', parentCommandIndex: 2 },
+      { lineCount: 1, fromCommonEvent: false, branchKind: 'choice', branchDepth: 1, branchPath: [1], branchIndex: 1, branchCount: 2, branchLabel: 'Stay', parentCommandIndex: 2 },
+      { lineCount: 1, fromCommonEvent: false, branchKind: 'conditional', branchDepth: 1, branchPath: [0], branchIndex: 0, branchCount: 2, branchLabel: 'Condition true', parentCommandIndex: 10 },
+      { lineCount: 1, fromCommonEvent: false, branchKind: 'conditional', branchDepth: 1, branchPath: [1], branchIndex: 1, branchCount: 2, branchLabel: 'Condition false', parentCommandIndex: 10 },
+    ],
+  );
+  assert.deepEqual(requests, ['Go', 'Stay', 'Go branch', 'Stay branch', 'Condition true', 'Condition false']);
+
+  const snapshot = scanner.getSnapshot();
+  assert.equal(snapshot.recent_scans[0].branch_paths, 4);
+  assert.deepEqual(snapshot.recent_scans[0].path_stops.map((stop) => stop.stop_reason), [
+    'branch-end',
+    'branch-end',
+    'branch-end',
+    'branch-end',
+  ]);
+});
+
+test('foresight scanner preserves branch path through common event frames', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Common branch message') return '공통 분기 메시지';
+      return null;
+    },
+  };
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commonEvents: {
+      3: {
+        name: 'Branch Common',
+        list: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Common branch message'] },
+        ],
+      },
+    },
+  });
+  const list = [
+    { code: 102, indent: 0, parameters: [['Run common']] },
+    { code: 402, indent: 0, parameters: [0, 'Run common'] },
+    { code: 117, indent: 1, parameters: [3] },
+    { code: 404, indent: 0, parameters: [] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  const commonBlock = blocks.find((block) => block.rawText === 'Common branch message');
+  assert.equal(commonBlock.translation, '공통 분기 메시지');
+  assert.deepEqual(commonBlock.metadata, {
+    lineCount: 1,
+    fromCommonEvent: true,
+    branchKind: 'choice',
+    branchDepth: 1,
+    branchPath: [0],
+    branchIndex: 0,
+    branchCount: 1,
+    branchLabel: 'Run common',
+    parentCommandIndex: 0,
+  });
+});
+
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
   const index = {
     translate({ text }) {
