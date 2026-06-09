@@ -135,6 +135,7 @@
       bounds,
       text,
       revision: state.revision,
+      textOwner,
     });
     if (!command || command.status !== 'hit') return false;
     if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, bitmap, text)) return false;
@@ -178,6 +179,9 @@
       for (const [slotKey, entry] of Array.from(state.entries.entries())) {
         if (!rect || rectsOverlap(rect, entry.bounds)) {
           if (entry.itemId && translator && typeof translator.archiveItem === 'function') translator.archiveItem(entry.itemId);
+          if (translator && typeof translator.releaseTextClaim === 'function') {
+            translator.releaseTextClaim(slotKey, entry.textOwner);
+          }
           state.entries.delete(slotKey);
         }
       }
@@ -185,6 +189,9 @@
         ? state.fragments.filter((fragment) => !rectsOverlap(rect, fragmentRect(fragment)))
         : [];
       state.revision += 1;
+      if (state.entries.size === 0 && translator && typeof translator.releaseSurface === 'function') {
+        translator.releaseSurface(bitmap, `bitmap-text:${state.id}`);
+      }
     }
     if (bitmap && translator && typeof translator.markSurfaceChanged === 'function') translator.markSurfaceChanged(bitmap);
   }

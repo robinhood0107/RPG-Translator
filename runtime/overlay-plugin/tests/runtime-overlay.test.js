@@ -2160,11 +2160,14 @@ test('bitmap text adapter aggregates same-line fragments and retires on mutation
     ['drawText', '안녕 세계', 0, 0, 111, 24, 'left'],
   ]);
   assert.equal(orchestrator.diagnostics().active_items, 1);
+  const bitmapSlotKey = Array.from(bitmap.__rpgTranslatorBitmapTextState.entries.keys())[0];
 
   bitmap.clearRect(0, 0, 160, 24);
 
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.claimSurface(bitmap, 'sprite-text'), true);
+  assert.equal(orchestrator.claimText(bitmapSlotKey, 'sprite-text:slot'), true);
 });
 
 test('pixi text adapter retires removed objects and restores translated text scale', () => {
