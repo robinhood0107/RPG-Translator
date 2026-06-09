@@ -207,3 +207,29 @@ fn desktop_tauri_release_uses_embedded_custom_protocol_assets() {
         "Vite release assets must use relative paths so embedded Tauri HTML can load JS/CSS without a localhost dev server"
     );
 }
+
+#[test]
+fn desktop_build_prepares_named_windows_artifacts() {
+    let package_path = repo_root().join("apps/desktop/package.json");
+    let package_text = std::fs::read_to_string(package_path).expect("read desktop package.json");
+    let package: serde_json::Value =
+        serde_json::from_str(&package_text).expect("desktop package is valid JSON");
+
+    let desktop_build = package["scripts"]["desktop:build"]
+        .as_str()
+        .expect("desktop:build script exists");
+    assert!(
+        desktop_build.contains("prepare-windows-artifacts"),
+        "desktop:build must refresh named Windows artifacts after tauri build"
+    );
+
+    let script_path = repo_root().join("apps/desktop/scripts/prepare-windows-artifacts.mjs");
+    let script = std::fs::read_to_string(script_path).expect("read windows artifact script");
+    assert!(script.contains("RPG-Translator-Portable-x64.exe"));
+    assert!(script.contains("RPG-Translator-Setup-x64.exe"));
+    assert!(script.contains("rpg-translator-desktop.exe"));
+    assert!(script.contains("\"target\", \"release\""));
+    assert!(script.contains("\"artifacts\", \"windows\""));
+    assert!(script.contains("copyWithRetry"));
+    assert!(script.contains("EBUSY"));
+}
