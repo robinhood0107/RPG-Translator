@@ -1439,6 +1439,9 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
           batch_eta_ms: 1_880_000,
           last_batch_elapsed_ms: 17_000,
           avg_batch_elapsed_ms: 11_000,
+          recent_p50_batch_elapsed_ms: 9_000,
+          recent_p95_batch_elapsed_ms: 15_000,
+          best_items_per_minute: 320,
           current_batch_items: 16,
           elapsed_ms: 5_298_000,
           model: "gemma-4-26B-IQ4_NL.gguf",
@@ -1465,6 +1468,12 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
   expect(screen.getByText("별표 재시도: 1")).toBeInTheDocument();
   expect(screen.getByText("다음 실험 배치: 12")).toBeInTheDocument();
   expect(screen.getByText("입력 토큰 예산: 6,144")).toBeInTheDocument();
+  expect(screen.getByText("최근 p50 배치 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("최근 p95 배치 00:00:15")).toBeInTheDocument();
+  const restoredBestSpeedRow = screen.getByText(/최고 속도:/).closest("span");
+  expect(restoredBestSpeedRow).not.toBeNull();
+  expect(restoredBestSpeedRow).toHaveTextContent("320");
+  expect(restoredBestSpeedRow).toHaveTextContent("분당 항목 수");
   expect(screen.getByText("DB 저장 완료")).toBeInTheDocument();
   expect(screen.getByText("번역 DB에 저장된 행 수입니다. 검토 승인 수가 아닙니다.")).toBeInTheDocument();
   expect(screen.getByText("이어하기 때 재시도")).toBeInTheDocument();

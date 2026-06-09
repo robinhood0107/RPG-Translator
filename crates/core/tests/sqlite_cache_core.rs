@@ -773,6 +773,103 @@ fn translation_speed_samples_are_indexed_and_queryable() -> Result<()> {
 }
 
 #[test]
+fn latest_translation_job_summary_restores_recent_speed_sample_metrics() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let provider_run_id = db.start_provider_run(&NewProviderRun {
+        provider: "local-openai-compatible".to_string(),
+        model: Some("gemma".to_string()),
+        request_settings_json: "{}".to_string(),
+    })?;
+    db.upsert_translation_job_progress(&TranslationJobProgressUpdate {
+        provider_run_id,
+        project_id: None,
+        source_language: "en".to_string(),
+        target_language: "ko".to_string(),
+        checkpoint_path: "translation-ko.checkpoint.json".to_string(),
+        status: "running".to_string(),
+        completed_items: 48,
+        failed_items: 0,
+        total_items: 96,
+        processed_batches: 3,
+        total_batches: 6,
+        split_batches: 0,
+        parse_failed_items: 0,
+        validation_failed_items: 0,
+        skipped_items: 0,
+        censored_retry_count: 0,
+        item_eta_ms: Some(9_000),
+        batch_eta_ms: Some(9_000),
+        last_batch_elapsed_ms: Some(3_000),
+        avg_batch_elapsed_ms: Some(3_000),
+        current_batch_items: 16,
+        elapsed_ms: 9_000,
+        model: Some("gemma".to_string()),
+        retry_pending_items: 0,
+        recoverable_provider_failures: 0,
+        final_failed_items: 0,
+        provider_backoff_ms: None,
+        effective_batch_size: 16,
+        next_experiment_batch_size: 16,
+        input_token_budget: 4096,
+        speed_mode: "steady".to_string(),
+        success_streak: 3,
+        success_delay_floor_ms: 750,
+        next_delay_ms: Some(750),
+        failure_reason_counts_json: "{}".to_string(),
+        adaptive_decision_reason: "adaptive: steady from samples".to_string(),
+        legacy_checkpoint_only: false,
+    })?;
+
+    for (batch_index, elapsed_ms) in [(1, 4_000), (2, 2_000), (3, 3_000)] {
+        db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+            provider_run_id,
+            batch_index,
+            lane: "message_block".to_string(),
+            item_count: 16,
+            char_count: 640,
+            estimated_token_count: 160,
+            request_elapsed_ms: elapsed_ms - 750,
+            success_delay_ms: 750,
+            total_elapsed_ms: elapsed_ms,
+            status: "success".to_string(),
+            failure_type: None,
+            effective_batch_size: 16,
+            adaptive_decision_reason: "adaptive: steady from samples".to_string(),
+            model: Some("gemma".to_string()),
+            prompt_hash: "prompt-hash".to_string(),
+        })?;
+    }
+    db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+        provider_run_id,
+        batch_index: 4,
+        lane: "message_block".to_string(),
+        item_count: 16,
+        char_count: 640,
+        estimated_token_count: 160,
+        request_elapsed_ms: 1,
+        success_delay_ms: 0,
+        total_elapsed_ms: 1,
+        status: "provider_failure".to_string(),
+        failure_type: Some("connection".to_string()),
+        effective_batch_size: 8,
+        adaptive_decision_reason: "adaptive: backoff from failure".to_string(),
+        model: Some("gemma".to_string()),
+        prompt_hash: "prompt-hash".to_string(),
+    })?;
+
+    let latest = db
+        .latest_translation_job_summary(Some("ko"))?
+        .expect("latest job");
+
+    assert_eq!(latest.recent_p50_batch_elapsed_ms, Some(3_000));
+    assert_eq!(latest.recent_p95_batch_elapsed_ms, Some(4_000));
+    assert_eq!(latest.best_items_per_minute, Some(480));
+
+    Ok(())
+}
+
+#[test]
 fn migrate_adds_adaptive_reason_to_legacy_speed_samples() -> Result<()> {
     let file = NamedTempFile::new().expect("create temp db");
     {

@@ -27,6 +27,12 @@ pub struct SchemaMigrationReport {
     pub backup_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpeedMetricSample {
+    item_count: i64,
+    total_elapsed_ms: i64,
+}
+
 impl TranslationDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -2902,6 +2908,9 @@ impl TranslationDb {
                 batch_eta_ms: row.get(18)?,
                 last_batch_elapsed_ms: row.get(19)?,
                 avg_batch_elapsed_ms: row.get(20)?,
+                recent_p50_batch_elapsed_ms: None,
+                recent_p95_batch_elapsed_ms: None,
+                best_items_per_minute: None,
                 current_batch_items: row.get(21)?,
                 elapsed_ms: row.get(22)?,
                 retry_pending_items: row.get(23)?,
@@ -2921,13 +2930,72 @@ impl TranslationDb {
                 model: row.get(37)?,
             })
         };
-        if let Some(target_language) = target_language {
-            Ok(statement
+        let latest = if let Some(target_language) = target_language {
+            statement
                 .query_row(params![target_language], map_row)
-                .optional()?)
+                .optional()?
         } else {
-            Ok(statement.query_row([], map_row).optional()?)
-        }
+            statement.query_row([], map_row).optional()?
+        };
+        drop(statement);
+        latest
+            .map(|summary| self.hydrate_translation_job_speed_metrics(summary))
+            .transpose()
+    }
+
+    fn hydrate_translation_job_speed_metrics(
+        &self,
+        mut summary: TranslationJobSummary,
+    ) -> Result<TranslationJobSummary> {
+        let Some(provider_run_id) = summary.provider_run_id else {
+            return Ok(summary);
+        };
+        let samples = self.recent_success_speed_metric_samples(provider_run_id, 12)?;
+        let elapsed_ms = samples
+            .iter()
+            .map(|sample| sample.total_elapsed_ms)
+            .collect::<Vec<_>>();
+        summary.recent_p50_batch_elapsed_ms = percentile_latency_i64(&elapsed_ms, 50);
+        summary.recent_p95_batch_elapsed_ms = percentile_latency_i64(&elapsed_ms, 95);
+        summary.best_items_per_minute = samples
+            .iter()
+            .filter_map(|sample| {
+                if sample.total_elapsed_ms <= 0 || sample.item_count <= 0 {
+                    return None;
+                }
+                Some(
+                    (sample.item_count as f64 * 60_000.0 / sample.total_elapsed_ms as f64).round()
+                        as i64,
+                )
+            })
+            .max();
+        Ok(summary)
+    }
+
+    fn recent_success_speed_metric_samples(
+        &self,
+        provider_run_id: i64,
+        limit: usize,
+    ) -> Result<Vec<SpeedMetricSample>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT item_count, total_elapsed_ms
+            FROM translation_speed_samples
+            WHERE provider_run_id = ?1
+              AND status = 'success'
+              AND total_elapsed_ms > 0
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?2
+            ",
+        )?;
+        let rows = statement.query_map(params![provider_run_id, limit as i64], |row| {
+            Ok(SpeedMetricSample {
+                item_count: row.get(0)?,
+                total_elapsed_ms: row.get(1)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn count_running_provider_runs(&self) -> Result<i64> {
@@ -4241,6 +4309,19 @@ fn verify_database_file(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn percentile_latency_i64(latencies: &[i64], percentile: u64) -> Option<i64> {
+    if latencies.is_empty() {
+        return None;
+    }
+    let mut values = latencies.to_vec();
+    values.sort_unstable();
+    let percentile = percentile.min(100);
+    let index = (values.len().saturating_sub(1) as u64)
+        .saturating_mul(percentile)
+        .div_ceil(100);
+    values.get(index as usize).copied()
 }
 
 fn configure_connection(conn: &Connection, file_db: bool) -> Result<()> {
