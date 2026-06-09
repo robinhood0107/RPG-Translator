@@ -17,19 +17,8 @@
         const message = scope.$gameMessage;
         if (message && Array.isArray(message._texts)) {
           const originalText = readMessageBlock(message);
-          const result = translateText(translator, scope, originalText, this);
-          const translated = result && result.text ? result.text : originalText;
-          if (result && result.itemId) {
-            const state = ensureState(this);
-            state.itemId = result.itemId;
-            state.slotKey = result.slotKey;
-            state.textOwner = result.textOwner;
-            state.surfaceOwner = result.surfaceOwner;
-          }
-          if (
-            translated &&
-            translated !== originalText
-          ) {
+          const translated = applyMessageTranslation(translator, scope, originalText, this);
+          if (translated && translated !== originalText) {
             message._texts = translatedLines(translated, originalText, this);
           }
         }
@@ -37,6 +26,17 @@
           return originalStartMessage.apply(this, args);
         }
         return undefined;
+      };
+      prototype.processCompleteMessage = function processCompleteMessageWithTranslation(message, _sessionId) {
+        trackedWindows.add(this);
+        retireMessageWindow(translator, this, 'message-translation-replaced');
+        const originalText = readCompletedMessage(message);
+        if (!String(originalText || '').trim()) return undefined;
+        const translated = applyMessageTranslation(translator, scope, originalText, this);
+        if (translated && translated !== originalText && scope.$gameMessage && Array.isArray(scope.$gameMessage._texts)) {
+          scope.$gameMessage._texts = translatedLines(translated, originalText, this);
+        }
+        return translated;
       };
       prototype.__rpgTranslatorMessageInstalled = INSTALL_TOKEN;
       wrapGameMessageClear(scope, translator, trackedWindows);
@@ -49,6 +49,19 @@
       return String(message.allText() || '');
     }
     return message._texts.map((text) => String(text || '')).join('\n');
+  }
+
+  function readCompletedMessage(message) {
+    if (message && typeof message === 'object') {
+      return firstString(
+        message.normalizedTranslationSource,
+        message.translationSource,
+        message.resolved,
+        message.visible,
+        message.text,
+      );
+    }
+    return String(message || '');
   }
 
   function countNewlines(text) {
@@ -65,6 +78,19 @@
     return String(originalText).split('\n');
   }
 
+  function applyMessageTranslation(translator, scope, originalText, windowInstance) {
+    const result = translateText(translator, scope, originalText, windowInstance);
+    const translated = result && result.text ? result.text : originalText;
+    if (result && result.itemId) {
+      const state = ensureState(windowInstance);
+      state.itemId = result.itemId;
+      state.slotKey = result.slotKey;
+      state.textOwner = result.textOwner;
+      state.surfaceOwner = result.surfaceOwner;
+    }
+    return translated;
+  }
+
   function translateText(translator, scope, text, surface) {
     const slotKey = 'message:game-message';
     const state = ensureState(surface);
@@ -74,6 +100,9 @@
       return { text, itemId: '', slotKey, surfaceOwner, textOwner };
     }
     if (translator && typeof translator.claimText === 'function' && !translator.claimText(slotKey, textOwner)) {
+      if (translator && typeof translator.releaseSurface === 'function') {
+        translator.releaseSurface(surface, surfaceOwner);
+      }
       return { text, itemId: '', slotKey, surfaceOwner, textOwner };
     }
     const request = {
@@ -192,6 +221,17 @@
 
   function overlay(scope) {
     return scope.RPGTranslatorOverlay || {};
+  }
+
+  function firstString(...values) {
+    for (const value of values) {
+      if (typeof value === 'string' && value) return value;
+      if (value !== undefined && value !== null && typeof value !== 'object') {
+        const text = String(value);
+        if (text) return text;
+      }
+    }
+    return '';
   }
 
   function loadDependency(scope, modulePath) {

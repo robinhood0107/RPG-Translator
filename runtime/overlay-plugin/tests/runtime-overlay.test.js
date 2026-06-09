@@ -911,6 +911,42 @@ test('message adapter retires active message item when Game_Message.clear runs',
   assert.equal(orchestrator.diagnostics().text_releases, 1);
 });
 
+test('message adapter exposes processCompleteMessage for completed payload translation', () => {
+  const requests = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['Complete JP'] },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      requests.push(request.text);
+      if (request.text === 'Complete JP') return 'Complete KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  assert.equal(typeof messageWindow.processCompleteMessage, 'function');
+
+  messageWindow.processCompleteMessage({
+    visible: 'Complete JP',
+    resolved: 'Complete JP',
+    translationSource: 'Complete JP',
+  }, 7);
+
+  assert.deepEqual(requests, ['Complete JP']);
+  assert.deepEqual(root.$gameMessage._texts, ['Complete KO']);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+});
+
 test('foresight scanner predicts message blocks choices and common events through cache only', () => {
   const requests = [];
   const index = {
