@@ -203,9 +203,42 @@
 
     function subscribeRecords(options = {}) {
       if (!hasMethod('subscribeRecords')) return false;
-      return callGateway('subscribeRecords', () => gateway.subscribeRecords(Object.assign({
+      const source = options && typeof options === 'object' ? options : {};
+      return callGateway('subscribeRecords', () => gateway.subscribeRecords(wrapRecordSubscription(source)));
+    }
+
+    function wrapRecordSubscription(source) {
+      const wrapped = Object.assign({
         adapterId,
-      }, options || {})));
+      }, source || {});
+      if (typeof source.onRenderQueued === 'function') {
+        wrapped.onRenderQueued = (record, command, route) => {
+          rememberRecordEvent(record, subscriptionRecordId(record, command, route), {
+            type: 'item.render_queued',
+            reason: route && route.reason,
+          });
+          return source.onRenderQueued(record, command, route);
+        };
+      }
+      if (typeof source.onSkipped === 'function') {
+        wrapped.onSkipped = (record, event, route) => {
+          rememberRecordEvent(record, subscriptionRecordId(record, event, route), event || { type: 'item.skipped' });
+          return source.onSkipped(record, event, route);
+        };
+      }
+      if (typeof source.onFailed === 'function') {
+        wrapped.onFailed = (record, event, route) => {
+          rememberRecordEvent(record, subscriptionRecordId(record, event, route), event || { type: 'item.failed' });
+          return source.onFailed(record, event, route);
+        };
+      }
+      if (typeof source.onEvent === 'function') {
+        wrapped.onEvent = (record, event, route) => {
+          rememberRecordEvent(record, subscriptionRecordId(record, event, route), event || {});
+          return source.onEvent(record, event, route);
+        };
+      }
+      return wrapped;
     }
 
     function normalizePayload(payload) {
@@ -257,6 +290,28 @@
       setRecordStateId(state, id);
       if (patch && Object.prototype.hasOwnProperty.call(patch, 'status')) {
         updateRecordStateStatus(state, patch.status);
+      }
+      state.updatedAt = Date.now();
+      return state;
+    }
+
+    function rememberRecordEvent(record, id, event = {}) {
+      if (!isRecordObject(record) || !id) return null;
+      const state = getExactRecordState(record);
+      if (!state) return null;
+      setRecordStateId(state, id);
+      if (event && event.status) updateRecordStateStatus(state, event.status);
+      const eventType = String(event && event.type || '');
+      if (eventType === 'item.render_queued') updateRecordStateStatus(state, 'completed');
+      if (eventType === 'requestSkipped' || eventType === 'item.skipped') updateRecordStateStatus(state, 'skipped');
+      if (eventType === 'item.failed'
+        || eventType === 'item.translation_noop'
+        || eventType === 'item.translation_noop_detached') {
+        updateRecordStateStatus(state, 'failed');
+      }
+      if (eventType === 'item.stale' || eventType === 'item.disappeared' || eventType === 'item.removed') {
+        state.active = false;
+        state.requestActive = false;
       }
       state.updatedAt = Date.now();
       return state;
@@ -478,6 +533,17 @@
 
   function getRecordId(record) {
     return nonEmptyString(record && record.recordId, record && record.itemId, record && record.id);
+  }
+
+  function subscriptionRecordId(record, payload, route) {
+    return nonEmptyString(
+      route && route.recordId,
+      route && route.itemId,
+      payload && payload.itemId,
+      payload && payload.recordId,
+      payload && payload.id,
+      getRecordId(record),
+    );
   }
 
   function normalizeEventOptions(options) {

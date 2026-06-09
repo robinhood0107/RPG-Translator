@@ -1371,6 +1371,109 @@ test('adapter contract wraps cache-only orchestrator lifecycle for adapter recor
   assert.equal(contract.requestItemTranslation(record), false);
 });
 
+test('adapter contract remembers subscribed render skip and failure events', async () => {
+  const records = new Map();
+  const events = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Contract subscribed source') return '계약 구독 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+  const renderRecord = { name: 'render-record' };
+  const skippedRecord = { name: 'skipped-record' };
+  const failedRecord = { name: 'failed-record' };
+
+  const renderObserved = contract.observeRecord(renderRecord, {
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'contract-subscribed-render',
+    text: 'Old subscribed source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  const skippedObserved = contract.observeRecord(skippedRecord, {
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'contract-subscribed-skip',
+    text: 'Missing subscribed source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  const failedObserved = contract.observeRecord(failedRecord, {
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'contract-subscribed-fail',
+    text: 'Failed subscribed source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  renderRecord.generation = renderObserved.generation;
+  renderRecord.current = true;
+
+  const unsubscribe = contract.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    getRenderGeneration(record) {
+      return record.generation;
+    },
+    isRenderTargetCurrent(record) {
+      return record.current === true;
+    },
+    onRenderQueued(record, command) {
+      events.push(['queued', record.name, command.translatedText]);
+      return true;
+    },
+    onSkipped(record, event, route) {
+      events.push(['skipped', record.name, event.type, route.reason]);
+    },
+    onFailed(record, event, route) {
+      events.push(['failed', record.name, event.type, route.reason]);
+    },
+  });
+
+  contract.updateItem(renderRecord, {
+    sourceText: 'Contract subscribed source',
+    renderStrategy: 'window-text',
+  });
+  assert.equal(contract.requestItemTranslation(renderRecord, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  }), true);
+  assert.equal(contract.getRecordStatus(renderRecord), 'completed');
+  assert.equal(contract.isRecordRequestActive(renderRecord), false);
+
+  assert.equal(contract.requestItemTranslation(skippedRecord, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  }), true);
+  assert.equal(contract.getRecordStatus(skippedRecord), 'skipped');
+  assert.equal(contract.isRecordRequestActive(skippedRecord), false);
+
+  orchestrator.retireItem(failedObserved.itemId, 'failed', {
+    eventType: 'item.translation_noop',
+    message: 'cache-only noop',
+  });
+  assert.equal(contract.getRecordStatus(failedRecord), 'failed');
+  assert.equal(contract.isRecordRequestActive(failedRecord), false);
+  unsubscribe();
+
+  assert.deepEqual(events, [
+    ['queued', 'render-record', '계약 구독 번역'],
+    ['skipped', 'skipped-record', 'requestSkipped', 'cache-only-miss'],
+    ['failed', 'failed-record', 'item.translation_noop', 'cache-only noop'],
+  ]);
+  assert.equal(records.get(renderObserved.itemId), renderRecord);
+  assert.equal(records.get(skippedObserved.itemId), skippedRecord);
+  assert.equal(records.get(failedObserved.itemId), failedRecord);
+});
+
 test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', () => {
   const orchestrator = new TextOrchestrator({
     translate(request) {
