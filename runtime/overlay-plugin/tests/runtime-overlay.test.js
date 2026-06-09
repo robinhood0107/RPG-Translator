@@ -415,6 +415,22 @@ test('message wrapper restores font settings after measured wrapping', () => {
   assert.equal(scale, 1);
 });
 
+test('message wrapper resets font settings after a message page break', () => {
+  let scale = 1;
+  const messageWindow = {
+    contents: { width: 80, height: 96 },
+    lineHeight() { return 24; },
+    resetFontSettings() { scale = 1; },
+    makeFontBigger() { scale = 2; },
+    textWidth(text) { return String(text).length * 10 * scale; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('\\{ab\fabc d', { window: messageWindow }),
+    ['\\{ab\fabc d'],
+  );
+});
+
 test('message wrapper accounts for message start x when measuring wrap width', () => {
   const messageWindow = {
     contents: { width: 100, height: 96 },

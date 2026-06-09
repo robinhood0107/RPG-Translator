@@ -41,6 +41,7 @@
     let lastBreak = -1;
     for (const token of tokens) {
       if (token.type === 'page') {
+        resetMessageFontSettings(windowInstance);
         width = startX;
         lastBreak = -1;
         current += token.raw;
