@@ -320,6 +320,22 @@ test('message wrapper avoids plugin soft wraps in one-line message windows', () 
   );
 });
 
+test('message wrapper derives capacity from contents bitmap metrics', () => {
+  const messageWindow = {
+    contents: {
+      width: 60,
+      height: 48,
+      measureTextWidth(text) { return String(text).length * 10; },
+    },
+    lineHeight() { return 24; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('alpha beta gamma', { window: messageWindow }),
+    ['alpha', 'beta', 'gamma'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };

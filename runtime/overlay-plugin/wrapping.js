@@ -111,16 +111,34 @@
     if (Number.isFinite(explicitCapacity) && explicitCapacity > 0) {
       return Math.max(4, Math.floor(explicitCapacity));
     }
-    const contentsWidth = windowInstance && typeof windowInstance.contentsWidth === 'function'
-      ? Number(windowInstance.contentsWidth())
-      : Number((windowInstance && windowInstance.width) || 0) - 48;
-    const unit = windowInstance && typeof windowInstance.textWidth === 'function'
-      ? Math.max(1, Number(windowInstance.textWidth('M')) || 12)
-      : 12;
+    const contentsWidth = resolveContentsWidth(windowInstance);
+    const unit = resolveTextUnit(windowInstance);
     if (Number.isFinite(contentsWidth) && contentsWidth > unit) {
       return Math.max(8, Math.floor(contentsWidth / unit));
     }
     return 42;
+  }
+
+  function resolveContentsWidth(windowInstance) {
+    if (!windowInstance) return NaN;
+    if (typeof windowInstance.contentsWidth === 'function') {
+      return Number(windowInstance.contentsWidth());
+    }
+    if (windowInstance.contents && Number.isFinite(Number(windowInstance.contents.width))) {
+      return Number(windowInstance.contents.width);
+    }
+    return Number(windowInstance.width || 0) - 48;
+  }
+
+  function resolveTextUnit(windowInstance) {
+    if (!windowInstance) return 12;
+    if (typeof windowInstance.textWidth === 'function') {
+      return Math.max(1, Number(windowInstance.textWidth('M')) || 12);
+    }
+    if (windowInstance.contents && typeof windowInstance.contents.measureTextWidth === 'function') {
+      return Math.max(1, Number(windowInstance.contents.measureTextWidth('M')) || 12);
+    }
+    return 12;
   }
 
   function canSoftWrap(windowInstance) {
