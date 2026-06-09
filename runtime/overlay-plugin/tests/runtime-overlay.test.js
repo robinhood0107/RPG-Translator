@@ -1429,6 +1429,91 @@ test('message adapter attaches interpreter message origin for cache-only foresig
   assert.equal(blocks[0].cacheStatus, 'hit');
 });
 
+test('message adapter preserves child interpreter parent frames for cache-only foresight', () => {
+  const parentList = [
+    { code: 117, indent: 0, parameters: [5] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Parent resume'] },
+  ];
+  const childList = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Child current'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Child next'] },
+  ];
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Child next') return '자식 다음';
+      if (text === 'Parent resume') return '부모 재개';
+      return null;
+    },
+  };
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    $dataCommonEvents: {
+      5: { id: 5, name: 'Common 5', list: childList },
+    },
+    $gameMessage: {
+      _texts: ['Child current'],
+      isBusy() { return false; },
+    },
+    Game_Interpreter: function GameInterpreter(list = parentList, index = 0) {
+      this._list = list;
+      this._index = index;
+      this._childInterpreter = null;
+    },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Game_Interpreter.prototype.executeCommand = function executeCommand() {
+    this.setupChild(childList);
+    return true;
+  };
+  root.Game_Interpreter.prototype.setupChild = function setupChild(list) {
+    this._childInterpreter = new root.Game_Interpreter(list, 0);
+    return true;
+  };
+  root.Game_Interpreter.prototype.command101 = function command101() {
+    return true;
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const parentInterpreter = new root.Game_Interpreter(parentList, 0);
+  root.$gameMap = { _interpreter: parentInterpreter };
+  assert.equal(parentInterpreter.executeCommand(), true);
+  const childInterpreter = parentInterpreter._childInterpreter;
+  assert.ok(childInterpreter);
+  assert.equal(childInterpreter._trForesightCommonEventId, 5);
+  assert.equal(childInterpreter._trForesightCommonEventName, 'Common 5');
+  assert.equal(childInterpreter._trForesightParentFrames.length, 1);
+
+  childInterpreter.command101();
+  const origin = root.$gameMessage._trMessageOrigin;
+  assert.equal(origin.commonEventId, 5);
+  assert.equal(origin.commonEventName, 'Common 5');
+  assert.equal(origin.frames.length, 2);
+
+  const blocks = scanner.collectUpcomingMessageBlocks({ currentMessageOrigin: origin });
+
+  assert.deepEqual(blocks.map((block) => [block.rawText, block.translation, block.listId]), [
+    ['Child next', '자식 다음', 'common:5'],
+    ['Parent resume', '부모 재개', 'map'],
+  ]);
+  assert.deepEqual(requests, ['Child next', 'Parent resume']);
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {
@@ -1687,6 +1772,69 @@ test('foresight scanner preserves branch path through common event frames', () =
     branchLabel: 'Run common',
     parentCommandIndex: 0,
   });
+});
+
+test('foresight scanner resumes parent frame after child message origin frames', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Child next') return '자식 다음';
+      if (text === 'Parent resume') return '부모 재개';
+      return null;
+    },
+  };
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const parentList = [
+    { code: 117, indent: 0, parameters: [5] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Parent resume'] },
+  ];
+  const childList = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Child current'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Child next'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list: childList,
+      startIndex: 0,
+      nextIndex: 2,
+      indent: 0,
+      interpreterId: 'map:common:5',
+      listId: 'common:5',
+      commonEventId: 5,
+      frames: [
+        {
+          list: parentList,
+          index: 1,
+          expectedIndent: 0,
+          interpreterId: 'map',
+          listId: 'map',
+        },
+        {
+          list: childList,
+          index: 2,
+          expectedIndent: 0,
+          interpreterId: 'map:common:5',
+          listId: 'common:5',
+          commonEventId: 5,
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.rawText, block.translation, block.listId]), [
+    ['Child next', '자식 다음', 'common:5'],
+    ['Parent resume', '부모 재개', 'map'],
+  ]);
+  assert.deepEqual(requests, ['Child next', 'Parent resume']);
 });
 
 test('foresight scanner reports common event nested-list missing id and list stops', () => {

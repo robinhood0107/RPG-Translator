@@ -8,6 +8,7 @@
   const FORESIGHT_ORIGIN_TOKEN = 'rpg-translator-message-origin-v1';
   const BREAK_SENTINEL_PREFIX = '\uE000RPGT_BR_';
   const BREAK_SENTINEL_SUFFIX = '_RPGT\uE001';
+  const interpreterExecutionStack = [];
 
   class MessageAdapter {
     static install(scope, translator) {
@@ -382,6 +383,8 @@
 
   function installForesightOriginHooks(scope) {
     const interpreterPrototype = scope && scope.Game_Interpreter && scope.Game_Interpreter.prototype;
+    installInterpreterExecutionContextHook(scope, interpreterPrototype);
+    installInterpreterChildOriginHook(scope, interpreterPrototype);
     if (interpreterPrototype
       && typeof interpreterPrototype.command101 === 'function'
       && interpreterPrototype.command101.__rpgTranslatorMessageOrigin !== FORESIGHT_ORIGIN_TOKEN) {
@@ -412,6 +415,45 @@
     }
   }
 
+  function installInterpreterExecutionContextHook(scope, interpreterPrototype) {
+    if (!interpreterPrototype
+      || typeof interpreterPrototype.executeCommand !== 'function'
+      || interpreterPrototype.executeCommand.__rpgTranslatorMessageOrigin === FORESIGHT_ORIGIN_TOKEN) {
+      return false;
+    }
+    const original = interpreterPrototype.executeCommand;
+    interpreterPrototype.executeCommand = function executeCommandWithMessageOrigin(...args) {
+      const context = createInterpreterExecutionContext(scope, this);
+      if (context) interpreterExecutionStack.push(context);
+      try {
+        return original.apply(this, args);
+      } finally {
+        if (context) interpreterExecutionStack.pop();
+      }
+    };
+    interpreterPrototype.executeCommand.__rpgTranslatorOriginal = original;
+    interpreterPrototype.executeCommand.__rpgTranslatorMessageOrigin = FORESIGHT_ORIGIN_TOKEN;
+    return true;
+  }
+
+  function installInterpreterChildOriginHook(scope, interpreterPrototype) {
+    if (!interpreterPrototype
+      || typeof interpreterPrototype.setupChild !== 'function'
+      || interpreterPrototype.setupChild.__rpgTranslatorMessageOrigin === FORESIGHT_ORIGIN_TOKEN) {
+      return false;
+    }
+    const original = interpreterPrototype.setupChild;
+    interpreterPrototype.setupChild = function setupChildWithMessageOrigin(...args) {
+      const parentContext = peekInterpreterExecutionContext(this) || createInterpreterExecutionContext(scope, this);
+      const result = original.apply(this, args);
+      attachChildInterpreterOriginContext(scope, this, parentContext);
+      return result;
+    };
+    interpreterPrototype.setupChild.__rpgTranslatorOriginal = original;
+    interpreterPrototype.setupChild.__rpgTranslatorMessageOrigin = FORESIGHT_ORIGIN_TOKEN;
+    return true;
+  }
+
   function createPendingMessageOrigin(scope, interpreter) {
     const gameMessage = scope && scope.$gameMessage;
     if (!gameMessage || !interpreter || !Array.isArray(interpreter._list)) return null;
@@ -426,6 +468,7 @@
       list: interpreter._list,
       startIndex,
       indent: Number(command.indent) || 0,
+      context: createInterpreterExecutionContext(scope, interpreter),
     };
   }
 
@@ -435,19 +478,21 @@
     if (!command || Number(command.code) !== 101 || (Number(command.indent) || 0) !== pendingOrigin.indent) return false;
     const block = parseMessageOriginBlock(pendingOrigin.list, pendingOrigin.startIndex, pendingOrigin.indent);
     if (!block || !String(block.rawText || '').trim()) return false;
+    const context = pendingOrigin.context || null;
+    const currentFrame = context ? createForesightFrameFromContext(context, block.nextIndex) : null;
     pendingOrigin.gameMessage._trMessageOrigin = {
       gameMessage: pendingOrigin.gameMessage,
       interpreter: pendingOrigin.interpreter,
-      interpreterId: getInterpreterOriginId(scope, pendingOrigin.interpreter),
-      listId: getInterpreterOriginId(scope, pendingOrigin.interpreter),
-      commonEventId: null,
-      commonEventName: '',
+      interpreterId: context ? context.interpreterId : getInterpreterOriginId(scope, pendingOrigin.interpreter),
+      listId: context ? context.listId : getInterpreterOriginId(scope, pendingOrigin.interpreter),
+      commonEventId: context ? context.commonEventId : null,
+      commonEventName: context ? context.commonEventName : '',
       list: pendingOrigin.list,
       startIndex: pendingOrigin.startIndex,
       nextIndex: block.nextIndex,
       indent: pendingOrigin.indent,
       rawText: block.rawText,
-      frames: [],
+      frames: currentFrame ? cloneForesightFrames(context.parentFrames).concat(currentFrame) : [],
       createdAt: Date.now(),
     };
     return true;
@@ -455,8 +500,33 @@
 
   function attachGameMessageAddOrigin(scope, gameMessage) {
     if (!gameMessage) return false;
+    const context = peekInterpreterExecutionContext();
     const rawText = readMessageBlock(gameMessage);
     if (!String(rawText || '').trim()) return false;
+    if (context) {
+      const currentFrame = createForesightFrameFromContext(context, context.nextIndex);
+      if (currentFrame) {
+        gameMessage._trMessageOrigin = {
+          gameMessage,
+          interpreter: context.interpreter,
+          interpreterId: context.interpreterId,
+          listId: context.listId,
+          commonEventId: context.commonEventId,
+          commonEventName: context.commonEventName,
+          list: context.list,
+          startIndex: context.startIndex,
+          nextIndex: context.nextIndex,
+          indent: context.indent,
+          rawText,
+          commandCode: context.commandCode,
+          originKind: 'game-message-add',
+          verified: true,
+          frames: cloneForesightFrames(context.parentFrames).concat(currentFrame),
+          createdAt: Date.now(),
+        };
+        return true;
+      }
+    }
     gameMessage._trMessageOrigin = {
       gameMessage,
       interpreter: null,
@@ -493,6 +563,171 @@
       nextIndex += 1;
     }
     return { nextIndex, rawText: lines.join('\n') };
+  }
+
+  function attachChildInterpreterOriginContext(scope, parentInterpreter, parentContext) {
+    if (!parentInterpreter || !parentContext) return false;
+    const childInterpreter = parentInterpreter._childInterpreter || null;
+    if (!childInterpreter || childInterpreter === parentInterpreter) return false;
+    const childDescriptor = createChildInterpreterDescriptor(scope, parentContext);
+    const parentFrame = createForesightFrameFromContext(parentContext, parentContext.nextIndex);
+    if (!parentFrame) return false;
+    const parentFrames = cloneForesightFrames(parentContext.parentFrames).concat(parentFrame);
+    childInterpreter._trForesightParentFrames = parentFrames;
+    childInterpreter._trForesightInterpreterId = childDescriptor.interpreterId;
+    childInterpreter._trForesightListId = childDescriptor.listId;
+    childInterpreter._trForesightCommonEventId = childDescriptor.commonEventId;
+    childInterpreter._trForesightCommonEventName = childDescriptor.commonEventName;
+    return true;
+  }
+
+  function peekInterpreterExecutionContext(interpreter = null) {
+    for (let index = interpreterExecutionStack.length - 1; index >= 0; index -= 1) {
+      const context = interpreterExecutionStack[index];
+      if (!context) continue;
+      if (!interpreter || context.interpreter === interpreter) return context;
+    }
+    return null;
+  }
+
+  function createInterpreterExecutionContext(scope, interpreter) {
+    if (!interpreter || !Array.isArray(interpreter._list)) return null;
+    const startIndex = integerIndex(interpreter._index);
+    if (startIndex === null || startIndex < 0 || startIndex >= interpreter._list.length) return null;
+    const command = interpreter._list[startIndex];
+    if (!command) return null;
+    const indent = Number(command.indent) || 0;
+    const nextIndex = getEventCommandNextIndex(interpreter._list, startIndex, indent);
+    if (nextIndex <= startIndex || nextIndex > interpreter._list.length) return null;
+    return {
+      interpreter,
+      list: interpreter._list,
+      command,
+      commandCode: Number(command.code),
+      startIndex,
+      nextIndex,
+      indent,
+      interpreterId: getInterpreterForesightId(scope, interpreter),
+      listId: getInterpreterForesightListId(scope, interpreter),
+      commonEventId: getInterpreterCommonEventId(interpreter),
+      commonEventName: getInterpreterCommonEventName(interpreter),
+      parentFrames: cloneForesightFrames(interpreter._trForesightParentFrames),
+    };
+  }
+
+  function createForesightFrameFromContext(context, index) {
+    if (!context || !Array.isArray(context.list)) return null;
+    const frameIndex = integerIndex(index);
+    if (frameIndex === null || frameIndex < 0 || frameIndex > context.list.length) return null;
+    return {
+      list: context.list,
+      index: frameIndex,
+      expectedIndent: context.indent,
+      interpreterId: context.interpreterId,
+      listId: context.listId,
+      commonEventId: context.commonEventId,
+      commonEventName: context.commonEventName,
+    };
+  }
+
+  function createChildInterpreterDescriptor(scope, parentContext) {
+    const commonEventId = readCommonEventIdFromCommand(parentContext && parentContext.command);
+    const parentId = parentContext && parentContext.interpreterId ? parentContext.interpreterId : 'attached';
+    if (commonEventId) {
+      const commonEvent = getCommonEventData(scope, commonEventId);
+      return {
+        interpreterId: `${parentId}:common:${commonEventId}`,
+        listId: `common:${commonEventId}`,
+        commonEventId,
+        commonEventName: commonEvent && commonEvent.name ? String(commonEvent.name) : '',
+      };
+    }
+    const startIndex = Number(parentContext && parentContext.startIndex);
+    const suffix = Number.isFinite(startIndex) ? startIndex : 'child';
+    return {
+      interpreterId: `${parentId}:child:${suffix}`,
+      listId: `${parentContext && parentContext.listId ? parentContext.listId : parentId}:child:${suffix}`,
+      commonEventId: null,
+      commonEventName: '',
+    };
+  }
+
+  function getEventCommandNextIndex(list, startIndex, indent) {
+    const numericStart = integerIndex(startIndex);
+    if (!Array.isArray(list) || numericStart === null || numericStart < 0 || numericStart >= list.length) return 0;
+    const command = list[numericStart];
+    if (!command) return numericStart + 1;
+    const code = Number(command.code);
+    if (code === 101) {
+      const block = parseMessageOriginBlock(list, numericStart, indent);
+      return block ? block.nextIndex : numericStart + 1;
+    }
+    if (code === 105) {
+      return getContinuationNextIndex(list, numericStart, indent, 405);
+    }
+    return numericStart + 1;
+  }
+
+  function getContinuationNextIndex(list, startIndex, indent, continuationCode) {
+    let nextIndex = startIndex + 1;
+    while (nextIndex < list.length) {
+      const next = list[nextIndex];
+      if (!next || Number(next.code) !== continuationCode || (Number(next.indent) || 0) !== indent) break;
+      nextIndex += 1;
+    }
+    return nextIndex;
+  }
+
+  function cloneForesightFrame(frame) {
+    if (!frame || !Array.isArray(frame.list)) return null;
+    return {
+      list: frame.list,
+      index: frame.index,
+      endIndex: frame.endIndex,
+      expectedIndent: frame.expectedIndent,
+      interpreterId: frame.interpreterId,
+      listId: frame.listId,
+      commonEventId: frame.commonEventId,
+      commonEventName: frame.commonEventName,
+      pendingNestedFrames: cloneForesightFrames(frame.pendingNestedFrames),
+    };
+  }
+
+  function cloneForesightFrames(frames) {
+    return Array.isArray(frames)
+      ? frames.map(cloneForesightFrame).filter(Boolean)
+      : [];
+  }
+
+  function readCommonEventIdFromCommand(command) {
+    if (!command || Number(command.code) !== 117) return null;
+    const params = Array.isArray(command.parameters) ? command.parameters : [];
+    const id = Number(params[0]);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  }
+
+  function getCommonEventData(scope, commonEventId) {
+    const commonEvents = scope && scope.$dataCommonEvents;
+    if (!commonEvents) return null;
+    if (Array.isArray(commonEvents)) return commonEvents[commonEventId] || null;
+    return commonEvents[commonEventId] || commonEvents[String(commonEventId)] || null;
+  }
+
+  function getInterpreterForesightId(scope, interpreter) {
+    return String((interpreter && interpreter._trForesightInterpreterId) || getInterpreterOriginId(scope, interpreter));
+  }
+
+  function getInterpreterForesightListId(scope, interpreter) {
+    return String((interpreter && interpreter._trForesightListId) || getInterpreterForesightId(scope, interpreter));
+  }
+
+  function getInterpreterCommonEventId(interpreter) {
+    const value = Number(interpreter && interpreter._trForesightCommonEventId);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  }
+
+  function getInterpreterCommonEventName(interpreter) {
+    return String((interpreter && interpreter._trForesightCommonEventName) || '');
   }
 
   function clearMessageOrigin(gameMessage) {

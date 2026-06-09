@@ -37,16 +37,7 @@
       }
 
       const blocks = [];
-      const stack = [{
-        list: origin.list,
-        index: positiveInteger(origin.nextIndex, 0),
-        indent: Number.isFinite(Number(origin.indent)) ? Number(origin.indent) : null,
-        listId: origin.listId || origin.interpreterId || 'event',
-        commonStack: cloneCommonStack(origin.commonStack || []),
-        nestedDepth: 0,
-        branchDepth: 0,
-        branchPath: [],
-      }];
+      const stack = createInitialFrames(origin);
 
       while (
         stack.length
@@ -133,6 +124,78 @@
       this.recentScans.unshift(sanitizeDiagnostics(diagnostics));
       if (this.recentScans.length > 8) this.recentScans.pop();
     }
+  }
+
+  function createInitialFrames(origin) {
+    const frames = Array.isArray(origin && origin.frames)
+      ? normalizeOriginFrames(origin.frames, origin)
+      : [];
+    if (frames.length) return frames;
+    return [{
+      list: origin.list,
+      index: positiveInteger(origin.nextIndex, 0),
+      indent: Number.isFinite(Number(origin.indent)) ? Number(origin.indent) : null,
+      listId: origin.listId || origin.interpreterId || 'event',
+      commonStack: cloneCommonStack(origin.commonStack || []),
+      nestedDepth: 0,
+      branchDepth: 0,
+      branchPath: [],
+    }];
+  }
+
+  function normalizeOriginFrames(frames, origin) {
+    const normalized = [];
+    const commonStack = cloneCommonStack(origin && origin.commonStack);
+    for (const frame of frames) {
+      const normalizedFrame = normalizeOriginFrame(frame, origin, commonStack);
+      if (!normalizedFrame) continue;
+      normalized.push(normalizedFrame);
+      const commonEventId = positiveCommonEventId(frame && frame.commonEventId);
+      if (commonEventId && !commonStack.includes(commonEventId)) {
+        commonStack.push(commonEventId);
+      }
+    }
+    return normalized;
+  }
+
+  function normalizeOriginFrame(frame, origin, commonStack) {
+    if (!frame || !Array.isArray(frame.list)) return null;
+    const index = integerOrFallback(frame.index, positiveInteger(origin && origin.nextIndex, 0));
+    if (index < 0 || index > frame.list.length) return null;
+    const indent = Number.isFinite(Number(frame.expectedIndent))
+      ? Number(frame.expectedIndent)
+      : Number.isFinite(Number(frame.indent))
+        ? Number(frame.indent)
+        : (Number.isFinite(Number(origin && origin.indent)) ? Number(origin.indent) : null);
+    const normalized = {
+      list: frame.list,
+      index,
+      indent,
+      listId: frame.listId || frame.interpreterId || origin.listId || origin.interpreterId || 'event',
+      commonStack: cloneCommonStack(commonStack),
+      nestedDepth: Math.max(cloneCommonStack(commonStack).length, Math.max(0, Math.floor(Number(frame.nestedDepth) || 0))),
+      branchDepth: Math.max(0, Math.floor(Number(frame.branchDepth ?? frame.resumeBranchDepth) || 0)),
+      branchPath: cloneBranchPath(frame.branchPath || frame.resumeBranchPath),
+    };
+    if (Number.isFinite(Number(frame.endIndex))) normalized.endIndex = Math.max(0, Math.floor(Number(frame.endIndex)));
+    if (frame.branchKind) {
+      normalized.branchKind = frame.branchKind;
+      normalized.branchIndex = Math.max(0, Math.floor(Number(frame.branchIndex) || 0));
+      normalized.branchCount = Math.max(0, Math.floor(Number(frame.branchCount) || 0));
+      normalized.branchLabel = frame.branchLabel || '';
+      normalized.parentCommandIndex = Math.max(0, Math.floor(Number(frame.parentCommandIndex) || 0));
+    }
+    return normalized;
+  }
+
+  function integerOrFallback(value, fallback) {
+    const number = Number(value);
+    return Number.isInteger(number) ? number : fallback;
+  }
+
+  function positiveCommonEventId(value) {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 ? number : null;
   }
 
   function scanFrame(scanner, frame, stack, blocks, diagnostics) {
