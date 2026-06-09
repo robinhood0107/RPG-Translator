@@ -536,7 +536,7 @@
         if (!event || typeof event !== 'object') return;
         const command = event.payload || null;
         if (!command || typeof command !== 'object') return;
-        if (renderStrategy && String(command.strategy || '') !== renderStrategy) return;
+        if (renderStrategy && subscriptionPayloadStrategy(command) !== renderStrategy) return;
         if (event.type === 'renderQueued' && typeof source.onRenderQueued === 'function') {
           if (recordBacked) {
             this.dispatchRecordBackedRender(source, command);
@@ -549,7 +549,10 @@
           }
           return;
         }
-        if (recordBacked) return;
+        if (recordBacked) {
+          this.dispatchRecordBackedEvent(source, event, command);
+          return;
+        }
         if (event.type === 'renderAccepted' && typeof source.onRenderAccepted === 'function') {
           source.onRenderAccepted(command, this.renderRoute('item.render_accepted', command));
           return;
@@ -604,6 +607,43 @@
         return false;
       }
       this.dispatchSubscriptionRenderAccepted(source, target, callbackDecision, route);
+      return true;
+    }
+
+    dispatchRecordBackedEvent(source, event, payload) {
+      const type = String(event && event.type || '');
+      if (type === 'requestSkipped' || type === 'item.skipped') {
+        return this.dispatchSubscriptionRecordEvent(source, event, payload, source.onSkipped, 'skipped');
+      }
+      if (type === 'item.failed' || type === 'item.translation_noop' || type === 'item.translation_noop_detached') {
+        return this.dispatchSubscriptionRecordEvent(source, event, payload, source.onFailed, 'failed');
+      }
+      if (typeof source.onEvent === 'function') {
+        return this.dispatchSubscriptionRecordEvent(source, event, payload, source.onEvent, type || 'event');
+      }
+      return false;
+    }
+
+    dispatchSubscriptionRecordEvent(source, event, payload, handler, operation) {
+      if (typeof handler !== 'function') return false;
+      const recordId = subscriptionEventRecordId(event, payload);
+      const route = this.subscriptionEventRoute(event, payload, recordId);
+      const target = resolveSubscriptionEventRecord(source, recordId, event, payload, route);
+      if (!target) {
+        if (typeof source.onMissingRecord === 'function') {
+          source.onMissingRecord(Object.assign({}, route, { reason: 'missing-adapter-record' }), event, payload);
+        }
+        return false;
+      }
+      if (!canTouchSubscriptionLifecycleRecord(target)) return false;
+      try {
+        handler(target, event, route);
+      } catch (_error) {
+        this.emit('adapterCallbackError', {
+          reason: `subscribeRecords.${String(operation || 'event')}`,
+          itemId: recordId,
+        });
+      }
       return true;
     }
 
@@ -770,6 +810,22 @@
         slotId: command && command.slotId ? command.slotId : '',
         strategy: command && command.strategy ? command.strategy : '',
         reason: reason || '',
+      };
+    }
+
+    subscriptionEventRoute(event, payload, recordId) {
+      const source = payload && typeof payload === 'object' ? payload : {};
+      return {
+        recordId: String(recordId || ''),
+        itemId: String(recordId || ''),
+        eventType: String(event && event.type || ''),
+        adapterId: String(source.adapter || source.adapterId || ''),
+        surfaceId: String(source.surfaceId || ''),
+        status: String(source.status || source.translationState || source.state || ''),
+        message: String(source.message || ''),
+        reason: String(source.reason || ''),
+        strategy: subscriptionPayloadStrategy(source),
+        event,
       };
     }
 
@@ -1065,6 +1121,33 @@
     if (typeof records.get === 'function') return records.get(recordId) || null;
     if (Object.prototype.hasOwnProperty.call(records, recordId)) return records[recordId] || null;
     return null;
+  }
+
+  function resolveSubscriptionEventRecord(source, recordId, event, payload, route) {
+    if (source && typeof source.resolveRecord === 'function') {
+      return source.resolveRecord(recordId, event, payload, route) || null;
+    }
+    const records = source && (source.records || source.recordRegistry || source.recordsById);
+    if (!records || !recordId) return null;
+    if (typeof records.get === 'function') return records.get(recordId) || null;
+    if (Object.prototype.hasOwnProperty.call(records, recordId)) return records[recordId] || null;
+    return null;
+  }
+
+  function subscriptionEventRecordId(event, payload) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    return String(
+      source.itemId
+      || source.recordId
+      || source.id
+      || (event && (event.itemId || event.recordId || event.id))
+      || '',
+    );
+  }
+
+  function subscriptionPayloadStrategy(payload) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    return String(source.strategy || source.renderStrategy || source.adapter || '');
   }
 
   function resolveLifecycleRecord(source, target, command, route) {

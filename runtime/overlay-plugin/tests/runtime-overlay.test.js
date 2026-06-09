@@ -1037,6 +1037,67 @@ test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', (
   ]);
 });
 
+test('orchestrator routes record-backed skipped and failed lifecycle events', async () => {
+  const records = new Map();
+  const events = [];
+  const orchestrator = new TextOrchestrator({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const skippedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'skipped-target',
+    text: 'Skipped target',
+    renderStrategy: 'window-text',
+  });
+  const failedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'failed-target',
+    text: 'Failed target',
+    renderStrategy: 'window-text',
+  });
+  records.set(skippedCommand.itemId, { name: 'skipped', status: 'detected' });
+  records.set(failedCommand.itemId, { name: 'failed', status: 'detected' });
+
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    onSkipped(record, event, route) {
+      events.push(['skipped', record.name, event.type, route.reason]);
+    },
+    onFailed(record, event, route) {
+      events.push(['failed', record.name, event.type, route.reason]);
+    },
+  });
+
+  const handle = orchestrator.requestItemTranslation(skippedCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  assert.equal(handle.getStatus(), 'miss');
+  assert.equal(await handle.promise, 'Skipped target');
+  orchestrator.retireItem(failedCommand.itemId, 'failed', {
+    eventType: 'item.failed',
+    message: 'adapter failed',
+  });
+  unsubscribe();
+
+  assert.deepEqual(events, [
+    ['skipped', 'skipped', 'requestSkipped', 'cache-only-miss'],
+    ['failed', 'failed', 'item.failed', 'adapter failed'],
+  ]);
+});
+
 test('orchestrator defers surface draws to candidate adapter subscriptions', () => {
   const bitmap = {};
   const events = [];
