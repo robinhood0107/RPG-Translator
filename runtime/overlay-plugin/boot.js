@@ -1,4 +1,27 @@
 (function attach(root) {
+  const SUPPORT_DIRECTORY = 'rpg-translator';
+  const PLUGIN_ENTRY_FILE = 'RPGTranslator.js';
+  const RUNTIME_SCRIPT_LOAD_ORDER = [
+    'text-codec.js',
+    'runtime-miss-logger.js',
+    'lookup-index.js',
+    'render-guard.js',
+    'wrapping.js',
+    'runtime-diagnostics.js',
+    'orchestrator.js',
+    'adapter-contract.js',
+    'foresight-scanner.js',
+    'cache-loader.js',
+    'message-adapter.js',
+    'window-text-adapter.js',
+    'bitmap-text-adapter.js',
+    'sprite-text-adapter.js',
+    'pixi-text-adapter.js',
+    'startup-toast.js',
+    'boot.js',
+  ];
+  const REQUIRED_RUNTIME_FILES = [PLUGIN_ENTRY_FILE].concat(RUNTIME_SCRIPT_LOAD_ORDER);
+
   const { CacheLoader } = loadDependency(root, './cache-loader');
   const { LookupIndex } = loadDependency(root, './lookup-index');
   const { BitmapTextAdapter } = loadDependency(root, './bitmap-text-adapter');
@@ -19,6 +42,7 @@
       if (overlay.installed) return overlay;
 
       const bundle = options.bundle || await CacheLoader.load(options.baseUrl || '', options.fetch);
+      validateRuntimeLoadContract(bundle.config || {});
       const missLogger = RuntimeMissLogger
         ? RuntimeMissLogger.fromConfig(bundle.config || {}, options.missLogger || {})
         : null;
@@ -84,6 +108,53 @@
       }
       return nextOverlay;
     }
+  }
+
+  function validateRuntimeLoadContract(config) {
+    const contract = config.runtime_load_contract
+      || config.runtimeLoadContract
+      || config.runtime_loadContract
+      || null;
+    if (!contract) return;
+
+    const schemaVersion = getContractValue(contract, 'schema_version', 'schemaVersion');
+    if (schemaVersion !== undefined && Number(schemaVersion) !== 1) {
+      throw new Error(`runtime load contract schema_version ${schemaVersion} is unsupported`);
+    }
+
+    const supportDirectory = getContractValue(contract, 'support_directory', 'supportDirectory');
+    if (supportDirectory !== SUPPORT_DIRECTORY) {
+      throw new Error(`runtime load contract support_directory must be ${SUPPORT_DIRECTORY}`);
+    }
+
+    const pluginEntryFile = getContractValue(contract, 'plugin_entry_file', 'pluginEntryFile');
+    if (pluginEntryFile !== PLUGIN_ENTRY_FILE) {
+      throw new Error(`runtime load contract plugin_entry_file must be ${PLUGIN_ENTRY_FILE}`);
+    }
+
+    const scriptLoadOrder = getContractValue(contract, 'script_load_order', 'scriptLoadOrder') || [];
+    if (!sameStringArray(scriptLoadOrder, RUNTIME_SCRIPT_LOAD_ORDER)) {
+      throw new Error('runtime load contract script_load_order does not match the cache-only runtime');
+    }
+
+    const requiredRuntimeFiles = getContractValue(contract, 'required_runtime_files', 'requiredRuntimeFiles') || [];
+    if (!sameStringArray(requiredRuntimeFiles, REQUIRED_RUNTIME_FILES)) {
+      throw new Error('runtime load contract required_runtime_files does not match the cache-only runtime');
+    }
+  }
+
+  function getContractValue(contract, snakeName, camelName) {
+    if (Object.prototype.hasOwnProperty.call(contract, snakeName)) return contract[snakeName];
+    if (Object.prototype.hasOwnProperty.call(contract, camelName)) return contract[camelName];
+    return undefined;
+  }
+
+  function sameStringArray(actual, expected) {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+    for (let index = 0; index < expected.length; index += 1) {
+      if (actual[index] !== expected[index]) return false;
+    }
+    return true;
   }
 
   function resolveCommandCatalog(options, bundle) {

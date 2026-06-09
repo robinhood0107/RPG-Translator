@@ -6731,7 +6731,16 @@ test('boot installs cache-only overlay without provider surfaces', async () => {
   await Boot.install(root, {
     bundle: {
       manifest: { schema_version: 1, key_schema_version: 'v1', source_language: 'ja', target_language: 'ko' },
-      config: { startup_toast_enabled: false },
+      config: {
+        startup_toast_enabled: false,
+        runtime_load_contract: {
+          schema_version: 1,
+          support_directory: 'rpg-translator',
+          plugin_entry_file: 'RPGTranslator.js',
+          script_load_order: RuntimeEntry.moduleFiles(),
+          required_runtime_files: ['RPGTranslator.js'].concat(RuntimeEntry.moduleFiles()),
+        },
+      },
       records: [],
     },
     engine: 'mz',
@@ -6740,6 +6749,43 @@ test('boot installs cache-only overlay without provider surfaces', async () => {
   assert.equal(root.RPGTranslatorOverlay.installed, true);
   assert.equal(root.RPGTranslatorOverlay.provider, undefined);
   assert.equal(root.RPGTranslatorOverlay.translationQueue, undefined);
+});
+
+test('boot rejects runtime load contract mismatches before installing adapters', async () => {
+  const root = {
+    document: { body: null },
+    $gameMessage: { _texts: [] },
+    Window_Message: function WindowMessage() {},
+    Window_Base: function WindowBase() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Base.prototype.drawText = function drawText() {};
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) { return text.length; };
+
+  await assert.rejects(
+    Boot.install(root, {
+      bundle: {
+        manifest: { schema_version: 1, key_schema_version: 'v1', source_language: 'ja', target_language: 'ko' },
+        config: {
+          startup_toast_enabled: false,
+          runtime_load_contract: {
+            schema_version: 1,
+            support_directory: 'rpg-translator',
+            plugin_entry_file: 'WrongTranslator.js',
+            script_load_order: ['boot.js'],
+            required_runtime_files: ['WrongTranslator.js', 'boot.js'],
+          },
+        },
+        records: [],
+      },
+      engine: 'mz',
+    }),
+    /runtime load contract plugin_entry_file/,
+  );
+
+  assert.equal(root.RPGTranslatorOverlay && root.RPGTranslatorOverlay.installed, undefined);
+  assert.equal(root.Window_Message.prototype.startMessage.call({}), undefined);
+  assert.equal(root.Window_Base.prototype.drawTextEx.call({}, 'Menu'), 4);
 });
 
 test('boot exposes runtime diagnostics and records adapter install timing', async () => {
