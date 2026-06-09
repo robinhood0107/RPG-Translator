@@ -494,6 +494,8 @@
         ? this.normalizeOwnershipDescriptor(slotId, 'text')
         : this.normalizeOwnershipDescriptor({ slotKey: slotId, owner }, 'text');
       if (!descriptor.slotKey) return payloadMode ? ownershipDenied('missing-slot') : false;
+      const blocker = payloadMode ? this.findTextOwnershipBlocker(descriptor) : null;
+      if (blocker) return ownershipDenied(blocker.reason, blocker.claim);
       const bucket = payloadMode && descriptor.target ? this.getOwnershipBucket(descriptor.target, true) : null;
       const winner = bucket ? this.getSurfaceWinner(bucket) : null;
       if (winner && winner.owner !== descriptor.owner && winner.priority >= descriptor.priority) {
@@ -593,7 +595,10 @@
         target: source.target || source.surface || source.bitmap || source.window || source.windowInstance || source.sprite || null,
         slotKey: stringValue(source.slotKey || source.slotId || source.id),
         kind: defaultKind,
+        mode: stringValue(source.mode || source.role || defaultKind),
         text: stringValue(source.text || source.visibleText || source.rawText || source.translationSource),
+        searchText: normalizeOwnershipText(source.searchText || source.text || source.visibleText || source.rawText || source.translationSource),
+        standaloneGlyph: source.standaloneGlyph === true,
         priority: normalizePriority(source.priority),
         provisional: source.provisional === true,
         metadata: sanitizeDetails(source.metadata),
@@ -616,6 +621,9 @@
         target: descriptor.target,
         slotKey: descriptor.slotKey,
         bucket,
+        mode: descriptor.mode,
+        searchText: descriptor.searchText,
+        standaloneGlyph: descriptor.standaloneGlyph,
         priority: descriptor.priority,
         provisional: status === 'provisional',
         status,
@@ -626,6 +634,24 @@
       };
       this.ownershipClaims.set(token, claim);
       return claim;
+    }
+
+    findTextOwnershipBlocker(descriptor) {
+      if (!descriptor || descriptor.owner === 'message') return null;
+      const glyph = descriptor.standaloneGlyph || descriptor.mode === 'bitmapFallback'
+        ? normalizeOwnershipText(descriptor.text)
+        : '';
+      if (!glyph) return null;
+      for (const claim of this.ownershipClaims.values()) {
+        if (!claim || claim.kind !== 'text') continue;
+        if (!isLiveOwnershipClaim(claim)) continue;
+        if (claim.mode !== 'messageGlyphSource') continue;
+        if (claim.owner === descriptor.owner) continue;
+        if (claim.searchText && claim.searchText.indexOf(glyph) >= 0) {
+          return { reason: 'message-glyph-source', claim };
+        }
+      }
+      return null;
     }
 
     registerOwnershipClaim(claim) {
@@ -1319,6 +1345,10 @@
     return !!(claim
       && claim.active === true
       && (claim.status === 'claimed' || claim.status === 'provisional'));
+  }
+
+  function normalizeOwnershipText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
   function ownershipAccepted(status, claim) {

@@ -1494,6 +1494,49 @@ test('adapter contract preempts lower-priority provisional ownership', () => {
   assert.equal(lowerSurface.ownerAdapter, 'sprite-text');
 });
 
+test('adapter contract blocks bitmap fallback glyphs covered by message source ownership', () => {
+  const orchestrator = new TextOrchestrator({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const messageContract = createAdapterContract({
+    adapterId: 'message',
+    defaultHook: 'message',
+    orchestratorGateway: orchestrator,
+  });
+  const bitmapContract = createAdapterContract({
+    adapterId: 'bitmap-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+
+  const messageSource = messageContract.claimText({
+    target: {},
+    slotKey: 'message:block',
+    text: 'A hidden message glyph',
+    searchText: 'A hidden message glyph',
+    mode: 'messageGlyphSource',
+    priority: 100,
+  });
+  assert.equal(messageSource.status, 'claimed');
+
+  const glyphFallback = bitmapContract.claimText({
+    target: {},
+    slotKey: 'bitmap:glyph',
+    text: 'hidden',
+    mode: 'bitmapFallback',
+    priority: 10,
+  });
+  assert.equal(glyphFallback.status, 'denied');
+  assert.equal(glyphFallback.reason, 'message-glyph-source');
+  assert.equal(glyphFallback.ownerAdapter, 'message');
+});
+
 test('adapter contract deduplicates tokenized subscriptions', () => {
   const counts = {
     subscribe: 0,
