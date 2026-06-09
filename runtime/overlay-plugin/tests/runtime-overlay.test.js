@@ -506,6 +506,75 @@ test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG
   ]);
 });
 
+test('pixi text adapter retires removed objects and restores translated text scale', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Pixi JP') return 'Pixi KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      config: { textScaleOthers: 50 },
+    },
+    PIXI: {},
+    SceneManager: {
+      updateScene() {
+        calls.push(['scene-update']);
+      },
+    },
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+  };
+  root.PIXI.Container.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.style = { fontSize: 20 };
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) {
+      this._text = value;
+      calls.push(['pixi-text', value, this.style.fontSize]);
+    },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const container = new root.PIXI.Container();
+  const pixiText = new root.PIXI.Text('');
+  pixiText.parent = container;
+  container.children.push(pixiText);
+
+  pixiText.text = 'Pixi JP';
+  assert.equal(pixiText.text, 'Pixi KO');
+  assert.equal(pixiText.style.fontSize, 10);
+  assert.equal(pixiText._rpgTranslatorPixiVisible, true);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  container.removeChild(pixiText);
+  assert.equal(pixiText._rpgTranslatorPixiItemId, null);
+  assert.equal(pixiText.style.fontSize, 20);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+});
+
 test('boot installs cache-only overlay without provider surfaces', async () => {
   const root = {
     document: { body: null },
