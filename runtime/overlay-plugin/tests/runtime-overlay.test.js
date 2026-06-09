@@ -306,6 +306,20 @@ test('message wrapper preserves escapes and wraps soft lines by capacity', () =>
   );
 });
 
+test('message wrapper avoids plugin soft wraps in one-line message windows', () => {
+  const oneLineWindow = {
+    contents: { height: 24 },
+    lineHeight() { return 24; },
+    contentsWidth() { return 60; },
+    textWidth(text) { return String(text).length * 10; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('This translated line would normally wrap', { window: oneLineWindow }),
+    ['This translated line would normally wrap'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };

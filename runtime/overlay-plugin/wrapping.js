@@ -2,12 +2,29 @@
   class MessageWrapper {
     static wrap(text, options = {}) {
       const capacity = resolveCapacity(options.window, options.capacity);
+      const allowSoftWrap = canSoftWrap(options.window);
       const output = [];
       for (const hardLine of String(text ?? '').replace(/\r\n?/gu, '\n').split('\n')) {
-        pushWrappedLine(output, hardLine, capacity);
+        if (allowSoftWrap) pushWrappedLine(output, hardLine, capacity);
+        else pushUnwrappedLine(output, hardLine);
       }
       return output.length > 0 ? output : [''];
     }
+  }
+
+  function pushUnwrappedLine(output, line) {
+    const tokens = tokenize(line);
+    let current = '';
+    for (const token of tokens) {
+      if (token.type === 'page') {
+        output.push(cleanupLine(current));
+        current = '';
+        output.push(token.raw);
+        continue;
+      }
+      current += token.raw;
+    }
+    output.push(cleanupLine(current));
   }
 
   function pushWrappedLine(output, line, capacity) {
@@ -104,6 +121,19 @@
       return Math.max(8, Math.floor(contentsWidth / unit));
     }
     return 42;
+  }
+
+  function canSoftWrap(windowInstance) {
+    if (!windowInstance) return true;
+    const contentsHeight = Number(windowInstance.contents && windowInstance.contents.height);
+    const lineHeight = typeof windowInstance.lineHeight === 'function'
+      ? Number(windowInstance.lineHeight())
+      : NaN;
+    if (!Number.isFinite(contentsHeight) || contentsHeight <= 0 || contentsHeight === Number.MAX_SAFE_INTEGER) {
+      return true;
+    }
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0) return true;
+    return contentsHeight >= lineHeight * 2;
   }
 
   function measureLine(line) {
