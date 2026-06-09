@@ -1057,6 +1057,120 @@ test('foresight scanner stops at catalog barrier commands before stale messages'
   assert.equal(scan.path_stops[0].label, 'Exit Event Processing');
 });
 
+test('foresight scanner records budget limit path stops', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    budget: 1,
+    maxBlocks: 10,
+  });
+  const list = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['First foresight text'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Second stale text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => block.rawText), ['First foresight text']);
+  assert.deepEqual(requests, ['First foresight text']);
+
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'scanned');
+  assert.equal(scan.stop_reason, 'budget-limit');
+  assert.deepEqual(scan.budget, {
+    initial: 1,
+    limit: 1,
+    message_limit: 10,
+    spent: 1,
+    remaining: 0,
+    message_cost: 1,
+  });
+  assert.deepEqual(scan.path_stops, [{
+    index: 2,
+    stop_reason: 'budget-limit',
+    branch_depth: 0,
+    branch_path: [],
+    code: null,
+    label: '',
+    control_flow_target: null,
+  }]);
+});
+
+test('foresight scanner records message and scan limit path stops', () => {
+  const scanner = new ForesightScanner({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    maxBlocks: 1,
+    budget: 5,
+  });
+  const list = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['First limited text'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Second limited text'] },
+  ];
+
+  scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  const messageLimitScan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(messageLimitScan.stop_reason, 'message-limit');
+  assert.equal(messageLimitScan.path_stops[0].stop_reason, 'message-limit');
+  assert.equal(messageLimitScan.path_stops[0].index, 2);
+
+  const scanLimitScanner = new ForesightScanner({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    maxCommands: 1,
+  });
+
+  scanLimitScanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  const scanLimitScan = scanLimitScanner.getSnapshot().recent_scans[0];
+  assert.equal(scanLimitScan.stop_reason, 'scan-limit');
+  assert.equal(scanLimitScan.path_stops[0].stop_reason, 'scan-limit');
+  assert.equal(scanLimitScan.path_stops[0].index, 2);
+});
+
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
   const index = {
     translate({ text }) {

@@ -2,6 +2,7 @@
   const DEFAULT_MAX_BLOCKS = 24;
   const DEFAULT_MAX_COMMANDS = 512;
   const DEFAULT_MAX_BRANCH_DEPTH = 8;
+  const DEFAULT_MESSAGE_BUDGET_COST = 1;
 
   class ForesightScanner {
     constructor(index, options = {}) {
@@ -13,6 +14,7 @@
       this.maxBlocks = positiveInteger(options.maxBlocks, DEFAULT_MAX_BLOCKS);
       this.maxCommands = positiveInteger(options.maxCommands, DEFAULT_MAX_COMMANDS);
       this.maxBranchDepth = positiveInteger(options.maxBranchDepth, DEFAULT_MAX_BRANCH_DEPTH);
+      this.budgetLimit = positiveInteger(options.budget, this.maxBlocks);
       this.recentScans = [];
       this.cacheHits = 0;
       this.cacheMisses = 0;
@@ -21,7 +23,7 @@
 
     collectUpcomingMessageBlocks(input = {}) {
       const origin = resolveOrigin(input.currentMessageOrigin);
-      const diagnostics = createDiagnostics(origin);
+      const diagnostics = createDiagnostics(origin, this.budgetLimit, this.maxBlocks);
       if (!origin) {
         diagnostics.status = 'miss';
         diagnostics.stop_reason = 'current-message-unattached';
@@ -40,18 +42,27 @@
         branchPath: [],
       }];
 
-      while (stack.length && blocks.length < this.maxBlocks && diagnostics.scanned_commands < this.maxCommands) {
+      while (
+        stack.length
+        && blocks.length < this.maxBlocks
+        && diagnostics.scanned_commands < this.maxCommands
+        && hasBudgetRemaining(diagnostics.budget)
+      ) {
         const frame = stack.pop();
         if (!frame || !Array.isArray(frame.list)) continue;
         scanFrame(this, frame, stack, blocks, diagnostics);
       }
 
       diagnostics.blocks = blocks.length;
-      if (!diagnostics.stop_reason) diagnostics.stop_reason = diagnostics.scanned_commands >= this.maxCommands
-        ? 'max-scan-commands'
-        : blocks.length >= this.maxBlocks
-          ? 'message-limit'
-          : 'end-of-list';
+      if (!diagnostics.stop_reason) {
+        const limitReason = selectLimitStopReason(this, diagnostics, blocks);
+        if (limitReason) {
+          diagnostics.stop_reason = limitReason;
+          appendLimitPathStop(diagnostics, diagnostics.stop_index, limitReason);
+        } else {
+          diagnostics.stop_reason = 'end-of-list';
+        }
+      }
       diagnostics.status = blocks.length ? 'scanned' : 'blocked';
       this.recordScan(diagnostics);
       return blocks;
@@ -133,15 +144,31 @@
             lineCount: block.lines.length,
             fromCommonEvent: frame.listId && String(frame.listId).startsWith('common:'),
           }));
+          spendBudget(diagnostics.budget, DEFAULT_MESSAGE_BUDGET_COST);
+          diagnostics.stop_index = block.nextIndex;
+          frame.index = block.nextIndex;
+          const limitReason = selectLimitStopReason(scanner, diagnostics, blocks);
+          if (limitReason) {
+            diagnostics.stop_reason = limitReason;
+            appendLimitPathStop(diagnostics, block.nextIndex, limitReason, frame);
+            return;
+          }
           index = block.nextIndex;
           continue;
         }
       }
       if (code === 102) {
         readChoices(command).forEach((choice, choiceIndex) => {
-          if (blocks.length >= scanner.maxBlocks) return;
+          if (blocks.length >= scanner.maxBlocks || !hasBudgetRemaining(diagnostics.budget)) return;
           blocks.push(createBlock(scanner, choice, 'choice', frame, index, { choiceIndex }));
+          spendBudget(diagnostics.budget, DEFAULT_MESSAGE_BUDGET_COST);
         });
+        const limitReason = selectLimitStopReason(scanner, diagnostics, blocks);
+        if (limitReason) {
+          diagnostics.stop_reason = limitReason;
+          appendLimitPathStop(diagnostics, index + 1, limitReason, frame);
+          return;
+        }
         const branchRead = readChoiceBranches(list, index, command);
         if (branchRead && branchRead.targets.length) {
           index = scanBranchTargets(scanner, frame, stack, blocks, diagnostics, branchRead, 'choice');
@@ -309,7 +336,11 @@
     const branchCount = branchRead.targets.length;
     diagnostics.branch_paths += branchCount;
     branchRead.targets.forEach((target, branchIndex) => {
-      if (blocks.length >= scanner.maxBlocks || diagnostics.scanned_commands >= scanner.maxCommands) return;
+      if (
+        blocks.length >= scanner.maxBlocks
+        || diagnostics.scanned_commands >= scanner.maxCommands
+        || !hasBudgetRemaining(diagnostics.budget)
+      ) return;
       const branchPath = cloneBranchPath(frame.branchPath).concat(branchIndex);
       const branchFrame = {
         list: frame.list,
@@ -974,7 +1005,7 @@
     return origin;
   }
 
-  function createDiagnostics(origin) {
+  function createDiagnostics(origin, budgetLimit, messageLimit) {
     return {
       status: 'scanned',
       start_index: origin ? positiveInteger(origin.nextIndex, 0) : 0,
@@ -994,6 +1025,7 @@
       route_command_actions: [],
       command_actions: [],
       staleness_risks: 0,
+      budget: createBudgetState(budgetLimit, messageLimit),
       path_stops: [],
     };
   }
@@ -1022,6 +1054,7 @@
         ? diagnostics.command_actions.map((action) => Object.assign({}, action))
         : [],
       staleness_risks: diagnostics.staleness_risks || 0,
+      budget: cloneBudgetSnapshot(diagnostics.budget),
       path_stops: Array.isArray(diagnostics.path_stops)
         ? diagnostics.path_stops.map(sanitizePathStop)
         : [],
@@ -1059,7 +1092,7 @@
       stop_reason: stop && stop.stop_reason ? String(stop.stop_reason) : '',
       branch_depth: Math.max(0, Math.floor(Number(stop && stop.branch_depth) || 0)),
       branch_path: cloneBranchPath(stop && stop.branch_path),
-      code: Number.isFinite(Number(stop && stop.code)) ? Number(stop.code) : null,
+      code: stop && stop.code === null ? null : (Number.isFinite(Number(stop && stop.code)) ? Number(stop.code) : null),
       label: stop && stop.label ? String(stop.label) : '',
       control_flow_target: cloneControlFlowTarget(stop && stop.control_flow_target),
     };
@@ -1082,6 +1115,65 @@
       reason: metadata.reason,
     });
     if (metadata.stalenessRisk) diagnostics.staleness_risks += 1;
+  }
+
+  function selectLimitStopReason(scanner, diagnostics, blocks) {
+    if (diagnostics.scanned_commands >= scanner.maxCommands) return 'scan-limit';
+    if (!hasBudgetRemaining(diagnostics.budget)) return 'budget-limit';
+    if (blocks.length >= scanner.maxBlocks) return 'message-limit';
+    return '';
+  }
+
+  function appendLimitPathStop(diagnostics, index, reason, frame) {
+    if (!diagnostics || !reason) return;
+    const stops = Array.isArray(diagnostics.path_stops) ? diagnostics.path_stops : [];
+    const last = stops[stops.length - 1];
+    if (last && last.stop_reason === reason && Number(last.index) === Number(index)) return;
+    appendPathStop(diagnostics, {
+      index,
+      stop_reason: reason,
+      branch_depth: frame && frame.branchDepth ? frame.branchDepth : 0,
+      branch_path: cloneBranchPath(frame && frame.branchPath),
+      code: null,
+      label: '',
+    });
+  }
+
+  function createBudgetState(limit, messageLimit) {
+    const initial = positiveInteger(limit, DEFAULT_MAX_BLOCKS);
+    return {
+      initial,
+      limit: initial,
+      messageLimit: positiveInteger(messageLimit, initial),
+      spent: 0,
+      remaining: initial,
+      messageCost: DEFAULT_MESSAGE_BUDGET_COST,
+    };
+  }
+
+  function hasBudgetRemaining(budget) {
+    return Boolean(budget && Number(budget.remaining) > 0);
+  }
+
+  function spendBudget(budget, amount) {
+    if (!budget) return 0;
+    const cost = positiveInteger(amount, DEFAULT_MESSAGE_BUDGET_COST);
+    const spent = Math.min(Math.max(0, Math.floor(Number(budget.remaining) || 0)), cost);
+    budget.spent = Math.max(0, Math.floor(Number(budget.spent) || 0)) + spent;
+    budget.remaining = Math.max(0, Math.floor(Number(budget.remaining) || 0) - spent);
+    return spent;
+  }
+
+  function cloneBudgetSnapshot(budget) {
+    if (!budget || typeof budget !== 'object') return null;
+    return {
+      initial: Math.max(0, Math.floor(Number(budget.initial) || 0)),
+      limit: Math.max(0, Math.floor(Number(budget.limit) || 0)),
+      message_limit: Math.max(0, Math.floor(Number(budget.messageLimit) || 0)),
+      spent: Math.max(0, Math.floor(Number(budget.spent) || 0)),
+      remaining: Math.max(0, Math.floor(Number(budget.remaining) || 0)),
+      message_cost: Math.max(1, Math.floor(Number(budget.messageCost) || DEFAULT_MESSAGE_BUDGET_COST)),
+    };
   }
 
   function sanitizePathStop(stop) {
