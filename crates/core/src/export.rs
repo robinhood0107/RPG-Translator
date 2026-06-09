@@ -386,6 +386,7 @@ impl ExportBuilder {
 
         let mut record_count = 0usize;
         for cache_file in &manifest.cache_files {
+            validate_cache_file_name(cache_file)?;
             let path = output_dir.join(cache_file);
             let text = fs::read_to_string(&path).map_err(|error| {
                 Error::invalid_input(format!(
@@ -563,6 +564,22 @@ fn single_source_language(rows: &[ExportableTranslationRecord]) -> Result<String
         }
     }
     Ok(first.source_language.clone())
+}
+
+fn validate_cache_file_name(cache_file: &str) -> Result<()> {
+    if cache_file.contains('/') || cache_file.contains('\\') {
+        return Err(Error::invalid_input(format!(
+            "unsupported export cache file {cache_file}"
+        )));
+    }
+    if !(cache_file == CACHE_FILE
+        || (cache_file.starts_with("cache-") && cache_file.ends_with(".jsonl")))
+    {
+        return Err(Error::invalid_input(format!(
+            "unsupported export cache file {cache_file}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_cache_record(record: &RuntimeCacheRecord) -> Result<()> {

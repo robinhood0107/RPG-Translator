@@ -296,6 +296,34 @@ fn export_verification_rejects_malformed_runtime_bundle() -> Result<()> {
 }
 
 #[test]
+fn export_verification_rejects_cache_files_outside_bundle_before_reading() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let export_dir = temp.path().join("export");
+    fs::create_dir_all(&export_dir).expect("create export dir");
+    fs::write(
+        export_dir.join("manifest.json"),
+        r#"{"schema_version":1,"project_id":1,"source_language":"ja","target_language":"ko","created_timestamp":"1","key_schema_version":"v1","cache_files":["../outside.jsonl"],"record_count":1}"#,
+    )
+    .expect("write manifest");
+    fs::write(
+        export_dir.join("overlay-config.json"),
+        serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join("outside.jsonl"),
+        r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","cache_aliases":["ck:v1:0000000000000000000000000000000000000000000000000000000000000000"],"source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
+    )
+    .expect("write outside cache");
+
+    let error = ExportBuilder::verify_bundle(&export_dir).expect_err("outside cache file fails");
+
+    assert!(error.to_string().contains("unsupported export cache file"));
+
+    Ok(())
+}
+
+#[test]
 fn export_verification_rejects_wrong_foresight_catalog_schema() -> Result<()> {
     let temp = tempdir().expect("create temp dir");
     fs::write(
