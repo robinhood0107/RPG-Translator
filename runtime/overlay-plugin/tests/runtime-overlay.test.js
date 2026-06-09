@@ -561,6 +561,108 @@ test('orchestrator updates items through cache-only request contract', async () 
   ]);
 });
 
+test('orchestrator reuses completed source translations before cache index lookup', () => {
+  const lookups = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      lookups.push(request.text);
+      if (request.text === 'Repeated source') return '반복 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const first = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'first',
+    text: 'Repeated source',
+    renderStrategy: 'window-text',
+  });
+  const second = orchestrator.observeRecord({
+    adapter: 'pixi-text',
+    kind: 'PIXI.Text',
+    surface: {},
+    slotKey: 'second',
+    text: 'Repeated source',
+    renderStrategy: 'pixi-text',
+  });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(first.status, 'hit');
+  assert.equal(second.status, 'hit');
+  assert.equal(second.translatedText, '반복 번역');
+  assert.deepEqual(lookups, ['Repeated source']);
+  assert.equal(diagnostics.cache_hits, 2);
+  assert.equal(diagnostics.source_cache_hits, 1);
+  assert.equal(diagnostics.source_cache_entries, 1);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [entry.id, entry.translatedText]), [
+    [first.id, '반복 번역'],
+    [second.id, '반복 번역'],
+  ]);
+  assert.deepEqual(diagnostics.recent_events.slice(-3).map((event) => [event.type, event.reason]), [
+    ['observed', 'observed'],
+    ['cacheHit', 'source-cache'],
+    ['renderQueued', 'hit'],
+  ]);
+});
+
+test('orchestrator request path reports completed source translation reuse', async () => {
+  const lookups = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      lookups.push(request.text);
+      if (request.text === 'Reusable request source') return '재사용 요청 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const first = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'request-source',
+    text: 'Reusable request source',
+    renderStrategy: 'window-text',
+  });
+  const second = orchestrator.observeRecord({
+    adapter: 'pixi-text',
+    kind: 'PIXI.Text',
+    surface: {},
+    slotKey: 'request-miss',
+    text: 'Initial miss source',
+    renderStrategy: 'pixi-text',
+  });
+  const handle = orchestrator.requestItemTranslation(second.itemId, {
+    text: 'Reusable request source',
+    renderStrategy: 'pixi-text',
+    sourceHint: 'cache-only',
+  });
+
+  assert.equal(first.status, 'hit');
+  assert.equal(second.status, 'miss');
+  assert.equal(handle.getStatus(), 'completed');
+  assert.equal(await handle.promise, '재사용 요청 번역');
+  assert.deepEqual(lookups, ['Reusable request source', 'Initial miss source']);
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.source_cache_hits, 1);
+  assert.equal(diagnostics.active.find((item) => item.id === second.itemId).sourceHint, 'source-cache');
+  assert.deepEqual(diagnostics.recent_events.slice(-3).map((event) => [event.type, event.reason]), [
+    ['requestCacheHit', 'source-cache'],
+    ['renderQueued', 'hit'],
+    ['requestCompleted', 'cache-only'],
+  ]);
+});
+
 test('orchestrator cache-only request records miss without provider handle', async () => {
   const orchestrator = new TextOrchestrator({ translate: () => null }, {
     engine: 'mz',

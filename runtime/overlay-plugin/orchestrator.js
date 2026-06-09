@@ -23,6 +23,7 @@
       this.surfaceIds = new WeakMap();
       this.surfaceClaims = new WeakMap();
       this.textClaims = new Map();
+      this.sourceTranslations = new Map();
       this.renderQueue = [];
       this.events = [];
       this.listeners = new Set();
@@ -35,6 +36,7 @@
         observed_items: 0,
         cache_hits: 0,
         cache_misses: 0,
+        source_cache_hits: 0,
         render_accepted: 0,
         render_rejected: 0,
         ownership_conflicts: 0,
@@ -98,15 +100,16 @@
       }
       this.diagnosticState.cache_hits += 1;
       item.translationState = 'hit';
+      const cacheHitReason = item.sourceHint === 'source-cache' ? 'source-cache' : 'cache-hit';
       this.recordDrawTrace('cache-hit', {
         adapter: item.adapter,
         methodName: item.kind,
         rawText: text,
         visibleText: translatedText,
-        reason: 'cache-hit',
+        reason: cacheHitReason,
         force: true,
       });
-      this.emit('cacheHit', Object.assign({ reason: 'cache-hit', status: 'hit', translatedText }, item));
+      this.emit('cacheHit', Object.assign({ reason: cacheHitReason, status: 'hit', translatedText }, item));
       return this.queueRenderCommand(item, translatedText, 'hit');
     }
 
@@ -141,6 +144,7 @@
         item.translationState = '';
         item.translationReceived = '';
         item.translation = '';
+        item.sourceHint = '';
         item.lastRenderStatus = '';
         item.generation = this.guard ? this.guard.generationFor(item.surface) : item.generation;
       }
@@ -178,9 +182,9 @@
       item.translationState = 'hit';
       item.translationReceived = String(translatedText);
       item.translation = String(translatedText);
-      item.sourceHint = sourceHint;
+      item.sourceHint = lookupItem.sourceHint === 'source-cache' ? 'source-cache' : sourceHint;
       this.emit('requestCacheHit', Object.assign({
-        reason: 'cache-hit',
+        reason: item.sourceHint === 'source-cache' ? 'source-cache' : 'cache-hit',
         status: 'hit',
         translatedText,
       }, item));
@@ -510,6 +514,7 @@
         recent_events: this.events.slice(),
         events: this.events.slice(),
         renderQueue: this.renderQueue.map(cloneRenderCommand),
+        source_cache_entries: this.sourceTranslations.size,
       });
       if (this.runtimeDiagnostics && typeof this.runtimeDiagnostics.snapshot === 'function') {
         diagnostics.runtime_diagnostics = this.runtimeDiagnostics.snapshot({ detailView: false });
@@ -673,14 +678,37 @@
     }
 
     lookup(item) {
+      const key = buildSourceTranslationKey(item);
+      if (key && this.sourceTranslations.has(key)) {
+        const cached = this.sourceTranslations.get(key);
+        if (cached && cached.translation) {
+          if (item) item.sourceHint = 'source-cache';
+          this.diagnosticState.source_cache_hits += 1;
+          return cached.translation;
+        }
+      }
       if (!this.index || typeof this.index.translate !== 'function') return null;
-      return this.index.translate({
+      const translation = this.index.translate({
         engine: this.engine,
         sourceLanguage: this.sourceLanguage,
         targetLanguage: this.targetLanguage,
         text: item.sourceText,
         contextHash: item.contextHash,
       });
+      if (translation) this.rememberSourceTranslation(item, translation, 'cache');
+      return translation;
+    }
+
+    rememberSourceTranslation(item, translation, sourceHint = 'cache') {
+      const key = buildSourceTranslationKey(item);
+      const value = String(translation ?? '');
+      if (!key || !value.trim()) return false;
+      if (normalizeComparableText(key) === normalizeComparableText(value)) return false;
+      this.sourceTranslations.set(key, {
+        translation: value,
+        sourceHint: String(sourceHint || 'cache'),
+      });
+      return true;
     }
 
     queueRenderCommand(item, translatedText, status) {
@@ -1105,6 +1133,23 @@
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return 0;
     return Math.max(0, Math.min(10000, Math.floor(numeric)));
+  }
+
+  function buildSourceTranslationKey(source) {
+    const value = firstNonEmpty(
+      source && source.normalizedSource,
+      source && source.translationSource,
+      source && source.original,
+      source && source.visibleText,
+      source && source.rawText,
+      source && source.sourceText,
+      source && source.text,
+    );
+    return String(value || '').trim();
+  }
+
+  function normalizeComparableText(value) {
+    return String(value ?? '').trim();
   }
 
   function describeTextEligibilityDecision(payload = {}) {
