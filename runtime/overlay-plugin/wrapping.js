@@ -144,14 +144,25 @@
   function canSoftWrap(windowInstance) {
     if (!windowInstance) return true;
     const contentsHeight = Number(windowInstance.contents && windowInstance.contents.height);
-    const lineHeight = typeof windowInstance.lineHeight === 'function'
-      ? Number(windowInstance.lineHeight())
-      : NaN;
+    const lineHeight = resolveLineHeight(windowInstance);
     if (!Number.isFinite(contentsHeight) || contentsHeight <= 0 || contentsHeight === Number.MAX_SAFE_INTEGER) {
       return true;
     }
     if (!Number.isFinite(lineHeight) || lineHeight <= 0) return true;
     return contentsHeight >= lineHeight * 2;
+  }
+
+  function resolveLineHeight(windowInstance) {
+    if (!windowInstance) return NaN;
+    if (typeof windowInstance.lineHeight === 'function') {
+      const nativeLineHeight = Number(windowInstance.lineHeight());
+      if (Number.isFinite(nativeLineHeight) && nativeLineHeight > 0) {
+        return Math.max(1, Math.ceil(nativeLineHeight));
+      }
+    }
+    const fontSize = Number(windowInstance.contents && windowInstance.contents.fontSize);
+    if (Number.isFinite(fontSize) && fontSize > 0) return fontSize + 8;
+    return 32;
   }
 
   function measureLine(line) {

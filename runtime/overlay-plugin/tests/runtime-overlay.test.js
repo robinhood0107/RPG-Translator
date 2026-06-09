@@ -336,6 +336,22 @@ test('message wrapper derives capacity from contents bitmap metrics', () => {
   );
 });
 
+test('message wrapper uses contents font size when lineHeight is unavailable', () => {
+  const oneLineWindow = {
+    contents: {
+      width: 60,
+      height: 27,
+      fontSize: 20,
+      measureTextWidth(text) { return String(text).length * 10; },
+    },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('alpha beta gamma', { window: oneLineWindow }),
+    ['alpha beta gamma'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
