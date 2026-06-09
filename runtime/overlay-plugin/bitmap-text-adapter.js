@@ -17,8 +17,11 @@
         if (this.__rpgTranslatorBitmapReplayDepth > 0 || !translator || typeof translator.observeRecord !== 'function') {
           return originalDrawText.call(this, translateText(translator, scope, text, this), ...rest);
         }
+        const fragment = createFragment(scope, this, text, rest);
+        const surfaceDraw = routeSurfaceDraw(translator, this, fragment, originalDrawText);
+        if (surfaceDraw.handled) return surfaceDraw.result;
         const state = ensureState(this);
-        state.fragments.push(createFragment(scope, this, text, rest));
+        state.fragments.push(fragment);
         if (state.fragments.length > 240) state.fragments.splice(0, state.fragments.length - 240);
         scheduleFlush(scope, this);
         return originalDrawText.call(this, text, ...rest);
@@ -47,6 +50,50 @@
       width: Math.max(1, estimateTextWidth(bitmap, text)),
       font: fontSignature(bitmap),
     };
+  }
+
+  function routeSurfaceDraw(translator, bitmap, fragment, originalDrawText) {
+    if (!translator || typeof translator.recordSurfaceDraw !== 'function') return { handled: false, result: undefined };
+    const outcome = translator.recordSurfaceDraw({
+      target: bitmap,
+      adapterId: 'bitmap-text',
+      methodName: 'drawText',
+      text: fragment.text,
+      x: fragment.x,
+      y: fragment.y,
+      maxWidth: fragment.maxWidth,
+      lineHeight: fragment.lineHeight,
+      align: fragment.align,
+      measuredWidth: fragment.width,
+      drawState: {
+        font: fragment.font,
+      },
+      candidateAdapters: ['sprite-text'],
+    });
+    const decision = outcome && outcome.drawDecision ? outcome.drawDecision : null;
+    if (!decision || !decision.action) return { handled: false, result: undefined };
+    if (decision.action === 'suppress-native-draw') return { handled: true, result: undefined };
+    if (decision.action === 'draw-original') {
+      return {
+        handled: true,
+        result: originalDrawText.call(bitmap, fragment.text, fragment.x, fragment.y, fragment.maxWidth, fragment.lineHeight, fragment.align),
+      };
+    }
+    if (decision.action === 'replace-native-draw') {
+      return {
+        handled: true,
+        result: originalDrawText.call(
+          bitmap,
+          decision.text,
+          finiteOr(decision.x, fragment.x),
+          finiteOr(decision.y, fragment.y),
+          finiteOr(decision.maxWidth, fragment.maxWidth),
+          finiteOr(decision.lineHeight, fragment.lineHeight),
+          decision.align || fragment.align,
+        ),
+      };
+    }
+    return { handled: false, result: undefined };
   }
 
   function scheduleFlush(scope, bitmap) {
@@ -325,6 +372,11 @@
   function numberAt(values, index, fallback) {
     const value = Number(values && values.length > index ? values[index] : fallback);
     return Number.isFinite(value) ? value : fallback;
+  }
+
+  function finiteOr(value, fallback) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
   }
 
   function overlay(scope) {

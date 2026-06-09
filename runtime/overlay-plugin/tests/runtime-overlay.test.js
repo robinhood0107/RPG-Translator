@@ -2302,6 +2302,51 @@ test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG
   ]);
 });
 
+test('bitmap text adapter publishes surface draws before native draw', () => {
+  const calls = [];
+  const surfaceEvents = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.fontSize = 24;
+    },
+    SceneManager: {
+      updateScene() {},
+    },
+  };
+  root.Bitmap.prototype.measureTextWidth = (text) => String(text || '').length * 8;
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, width, height, align) {
+    calls.push([text, x, y, width, height, align]);
+  };
+  const orchestrator = new TextOrchestrator({ translate: () => null }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  orchestrator.subscribeSurfaceDraws((event) => {
+    surfaceEvents.push([
+      event.type,
+      event.adapterId,
+      event.sourceAdapter,
+      event.status,
+      event.payload.text,
+      event.payload.maxWidth,
+    ]);
+    return { action: 'replace-native-draw', text: 'Surface KO' };
+  }, { adapterId: 'sprite-text' });
+
+  BitmapTextAdapter.install(root, orchestrator);
+  new root.Bitmap().drawText('Surface JP', 5, 6, 70, 24, 'right');
+
+  assert.deepEqual(surfaceEvents, [
+    ['surface.draw', 'sprite-text', 'bitmap-text', 'deferred', 'Surface JP', 70],
+  ]);
+  assert.deepEqual(calls, [
+    ['Surface KO', 5, 6, 70, 24, 'right'],
+  ]);
+  assert.equal(orchestrator.diagnostics().observed_items, 0);
+});
+
 test('sprite text adapter renders cache hits through overlay lifecycle', () => {
   const index = {
     translate({ text }) {
