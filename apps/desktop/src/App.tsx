@@ -143,6 +143,9 @@ type TranslateProgressSnapshot = {
   batchEtaMs?: number | null;
   lastBatchElapsedMs?: number | null;
   avgBatchElapsedMs?: number | null;
+  recentP50BatchElapsedMs?: number | null;
+  recentP95BatchElapsedMs?: number | null;
+  bestItemsPerMinute?: number | null;
   currentBatchItems: number;
   startedCompletedItems: number;
   parseFailedItems: number;
@@ -181,6 +184,9 @@ type TranslateProgressEventData = {
   batch_eta_ms?: number | null;
   last_batch_elapsed_ms?: number | null;
   avg_batch_elapsed_ms?: number | null;
+  recent_p50_batch_elapsed_ms?: number | null;
+  recent_p95_batch_elapsed_ms?: number | null;
+  best_items_per_minute?: number | null;
   current_batch_items?: number;
   started_completed_items?: number;
   parse_failed_items?: number;
@@ -371,6 +377,9 @@ export const text = {
     nextExperimentBatch: "Next experiment batch",
     inputTokenBudget: "Input token budget",
     recentAverageSpeed: "Recent average speed",
+    recentP50Batch: "Recent p50 batch",
+    recentP95Batch: "Recent p95 batch",
+    bestItemsPerMinute: "Best speed",
     adaptiveDecisionReason: "Speed tuning reason",
     failureReasons: "Recent failure reasons",
     batchHistoryUnavailable: "Batch history unavailable",
@@ -763,6 +772,9 @@ export const text = {
     nextExperimentBatch: "다음 실험 배치",
     inputTokenBudget: "입력 토큰 예산",
     recentAverageSpeed: "최근 평균 속도",
+    recentP50Batch: "최근 p50 배치",
+    recentP95Batch: "최근 p95 배치",
+    bestItemsPerMinute: "최고 속도",
     adaptiveDecisionReason: "속도 조정 사유",
     failureReasons: "최근 실패 원인",
     batchHistoryUnavailable: "배치 기록 없음",
@@ -3387,6 +3399,9 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
       batchEtaMs: job.batch_eta_ms ?? null,
       lastBatchElapsedMs: job.last_batch_elapsed_ms ?? null,
       avgBatchElapsedMs: job.avg_batch_elapsed_ms ?? null,
+      recentP50BatchElapsedMs: null,
+      recentP95BatchElapsedMs: null,
+      bestItemsPerMinute: null,
       currentBatchItems: job.current_batch_items,
       startedCompletedItems: 0,
       parseFailedItems: Math.max(job.parse_failed_items, checkpointParseFailures),
@@ -3431,6 +3446,9 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
     batchEtaMs: null,
     lastBatchElapsedMs: null,
     avgBatchElapsedMs: null,
+    recentP50BatchElapsedMs: null,
+    recentP95BatchElapsedMs: null,
+    bestItemsPerMinute: null,
     currentBatchItems: 0,
     startedCompletedItems: response.checkpoint.completed_count,
     parseFailedItems: 0,
@@ -3597,6 +3615,9 @@ function progressFromTranslateResponse(
     batchEtaMs: response.batch_eta_ms ?? null,
     lastBatchElapsedMs: response.last_batch_elapsed_ms ?? null,
     avgBatchElapsedMs: response.avg_batch_elapsed_ms ?? null,
+    recentP50BatchElapsedMs: response.recent_p50_batch_elapsed_ms ?? null,
+    recentP95BatchElapsedMs: response.recent_p95_batch_elapsed_ms ?? null,
+    bestItemsPerMinute: response.best_items_per_minute ?? null,
     currentBatchItems: response.current_batch_items ?? 0,
     startedCompletedItems: response.started_completed_items ?? 0,
     parseFailedItems: response.parse_failed_items ?? 0,
@@ -3641,6 +3662,9 @@ function translateProgressFromEvent(
     batchEtaMs: event.batch_eta_ms ?? null,
     lastBatchElapsedMs: event.last_batch_elapsed_ms ?? null,
     avgBatchElapsedMs: event.avg_batch_elapsed_ms ?? null,
+    recentP50BatchElapsedMs: event.recent_p50_batch_elapsed_ms ?? null,
+    recentP95BatchElapsedMs: event.recent_p95_batch_elapsed_ms ?? null,
+    bestItemsPerMinute: event.best_items_per_minute ?? null,
     currentBatchItems: event.current_batch_items ?? 0,
     startedCompletedItems: event.started_completed_items ?? 0,
     parseFailedItems: event.parse_failed_items ?? 0,
@@ -4473,6 +4497,15 @@ function TranslateProgressView({
             <span>{t.lastBatch} {progress.lastBatchElapsedMs === null || progress.lastBatchElapsedMs === undefined ? "--:--:--" : formatDuration(progress.lastBatchElapsedMs)}</span>
             <span>{t.avgBatch} {progress.avgBatchElapsedMs === null || progress.avgBatchElapsedMs === undefined ? "--:--:--" : formatDuration(progress.avgBatchElapsedMs)}</span>
             <span>{t.recentAverageSpeed}: {progress.avgBatchElapsedMs ? formatMaybeNumber(progress.currentBatchItems * 60000 / progress.avgBatchElapsedMs) : "--"} {t.benchmarkItemsPerMinute}</span>
+            {progress.recentP50BatchElapsedMs === null || progress.recentP50BatchElapsedMs === undefined ? null : (
+              <span>{t.recentP50Batch} {formatDuration(progress.recentP50BatchElapsedMs)}</span>
+            )}
+            {progress.recentP95BatchElapsedMs === null || progress.recentP95BatchElapsedMs === undefined ? null : (
+              <span>{t.recentP95Batch} {formatDuration(progress.recentP95BatchElapsedMs)}</span>
+            )}
+            {progress.bestItemsPerMinute === null || progress.bestItemsPerMinute === undefined ? null : (
+              <span>{t.bestItemsPerMinute}: {formatMaybeNumber(progress.bestItemsPerMinute)} {t.benchmarkItemsPerMinute}</span>
+            )}
           </>
         ) : null}
         <span>{t.retryPending}: {progress.retryPendingItems.toLocaleString()}</span>

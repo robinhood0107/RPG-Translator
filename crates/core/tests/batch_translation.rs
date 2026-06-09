@@ -798,6 +798,9 @@ fn progress_reports_item_and_batch_eta_separately() {
         TranslateProgressEvent::BatchFinished(snapshot) => {
             snapshot.current_batch_items == 1
                 && snapshot.started_completed_items == 0
+                && snapshot.recent_p50_batch_elapsed_ms.is_some()
+                && snapshot.recent_p95_batch_elapsed_ms.is_some()
+                && snapshot.best_items_per_minute.is_some()
                 && (snapshot.item_eta_ms.is_some() || snapshot.batch_eta_ms.is_some())
         }
         _ => false,

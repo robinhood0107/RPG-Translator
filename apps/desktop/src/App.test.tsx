@@ -2229,6 +2229,9 @@ test("desktop translate progress events update progress and pause resumes later"
           split_batches: 0,
           elapsed_ms: 64_000,
           eta_ms: 3_136_000,
+          recent_p50_batch_elapsed_ms: 9_000,
+          recent_p95_batch_elapsed_ms: 12_000,
+          best_items_per_minute: 240,
         },
       },
     });
@@ -2237,6 +2240,12 @@ test("desktop translate progress events update progress and pause resumes later"
   expect(await screen.findByText("32 / 1,600")).toBeInTheDocument();
   expect(screen.getByText("Batch 2 / 100")).toBeInTheDocument();
   expect(screen.getByText("Text ETA 00:52:16")).toBeInTheDocument();
+  expect(screen.getByText("Recent p50 batch 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("Recent p95 batch 00:00:12")).toBeInTheDocument();
+  const bestSpeedRow = screen.getByText(/Best speed:/).closest("span");
+  expect(bestSpeedRow).not.toBeNull();
+  expect(bestSpeedRow).toHaveTextContent("240");
+  expect(bestSpeedRow).toHaveTextContent("Items/min");
 
   fireEvent.click(screen.getByRole("button", { name: "Pause" }));
   await waitFor(() =>

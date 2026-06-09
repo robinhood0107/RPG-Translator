@@ -141,6 +141,9 @@ export type TranslationJobSummary = {
   batch_eta_ms?: number | null;
   last_batch_elapsed_ms?: number | null;
   avg_batch_elapsed_ms?: number | null;
+  recent_p50_batch_elapsed_ms?: number | null;
+  recent_p95_batch_elapsed_ms?: number | null;
+  best_items_per_minute?: number | null;
   current_batch_items: number;
   elapsed_ms: number;
   model?: string | null;
@@ -227,6 +230,9 @@ export type TranslateResponse = {
   batch_eta_ms?: number | null;
   last_batch_elapsed_ms?: number | null;
   avg_batch_elapsed_ms?: number | null;
+  recent_p50_batch_elapsed_ms?: number | null;
+  recent_p95_batch_elapsed_ms?: number | null;
+  best_items_per_minute?: number | null;
   current_batch_items?: number;
   started_completed_items?: number;
   parse_failed_items?: number;

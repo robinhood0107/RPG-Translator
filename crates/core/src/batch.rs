@@ -548,6 +548,9 @@ pub struct BatchRunReport {
     pub batch_eta_ms: Option<u64>,
     pub last_batch_elapsed_ms: Option<u64>,
     pub avg_batch_elapsed_ms: Option<u64>,
+    pub recent_p50_batch_elapsed_ms: Option<u64>,
+    pub recent_p95_batch_elapsed_ms: Option<u64>,
+    pub best_items_per_minute: Option<u64>,
     pub current_batch_items: usize,
     pub parse_failed_items: usize,
     pub validation_failed_items: usize,
@@ -817,6 +820,9 @@ impl BatchTranslator {
             batch_eta_ms: None,
             last_batch_elapsed_ms: None,
             avg_batch_elapsed_ms: None,
+            recent_p50_batch_elapsed_ms: None,
+            recent_p95_batch_elapsed_ms: None,
+            best_items_per_minute: None,
             current_batch_items: 0,
             parse_failed_items: 0,
             validation_failed_items: 0,
@@ -869,6 +875,7 @@ impl BatchTranslator {
                 should_pause: &mut should_pause,
                 started,
                 recent_success_batch_elapsed_ms: VecDeque::new(),
+                recent_success_batch_samples: VecDeque::new(),
             };
             let mut total_batch_elapsed_ms = 0u64;
             for batch in &plan.batches {
@@ -1053,6 +1060,9 @@ fn emit_batch_progress<F>(
         ),
         last_batch_elapsed_ms: report.last_batch_elapsed_ms,
         avg_batch_elapsed_ms: report.avg_batch_elapsed_ms,
+        recent_p50_batch_elapsed_ms: report.recent_p50_batch_elapsed_ms,
+        recent_p95_batch_elapsed_ms: report.recent_p95_batch_elapsed_ms,
+        best_items_per_minute: report.best_items_per_minute,
         current_batch_items: report.current_batch_items,
         started_completed_items: report.initial_completed_source_text_count,
         parse_failed_items: report.parse_failed_items,
@@ -1198,6 +1208,17 @@ fn median_nonempty_ms(mut values: Vec<u64>) -> Option<u64> {
     Some(values[values.len() / 2])
 }
 
+fn best_items_per_minute(samples: &VecDeque<RecentSuccessBatchSample>) -> Option<u64> {
+    samples
+        .iter()
+        .filter_map(|sample| throughput_per_minute(sample.item_count, sample.elapsed_ms))
+        .fold(None, |best, value| match best {
+            Some(current) if current >= value => Some(current),
+            _ => Some(value),
+        })
+        .map(|value| value.round() as u64)
+}
+
 fn estimate_item_eta_ms(
     started_completed_items: usize,
     completed_items: usize,
@@ -1310,6 +1331,13 @@ struct BatchProcessor<'a> {
     should_pause: &'a mut dyn FnMut() -> bool,
     started: Instant,
     recent_success_batch_elapsed_ms: VecDeque<u64>,
+    recent_success_batch_samples: VecDeque<RecentSuccessBatchSample>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecentSuccessBatchSample {
+    elapsed_ms: u64,
+    item_count: usize,
 }
 
 impl BatchProcessor<'_> {
@@ -1355,8 +1383,10 @@ impl BatchProcessor<'_> {
                         self.report.retry_pending_items = 0;
                         self.report.provider_backoff_ms = None;
                         let request_elapsed_ms = elapsed_ms(request_started);
-                        let success_delay_ms =
-                            self.note_successful_provider_batch(request_elapsed_ms);
+                        let success_delay_ms = self.note_successful_provider_batch(
+                            request_elapsed_ms,
+                            count_batch_source_text_ids(batch),
+                        );
                         let (translations, censored) =
                             split_censored_translations(batch, translations);
                         persist_translations(
@@ -1528,7 +1558,7 @@ impl BatchProcessor<'_> {
                         self.report.provider_backoff_ms = None;
                         let request_elapsed_ms = elapsed_ms(request_started);
                         let success_delay_ms =
-                            self.note_successful_provider_batch(request_elapsed_ms);
+                            self.note_successful_provider_batch(request_elapsed_ms, source_count);
                         let (translations, censored) =
                             split_censored_translations(batch, translations);
                         persist_translations(
@@ -1614,7 +1644,11 @@ impl BatchProcessor<'_> {
             .or_insert(0) += source_count;
     }
 
-    fn note_successful_provider_batch(&mut self, request_elapsed_ms: u64) -> u64 {
+    fn note_successful_provider_batch(
+        &mut self,
+        request_elapsed_ms: u64,
+        item_count: usize,
+    ) -> u64 {
         self.report.provider_backoff_ms = None;
         self.report.success_streak = self.report.success_streak.saturating_add(1);
         self.report.speed_mode = "steady".to_string();
@@ -1652,17 +1686,30 @@ impl BatchProcessor<'_> {
             &self.config.provider_spacing,
             self.report.success_delay_floor_ms,
         );
+        let paced_elapsed_ms = request_elapsed_ms.saturating_add(delay_ms).max(1);
         self.recent_success_batch_elapsed_ms
-            .push_back(request_elapsed_ms.saturating_add(delay_ms));
+            .push_back(paced_elapsed_ms);
         while self.recent_success_batch_elapsed_ms.len() > 12 {
             self.recent_success_batch_elapsed_ms.pop_front();
         }
-        self.report.avg_batch_elapsed_ms = median_nonempty_ms(
-            self.recent_success_batch_elapsed_ms
-                .iter()
-                .copied()
-                .collect(),
-        );
+        self.recent_success_batch_samples
+            .push_back(RecentSuccessBatchSample {
+                elapsed_ms: paced_elapsed_ms,
+                item_count,
+            });
+        while self.recent_success_batch_samples.len() > 12 {
+            self.recent_success_batch_samples.pop_front();
+        }
+        let recent_elapsed_ms = self
+            .recent_success_batch_elapsed_ms
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        self.report.avg_batch_elapsed_ms = median_nonempty_ms(recent_elapsed_ms.clone());
+        self.report.recent_p50_batch_elapsed_ms = percentile_latency_ms(&recent_elapsed_ms, 50);
+        self.report.recent_p95_batch_elapsed_ms = percentile_latency_ms(&recent_elapsed_ms, 95);
+        self.report.best_items_per_minute =
+            best_items_per_minute(&self.recent_success_batch_samples);
         self.report.next_delay_ms = (delay_ms > 0).then_some(delay_ms);
         sleep_success_delay(delay_ms);
         delay_ms
