@@ -102,7 +102,7 @@
     const overlayScope = overlay(scope);
     if (!overlayScope.__bitmapTextFlushQueue) overlayScope.__bitmapTextFlushQueue = new Set();
     overlayScope.__bitmapTextFlushQueue.add(bitmap);
-    if (!overlayScope.__bitmapTextFrameHooksInstalled) installFrameHooks(scope);
+    installFrameHooks(scope);
   }
 
   function flushQueuedBitmaps(scope, reason) {
@@ -245,20 +245,22 @@
 
   function installFrameHooks(scope) {
     const overlayScope = overlay(scope);
-    if (overlayScope.__bitmapTextFrameHooksInstalled) return true;
-    const installed = installFrameHook(scope && scope.SceneManager, 'updateScene', scope)
-      || installFrameHook(scope && scope.Graphics, 'render', scope);
-    overlayScope.__bitmapTextFrameHooksInstalled = installed;
-    return installed;
+    let installed = false;
+    installed = installFrameHook(scope && scope.SceneManager, 'updateScene', scope, false) || installed;
+    installed = installFrameHook(scope && scope.SceneManager, 'renderScene', scope, true) || installed;
+    installed = installFrameHook(scope && scope.Graphics, 'render', scope, true) || installed;
+    overlayScope.__bitmapTextFrameHooksInstalled = !!(overlayScope.__bitmapTextFrameHooksInstalled || installed);
+    return overlayScope.__bitmapTextFrameHooksInstalled;
   }
 
-  function installFrameHook(target, methodName, scope) {
+  function installFrameHook(target, methodName, scope, flushBefore) {
     if (!target || typeof target[methodName] !== 'function') return false;
     if (target[methodName].__rpgTranslatorBitmapFrame === FRAME_TOKEN) return true;
     const original = target[methodName];
     target[methodName] = function translatedBitmapFrame(...args) {
+      if (flushBefore) flushQueuedBitmaps(scope, methodName);
       const result = original.apply(this, args);
-      flushQueuedBitmaps(scope, methodName);
+      if (!flushBefore) flushQueuedBitmaps(scope, methodName);
       return result;
     };
     target[methodName].__rpgTranslatorOriginal = original;

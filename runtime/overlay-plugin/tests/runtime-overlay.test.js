@@ -5853,6 +5853,75 @@ test('bitmap text adapter aggregates same-line fragments and retires on mutation
   assert.equal(orchestrator.claimText(bitmapSlotKey, 'sprite-text:slot'), true);
 });
 
+test('bitmap text adapter flushes queued fragments through every frame render hook', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Queued') return '번역';
+      if (text === 'Second') return '두번째';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 160;
+      this.height = 80;
+      this.fontSize = 20;
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['updateScene']);
+      },
+      renderScene() {
+        calls.push(['renderScene']);
+      },
+    },
+    Graphics: {
+      render() {
+        calls.push(['graphics-render']);
+      },
+    },
+  };
+  root.Bitmap.prototype.textWidth = function textWidth(text) {
+    return String(text).length * 10;
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+
+  bitmap.drawText('Queued', 0, 0, 80, 24, 'left');
+  root.Graphics.render();
+
+  const graphicsReplayIndex = calls.findIndex((call) => call[0] === 'drawText' && call[1] === '번역');
+  const graphicsNativeIndex = calls.findIndex((call) => call[0] === 'graphics-render');
+  assert.ok(graphicsReplayIndex > -1);
+  assert.ok(graphicsNativeIndex > -1);
+  assert.ok(graphicsReplayIndex < graphicsNativeIndex);
+  assert.deepEqual(requests, ['Queued']);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  bitmap.drawText('Second', 0, 30, 80, 24, 'left');
+  root.SceneManager.renderScene();
+
+  const sceneReplayIndex = calls.findIndex((call) => call[0] === 'drawText' && call[1] === '두번째');
+  const sceneNativeIndex = calls.findIndex((call) => call[0] === 'renderScene');
+  assert.ok(sceneReplayIndex > -1);
+  assert.ok(sceneNativeIndex > -1);
+  assert.ok(sceneReplayIndex < sceneNativeIndex);
+  assert.deepEqual(requests, ['Queued', 'Second']);
+});
+
 test('pixi text adapter retires removed objects and restores translated text scale', () => {
   const index = {
     translate({ text }) {
