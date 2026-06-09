@@ -464,6 +464,16 @@ fn json_parse_failure_is_preserved_in_db_and_checkpoint_details() {
     );
     assert_eq!(findings[0].finding_type, "provider-json-parse");
     assert_eq!(findings[0].status, "open");
+    let samples = db
+        .recent_translation_speed_samples(None, None, 10)
+        .expect("speed samples");
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].status, "parse_failed");
+    assert_eq!(
+        samples[0].failure_type.as_deref(),
+        Some("provider-json-parse")
+    );
+    assert_eq!(samples[0].item_count, 1);
 }
 
 #[test]
@@ -686,6 +696,15 @@ fn connection_failures_backoff_and_only_then_become_final_failures() {
         Some(6)
     );
     assert_eq!(db.qa_finding_count().expect("qa count"), 2);
+    let samples = db
+        .recent_translation_speed_samples(None, None, 10)
+        .expect("speed samples");
+    assert!(
+        samples.iter().any(|sample| sample.status == "final_failed"
+            && sample.failure_type.as_deref() == Some("provider-connection")
+            && sample.item_count == 2),
+        "final provider failures should seed adaptive failure-rate history"
+    );
 }
 
 #[test]

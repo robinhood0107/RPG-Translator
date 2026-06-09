@@ -1435,6 +1435,12 @@ impl BatchProcessor<'_> {
         if let Some(path) = self.checkpoint_path {
             CheckpointWriter::write_atomic(path, self.checkpoint)?;
         }
+        let sample_status = if finding_type == "provider-json-parse" {
+            "parse_failed"
+        } else {
+            "validation_failed"
+        };
+        self.record_speed_sample(batch, 0, 0, sample_status, Some(finding_type))?;
         Ok(())
     }
 
@@ -1668,6 +1674,7 @@ impl BatchProcessor<'_> {
             "final-failed",
             &format!("{}: {message}", reason.as_key()),
         )?;
+        self.record_speed_sample(batch, 0, 0, "final_failed", Some(reason.as_key()))?;
         self.report.final_failed_items = self.report.failed_source_text_ids.len();
         Ok(())
     }
