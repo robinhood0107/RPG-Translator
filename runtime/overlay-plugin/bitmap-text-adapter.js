@@ -33,7 +33,7 @@
       };
       prototype.drawText.__rpgTranslatorOriginal = originalDrawText;
       prototype.__rpgTranslatorBitmapTextInstalled = INSTALL_TOKEN;
-      installMutationHooks(prototype, translator);
+      installMutationHooks(scope, prototype, translator);
       installSmallTextMarkers(scope);
       installNormalCharacterMarker(scope);
       installFrameHooks(scope);
@@ -211,19 +211,29 @@
     }
   }
 
-  function installMutationHooks(prototype, translator) {
+  function installMutationHooks(scope, prototype, translator) {
     for (const methodName of ['clear', 'clearRect', 'resize', 'fillRect', 'fillAll', 'blt', 'destroy']) {
       const original = prototype[methodName];
       if (typeof original !== 'function') continue;
       if (original.__rpgTranslatorBitmapMutation === MUTATION_TOKEN) continue;
       prototype[methodName] = function translatedBitmapMutation(...args) {
         const result = original.apply(this, args);
-        retireBitmapSurface(translator, this, methodName, args);
+        if (!shouldBypassBitmapMutation(scope, this)) retireBitmapSurface(translator, this, methodName, args);
         return result;
       };
       prototype[methodName].__rpgTranslatorOriginal = original;
       prototype[methodName].__rpgTranslatorBitmapMutation = MUTATION_TOKEN;
     }
+  }
+
+  function shouldBypassBitmapMutation(scope, bitmap) {
+    return !!(
+      !bitmap
+      || (bitmap.__rpgTranslatorBitmapReplayDepth || 0) > 0
+      || (bitmap.__rpgTranslatorSpriteTextReplayDepth || 0) > 0
+      || isSmallTextScratchBitmap(scope, bitmap)
+      || isSmallTextDrawActive(scope, bitmap)
+    );
   }
 
   function retireBitmapSurface(translator, bitmap, methodName, args) {

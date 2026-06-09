@@ -5981,6 +5981,70 @@ test('bitmap text adapter bypasses small-text and normal-character marker draws'
   assert.equal(orchestrator.diagnostics().active_items, 0);
 });
 
+test('bitmap text adapter preserves existing entries during marker-active mutations', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Base') return '기본';
+      if (text === 'Tiny') return '작게';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 160;
+      this.height = 80;
+      this.fontSize = 20;
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['frame']);
+      },
+    },
+  };
+  root.Bitmap.prototype.textWidth = function textWidth(text) {
+    return String(text).length * 10;
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+  root.Bitmap.prototype.clearRect = function clearRect(x, y, width, height) {
+    calls.push(['clearRect', x, y, width, height]);
+  };
+  root.Bitmap.prototype.drawSmallText = function drawSmallText(text) {
+    this.clearRect(0, 0, 80, 24);
+    return this.drawText(text, 0, 0, 80, 24, 'left');
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+
+  bitmap.drawText('Base', 0, 0, 80, 24, 'left');
+  root.SceneManager.updateScene();
+  assert.deepEqual(requests, ['Base']);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  bitmap.drawSmallText('Tiny');
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(requests, ['Base']);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+  assert.equal(orchestrator.diagnostics().archived_items, 0);
+  assert.deepEqual(calls.slice(-3), [
+    ['clearRect', 0, 0, 80, 24],
+    ['drawText', 'Tiny', 0, 0, 80, 24, 'left'],
+    ['frame'],
+  ]);
+});
+
 test('pixi text adapter retires removed objects and restores translated text scale', () => {
   const index = {
     translate({ text }) {
