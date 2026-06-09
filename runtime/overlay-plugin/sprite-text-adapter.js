@@ -87,6 +87,9 @@
       removeOverlay(state, 'text-claimed');
       return false;
     }
+    state.surfaceOwner = surfaceOwner;
+    state.slotKey = slotKey;
+    state.textOwner = textOwner;
 
     let command = state.command;
     if (!command || command.sourceText !== source.text || command.status !== 'hit') {
@@ -169,6 +172,9 @@
       removeParentRunOverlay(run, 'text-claimed');
       return { handled: true, rendered: false };
     }
+    run.surfaceOwner = surfaceOwner;
+    run.slotKey = slotKey;
+    run.textOwner = textOwner;
     let command = run.command;
     if (!command || command.sourceText !== text || command.status !== 'hit') {
       command = translator.observeRecord({
@@ -399,9 +405,18 @@
     if (!run) return false;
     removeParentRunOverlay(run, reason);
     if (run.itemId && translator && typeof translator.archiveItem === 'function') translator.archiveItem(run.itemId);
+    if (translator && typeof translator.releaseTextClaim === 'function') {
+      translator.releaseTextClaim(run.slotKey, run.textOwner);
+    }
+    if (run.parent && translator && typeof translator.releaseSurface === 'function') {
+      translator.releaseSurface(run.parent, run.surfaceOwner);
+    }
     if (run.parent && translator && typeof translator.markSurfaceChanged === 'function') translator.markSurfaceChanged(run.parent);
     run.itemId = null;
     run.command = null;
+    run.surfaceOwner = '';
+    run.slotKey = '';
+    run.textOwner = '';
     run.retireReason = reason || 'parent-run-retired';
     return true;
   }
@@ -475,6 +490,9 @@
         command: null,
         overlaySprite: null,
         overlayBitmap: null,
+        surfaceOwner: '',
+        slotKey: '',
+        textOwner: '',
         revision: 0,
       };
     }
@@ -685,9 +703,18 @@
   function retireActiveItem(state, translator, reason) {
     if (!state || !state.itemId) return false;
     if (translator && typeof translator.archiveItem === 'function') translator.archiveItem(state.itemId);
+    if (translator && typeof translator.releaseTextClaim === 'function') {
+      translator.releaseTextClaim(state.slotKey, state.textOwner);
+    }
+    if (translator && typeof translator.releaseSurface === 'function') {
+      translator.releaseSurface(state.sprite, state.surfaceOwner);
+    }
     if (translator && typeof translator.markSurfaceChanged === 'function') translator.markSurfaceChanged(state.sprite);
     state.itemId = null;
     state.command = null;
+    state.surfaceOwner = '';
+    state.slotKey = '';
+    state.textOwner = '';
     state.retireReason = reason || 'retired';
     return true;
   }

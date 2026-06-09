@@ -2009,6 +2009,8 @@ test('sprite text adapter renders cache hits through overlay lifecycle', () => {
   assert.equal(parent.children.length, 1);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.claimSurface(sprite, 'bitmap-text'), true);
+  assert.equal(orchestrator.claimText(`sprite:${sprite.__rpgTranslatorSpriteTextState.id}:glyph`, 'bitmap-text:slot'), true);
 });
 
 test('sprite text adapter groups sibling glyph sprites into one parent run overlay', () => {
@@ -2092,6 +2094,9 @@ test('sprite text adapter groups sibling glyph sprites into one parent run overl
   assert.equal(a.bitmap._rpgTranslatorGlyphText, 'A');
   assert.equal(b.bitmap._rpgTranslatorGlyphText, 'B');
   assert.equal(c.bitmap._rpgTranslatorGlyphText, 'C');
+  const parentRunState = parent.__rpgTranslatorSpriteTextParentRunState;
+  const parentRunKey = Array.from(parentRunState.runs.keys())[0];
+  const parentRunSlotKey = `sprite-run:${parentRunState.id}:${parentRunKey}`;
 
   b.visible = false;
   a.update();
@@ -2101,6 +2106,7 @@ test('sprite text adapter groups sibling glyph sprites into one parent run overl
   a.update();
   assert.equal(parent.children.includes(runOverlay), false);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.claimText(parentRunSlotKey, 'bitmap-text:slot'), true);
 });
 
 test('bitmap text adapter aggregates same-line fragments and retires on mutation', () => {
