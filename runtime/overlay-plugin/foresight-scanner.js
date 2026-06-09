@@ -167,6 +167,21 @@
         });
         return;
       }
+      if (isControlFlowCommand(code)) {
+        const target = resolveControlFlowTarget(list, index, command);
+        diagnostics.stop_reason = target ? 'control-flow-target' : 'unsafe-control-flow';
+        if (target) diagnostics.control_flow_targets += 1;
+        appendPathStop(diagnostics, {
+          index,
+          stop_reason: diagnostics.stop_reason,
+          branch_depth: frame.branchDepth || 0,
+          branch_path: cloneBranchPath(frame.branchPath),
+          code,
+          label: getEventCommandLabel(code),
+          control_flow_target: target,
+        });
+        return;
+      }
       if (code === 117) {
         const commonEventId = readCommonEventId(command);
         const commonEvent = resolveCommonEvent(scanner.commonEvents, commonEventId);
@@ -412,6 +427,151 @@
     return commonEvents[id] || commonEvents[String(id)] || null;
   }
 
+  function isControlFlowCommand(code) {
+    return code === 112 || code === 113 || code === 119 || code === 413;
+  }
+
+  function resolveControlFlowTarget(list, index, command) {
+    const code = Number(command && command.code);
+    if (code === 112) return resolveLoopStartTarget(list, index);
+    if (code === 113) return resolveBreakLoopTarget(list, index);
+    if (code === 119) return resolveJumpToLabelTarget(list, index, command);
+    if (code === 413) return resolveRepeatAboveTarget(list, index);
+    return null;
+  }
+
+  function resolveJumpToLabelTarget(list, index, command) {
+    if (!Array.isArray(list)) return null;
+    const params = Array.isArray(command && command.parameters) ? command.parameters : [];
+    const labelName = nonEmptyString(params[0]);
+    if (!labelName) return null;
+    for (let cursor = 0; cursor < list.length; cursor += 1) {
+      const candidate = list[cursor];
+      if (!isCommand(candidate) || Number(candidate.code) !== 118) continue;
+      const candidateParams = Array.isArray(candidate.parameters) ? candidate.parameters : [];
+      if (nonEmptyString(candidateParams[0]) !== labelName) continue;
+      return createControlFlowTarget(list, index, cursor, 'jump-label', {
+        label_name: labelName,
+        target_name: labelName,
+      });
+    }
+    return null;
+  }
+
+  function resolveLoopStartTarget(list, index) {
+    const repeatIndex = findMatchingLoopRepeatIndex(list, index);
+    if (repeatIndex === null) return null;
+    return createControlFlowTarget(list, index, repeatIndex, 'loop-repeat', {
+      via_index: repeatIndex,
+      via_code: 413,
+      via_label: 'Repeat Above',
+    });
+  }
+
+  function resolveBreakLoopTarget(list, index) {
+    const repeatIndex = findBreakLoopRepeatIndex(list, index);
+    if (repeatIndex === null) return null;
+    return createControlFlowTarget(list, index, repeatIndex + 1, 'break-loop', {
+      via_index: repeatIndex,
+      via_code: 413,
+      via_label: 'Repeat Above',
+    });
+  }
+
+  function resolveRepeatAboveTarget(list, index) {
+    const loopIndex = findMatchingLoopStartIndex(list, index);
+    if (loopIndex === null) return null;
+    return createControlFlowTarget(list, index, loopIndex, 'repeat-loop', {
+      via_index: loopIndex,
+      via_code: 112,
+      via_label: 'Loop',
+    });
+  }
+
+  function findMatchingLoopRepeatIndex(list, index) {
+    if (!Array.isArray(list)) return null;
+    let depth = 0;
+    for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+      const code = Number(list[cursor] && list[cursor].code);
+      if (code === 112) {
+        depth += 1;
+      } else if (code === 413) {
+        if (depth > 0) {
+          depth -= 1;
+        } else {
+          return cursor;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findBreakLoopRepeatIndex(list, index) {
+    if (!Array.isArray(list)) return null;
+    let depth = 0;
+    for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+      const code = Number(list[cursor] && list[cursor].code);
+      if (code === 112) {
+        depth += 1;
+      } else if (code === 413) {
+        if (depth > 0) {
+          depth -= 1;
+        } else {
+          return cursor;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findMatchingLoopStartIndex(list, index) {
+    if (!Array.isArray(list)) return null;
+    const repeat = list[index];
+    const repeatIndent = readIndent(repeat);
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const command = list[cursor];
+      if (!isCommand(command) || readIndent(command) !== repeatIndent) continue;
+      return Number(command.code) === 112 ? cursor : null;
+    }
+    return null;
+  }
+
+  function createControlFlowTarget(list, sourceIndex, targetIndex, kind, details = {}) {
+    const target = Array.isArray(list) && targetIndex >= 0 && targetIndex < list.length ? list[targetIndex] : null;
+    const targetCode = target ? Number(target.code) : null;
+    const direction = targetIndex === sourceIndex ? 'self' : (targetIndex < sourceIndex ? 'backward' : 'forward');
+    return {
+      kind: nonEmptyString(kind) || 'control-flow',
+      source_index: Math.max(0, Math.floor(Number(sourceIndex) || 0)),
+      target_index: nullableNumber(targetIndex),
+      target_code: targetCode,
+      target_label: targetCode === null ? 'End' : getEventCommandLabel(targetCode),
+      target_name: nonEmptyString(details.target_name),
+      label_name: nonEmptyString(details.label_name),
+      direction,
+      via_index: nullableNumber(details.via_index),
+      via_code: nullableNumber(details.via_code),
+      via_label: nonEmptyString(details.via_label),
+    };
+  }
+
+  function getEventCommandLabel(code) {
+    const labels = {
+      101: 'Show Text',
+      102: 'Show Choices',
+      111: 'Conditional Branch',
+      112: 'Loop',
+      113: 'Break Loop',
+      117: 'Common Event',
+      118: 'Label',
+      119: 'Jump to Label',
+      411: 'Else',
+      412: 'Branch End',
+      413: 'Repeat Above',
+    };
+    return labels[Number(code)] || `Event Command ${Number(code)}`;
+  }
+
   function isBarrierCommand(code) {
     return code === 201 || code === 205 || code === 301 || code === 351 || code === 352 || code === 353 || code === 354;
   }
@@ -432,6 +592,7 @@
       command_counts: Object.create(null),
       common_event_pushes: 0,
       branch_paths: 0,
+      control_flow_targets: 0,
       path_stops: [],
     };
   }
@@ -447,9 +608,11 @@
       command_counts: Object.assign({}, diagnostics.command_counts),
       common_event_pushes: diagnostics.common_event_pushes || 0,
       branch_paths: diagnostics.branch_paths || 0,
+      control_flow_targets: diagnostics.control_flow_targets || 0,
       path_stops: Array.isArray(diagnostics.path_stops)
         ? diagnostics.path_stops.map((stop) => Object.assign({}, stop, {
           branch_path: cloneBranchPath(stop.branch_path),
+          control_flow_target: cloneControlFlowTarget(stop.control_flow_target),
         }))
         : [],
     };
@@ -488,7 +651,25 @@
       branch_path: cloneBranchPath(stop && stop.branch_path),
       code: Number.isFinite(Number(stop && stop.code)) ? Number(stop.code) : null,
       label: stop && stop.label ? String(stop.label) : '',
+      control_flow_target: cloneControlFlowTarget(stop && stop.control_flow_target),
     });
+  }
+
+  function cloneControlFlowTarget(target) {
+    if (!target || typeof target !== 'object') return null;
+    return {
+      kind: nonEmptyString(target.kind),
+      source_index: nullableNumber(target.source_index),
+      target_index: nullableNumber(target.target_index),
+      target_code: nullableNumber(target.target_code),
+      target_label: nonEmptyString(target.target_label),
+      target_name: nonEmptyString(target.target_name),
+      label_name: nonEmptyString(target.label_name),
+      direction: nonEmptyString(target.direction),
+      via_index: nullableNumber(target.via_index),
+      via_code: nullableNumber(target.via_code),
+      via_label: nonEmptyString(target.via_label),
+    };
   }
 
   function cloneBranchPath(path) {
@@ -499,6 +680,11 @@
 
   function readIndent(command) {
     return Math.max(0, Math.floor(Number(command && command.indent) || 0));
+  }
+
+  function nullableNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    return Number.isFinite(Number(value)) ? Number(value) : null;
   }
 
   function nonEmptyString(value) {

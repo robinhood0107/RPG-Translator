@@ -761,6 +761,109 @@ test('foresight scanner preserves branch path through common event frames', () =
   });
 });
 
+test('foresight scanner stops at label jumps with target diagnostics', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  };
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const list = [
+    { code: 119, indent: 0, parameters: ['AfterJump'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Stale skipped text'] },
+    { code: 118, indent: 0, parameters: ['AfterJump'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Jump target text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'control-flow-target');
+  assert.equal(scan.control_flow_targets, 1);
+  assert.deepEqual(scan.path_stops, [{
+    index: 0,
+    stop_reason: 'control-flow-target',
+    branch_depth: 0,
+    branch_path: [],
+    code: 119,
+    label: 'Jump to Label',
+    control_flow_target: {
+      kind: 'jump-label',
+      source_index: 0,
+      target_index: 3,
+      target_code: 118,
+      target_label: 'Label',
+      target_name: 'AfterJump',
+      label_name: 'AfterJump',
+      direction: 'forward',
+      via_index: null,
+      via_code: null,
+      via_label: '',
+    },
+  }]);
+});
+
+test('foresight scanner stops at loop control flow instead of scanning stale loop bodies', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const list = [
+    { code: 112, indent: 0, parameters: [] },
+    { code: 101, indent: 1, parameters: [] },
+    { code: 401, indent: 1, parameters: ['Loop body text'] },
+    { code: 413, indent: 0, parameters: [] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After loop text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'control-flow-target');
+  assert.equal(scan.control_flow_targets, 1);
+  assert.equal(scan.path_stops[0].control_flow_target.kind, 'loop-repeat');
+  assert.equal(scan.path_stops[0].control_flow_target.target_index, 3);
+  assert.equal(scan.path_stops[0].control_flow_target.via_code, 413);
+});
+
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
   const index = {
     translate({ text }) {
