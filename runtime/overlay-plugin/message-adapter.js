@@ -43,10 +43,14 @@
         if (translated && translated !== originalText && scope.$gameMessage && Array.isArray(scope.$gameMessage._texts)) {
           scope.$gameMessage._texts = translatedLines(translated, originalText, this);
         }
+        if (translated && translated !== originalText) {
+          redrawMessageFallback(this, translated, originalText);
+        }
         return translated;
       };
       installProcessCharacterFallback(prototype, scope, translator, trackedWindows);
       installWindowLifecycleHooks(prototype, translator, trackedWindows);
+      installPendingRedrawHook(prototype);
       prototype.__rpgTranslatorMessageInstalled = INSTALL_TOKEN;
       wrapGameMessageClear(scope, translator, trackedWindows);
       return true;
@@ -106,6 +110,9 @@
     const originalProcessCharacter = prototype.processCharacter;
     prototype.processCharacter = function processCharacterWithMessageCapture(textState) {
       trackedWindows.add(this);
+      if (Number(this && this.__rpgTranslatorMessageRedrawDepth) > 0) {
+        return originalProcessCharacter.call(this, textState);
+      }
       const state = ensureState(this);
       const sourceText = textState && typeof textState.text === 'string'
         ? String(textState.text)
@@ -170,6 +177,20 @@
       prototype[methodName].__rpgTranslatorOriginal = original;
       prototype[methodName].__rpgTranslatorMessageLifecycle = LIFECYCLE_TOKEN;
     });
+  }
+
+  function installPendingRedrawHook(prototype) {
+    if (!prototype || typeof prototype.update !== 'function') return false;
+    if (prototype.update.__rpgTranslatorMessagePendingRedraw === LIFECYCLE_TOKEN) return true;
+    const original = prototype.update;
+    prototype.update = function messageUpdateWithPendingRedraw(...args) {
+      const result = original.apply(this, args);
+      applyPendingMessageRedraw(this);
+      return result;
+    };
+    prototype.update.__rpgTranslatorOriginal = original;
+    prototype.update.__rpgTranslatorMessagePendingRedraw = LIFECYCLE_TOKEN;
+    return true;
   }
 
   function translateText(translator, scope, text, surface) {
@@ -281,6 +302,7 @@
     state.processCharacterText = '';
     state.processCharacterTextState = null;
     state.processCharacterCompletedState = null;
+    state.pendingRedraw = null;
     return true;
   }
 
@@ -299,9 +321,67 @@
         processCharacterText: '',
         processCharacterTextState: null,
         processCharacterCompletedState: null,
+        pendingRedraw: null,
       };
     }
     return windowInstance[STATE_KEY];
+  }
+
+  function redrawMessageFallback(windowInstance, translated, originalText) {
+    if (!windowInstance) return false;
+    const state = ensureState(windowInstance);
+    if (!isMessageWindowReady(windowInstance)) {
+      state.pendingRedraw = {
+        text: String(translated ?? ''),
+        originalText: String(originalText ?? ''),
+      };
+      return false;
+    }
+    state.pendingRedraw = null;
+    return drawMessageTextExFallback(windowInstance, translated, originalText);
+  }
+
+  function applyPendingMessageRedraw(windowInstance) {
+    const state = getState(windowInstance);
+    const pending = state && state.pendingRedraw ? state.pendingRedraw : null;
+    if (!pending || !isMessageWindowReady(windowInstance)) return false;
+    state.pendingRedraw = null;
+    return drawMessageTextExFallback(windowInstance, pending.text, pending.originalText);
+  }
+
+  function drawMessageTextExFallback(windowInstance, translated, originalText) {
+    if (!windowInstance || typeof windowInstance.drawTextEx !== 'function') return false;
+    const contents = windowInstance.contents;
+    if (contents && typeof contents.clear === 'function') {
+      try { contents.clear(); } catch (_) {}
+    }
+    if (typeof windowInstance.resetFontSettings === 'function') windowInstance.resetFontSettings();
+    const text = redrawText(translated, originalText, windowInstance);
+    const x = finiteNumber(windowInstance._trMsgStartX, 0);
+    const y = finiteNumber(windowInstance._trMsgStartY, 0);
+    windowInstance.__rpgTranslatorMessageRedrawDepth = (windowInstance.__rpgTranslatorMessageRedrawDepth || 0) + 1;
+    try {
+      windowInstance.drawTextEx(text, x, y);
+    } finally {
+      windowInstance.__rpgTranslatorMessageRedrawDepth = Math.max(0, (windowInstance.__rpgTranslatorMessageRedrawDepth || 1) - 1);
+    }
+    return true;
+  }
+
+  function redrawText(translated, originalText, windowInstance) {
+    const lines = translatedLines(translated, originalText, windowInstance);
+    if (Array.isArray(lines)) return lines.join('\n');
+    return String(translated ?? '');
+  }
+
+  function isMessageWindowReady(windowInstance) {
+    if (!windowInstance || !windowInstance.contents || windowInstance.visible === false) return false;
+    return typeof windowInstance.isOpen === 'function' ? windowInstance.isOpen() : true;
+  }
+
+  function finiteNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
   }
 
   function getState(windowInstance) {

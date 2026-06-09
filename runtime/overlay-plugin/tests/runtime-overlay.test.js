@@ -1102,6 +1102,57 @@ test('message adapter exposes processCompleteMessage for completed payload trans
   assert.equal(orchestrator.diagnostics().active_items, 1);
 });
 
+test('message adapter redraws completed messages through drawTextEx fallback', () => {
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['Rendered JP'] },
+    Window_Message: function WindowMessage() {
+      this.visible = true;
+      this.contents = {
+        clear() {
+          calls.push(['clear']);
+        },
+      };
+    },
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.isOpen = () => true;
+  root.Window_Message.prototype.resetFontSettings = function resetFontSettings() {
+    calls.push(['resetFontSettings']);
+  };
+  root.Window_Message.prototype.drawTextEx = function drawTextEx(text, x, y) {
+    calls.push(['drawTextEx', text, x, y]);
+    return text.length;
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Rendered JP') return 'Rendered KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.processCompleteMessage({
+    visible: 'Rendered JP',
+    resolved: 'Rendered JP',
+    translationSource: 'Rendered JP',
+  }, 'session-1');
+
+  assert.deepEqual(calls, [
+    ['clear'],
+    ['resetFontSettings'],
+    ['drawTextEx', 'Rendered KO', 0, 0],
+  ]);
+  assert.equal(orchestrator.diagnostics().render_accepted, 1);
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {
