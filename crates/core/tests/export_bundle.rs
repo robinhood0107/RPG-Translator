@@ -150,11 +150,39 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
         config.runtime_load_contract.script_load_order.last(),
         Some(&"boot.js".to_string())
     );
+    assert_eq!(
+        config.runtime_load_contract.script_load_order,
+        vec![
+            "text-codec.js".to_string(),
+            "runtime-miss-logger.js".to_string(),
+            "lookup-index.js".to_string(),
+            "render-guard.js".to_string(),
+            "wrapping.js".to_string(),
+            "runtime-diagnostics.js".to_string(),
+            "orchestrator.js".to_string(),
+            "adapter-contract.js".to_string(),
+            "foresight-scanner.js".to_string(),
+            "cache-loader.js".to_string(),
+            "message-adapter.js".to_string(),
+            "window-text-adapter.js".to_string(),
+            "bitmap-text-adapter.js".to_string(),
+            "sprite-text-adapter.js".to_string(),
+            "pixi-text-adapter.js".to_string(),
+            "startup-toast.js".to_string(),
+            "boot.js".to_string(),
+        ]
+    );
     assert!(
         config
             .runtime_load_contract
             .required_runtime_files
             .contains(&"RPGTranslator.js".to_string())
+    );
+    assert!(
+        config
+            .runtime_load_contract
+            .required_runtime_files
+            .contains(&"adapter-contract.js".to_string())
     );
     assert!(config_text.contains("\"foresight_command_catalog\""));
     assert!(config_text.contains("\"runtime_load_contract\""));
