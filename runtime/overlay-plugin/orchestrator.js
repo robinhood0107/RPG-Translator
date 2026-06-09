@@ -61,6 +61,12 @@
         generation: this.guard ? this.guard.generationFor(surface) : 0,
         renderStrategy: record.renderStrategy || record.strategy || record.adapter || '',
         state: 'active',
+        status: 'detected',
+        priority: null,
+        visible: true,
+        screenState: 'visible',
+        backgrounded: false,
+        metadata: {},
       };
       this.activeItems.set(item.id, item);
       this.slotIndex.set(slotId, item.id);
@@ -126,6 +132,11 @@
       if (Object.prototype.hasOwnProperty.call(source, 'translationReceived')) item.translationReceived = String(source.translationReceived || '');
       if (Object.prototype.hasOwnProperty.call(source, 'translation')) item.translation = String(source.translation || '');
       if (Object.prototype.hasOwnProperty.call(source, 'status')) item.status = String(source.status || item.state || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'priority')) item.priority = normalizePriority(source.priority);
+      if (Object.prototype.hasOwnProperty.call(source, 'visible')) item.visible = source.visible === true;
+      if (Object.prototype.hasOwnProperty.call(source, 'screenState')) item.screenState = String(source.screenState || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'backgrounded')) item.backgrounded = source.backgrounded === true;
+      if (source.metadata && typeof source.metadata === 'object') item.metadata = sanitizeDetails(source.metadata) || {};
       if (previousSourceText !== item.sourceText) {
         item.translationState = '';
         item.translationReceived = '';
@@ -182,6 +193,122 @@
         translatedText,
       }, item));
       return createCacheOnlyHandle(String(translatedText), 'completed', sourceHint);
+    }
+
+    cancelItemTranslation(itemId, reason = 'translation canceled', options = {}) {
+      const item = this.getItemById(itemId);
+      const handle = item && item.translationHandle ? item.translationHandle : null;
+      if (!handle || typeof handle.cancel !== 'function') return false;
+      try {
+        return handle.cancel(String(reason || 'translation canceled'), options && typeof options === 'object' ? options : {}) === true;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    setItemTranslationPriority(itemId, priority, reason = '', details = {}) {
+      const item = this.getItemById(itemId);
+      if (!item) return false;
+      const nextPriority = normalizePriority(priority);
+      const changed = item.priority !== nextPriority;
+      item.priority = nextPriority;
+      const handle = item.translationHandle || null;
+      let handleChanged = false;
+      if (handle && typeof handle.setPriority === 'function') {
+        try {
+          handleChanged = handle.setPriority(nextPriority, String(reason || '')) === true;
+        } catch (_error) {
+          handleChanged = false;
+        }
+      }
+      this.emit('item.priority_changed', Object.assign({
+        reason: String(reason || ''),
+        details: sanitizeDetails(Object.assign({ priority: nextPriority }, details || {})),
+      }, item));
+      return changed || handleChanged;
+    }
+
+    setItemVisibility(itemId, visible, details = {}) {
+      const item = this.getItemById(itemId);
+      if (!item) return null;
+      const source = details && typeof details === 'object' ? details : {};
+      const isVisible = visible === true;
+      item.visible = isVisible;
+      item.screenState = String(source.screenState || (isVisible ? 'visible' : 'hidden'));
+      this.emit(isVisible ? 'item.visible' : 'item.hidden', Object.assign({
+        reason: String(source.reason || ''),
+        details: sanitizeDetails(source),
+      }, item));
+      return cloneItemForDiagnostics(item);
+    }
+
+    backgroundItem(itemId, details = {}) {
+      const item = this.getItemById(itemId);
+      if (!item) return null;
+      const source = details && typeof details === 'object' ? details : {};
+      const priority = normalizePriority(source.priority === undefined ? 100 : source.priority);
+      item.visible = false;
+      item.backgrounded = true;
+      item.priority = priority;
+      item.screenState = String(source.screenState || 'background');
+      this.emit('item.backgrounded', Object.assign({
+        reason: String(source.reason || ''),
+        details: sanitizeDetails(Object.assign({ priority }, source)),
+      }, item));
+      return cloneItemForDiagnostics(item);
+    }
+
+    retireItem(itemId, status = 'disappeared', options = {}) {
+      const item = this.getItemById(itemId);
+      if (!item) return null;
+      const source = options && typeof options === 'object' ? options : {};
+      const nextStatus = String(status || 'disappeared');
+      const reason = String(source.message || source.reason || nextStatus);
+      this.rejectOpenRenderCommands(item, reason, source.details);
+      this.activeItems.delete(item.id);
+      this.detachedItems.delete(item.id);
+      item.status = nextStatus;
+      item.state = 'archived';
+      item.active = false;
+      item.deactivatedAt = this.now();
+      this.archivedItems.set(item.id, item);
+      this.releaseSlotIndexesForItem(item.id);
+      this.emit(source.eventType || `item.${nextStatus}`, Object.assign({
+        reason,
+        details: sanitizeDetails(source.details),
+      }, item));
+      return cloneItemForDiagnostics(item);
+    }
+
+    recordDecision(itemId, type, message = '', details = null) {
+      const item = this.getItemById(itemId);
+      if (!item) return null;
+      this.emit(`decision.${String(type || 'event')}`, Object.assign({
+        reason: String(message || ''),
+        details: sanitizeDetails(details),
+      }, item));
+      return cloneItemForDiagnostics(item);
+    }
+
+    describeTextEligibility(payload = {}) {
+      return describeTextEligibilityDecision(payload);
+    }
+
+    rejectOpenRenderCommands(item, reason, details = null) {
+      if (!item || !item.id) return 0;
+      let rejected = 0;
+      for (const command of this.renderQueue) {
+        if (!command || command.itemId !== item.id) continue;
+        if (command.renderStatus !== 'queued' && command.renderStatus !== 'deferred') continue;
+        if (this.recordRenderRejected(item.id, {
+          commandId: command.id,
+          reason: String(reason || 'item-retired'),
+          details,
+        })) {
+          rejected += 1;
+        }
+      }
+      return rejected;
     }
 
     acceptRender(command, surface, currentText) {
@@ -314,6 +441,13 @@
       this.surfaceClaims.delete(surface);
       this.diagnosticState.surface_releases += 1;
       return true;
+    }
+
+    releaseSlotIndexesForItem(itemId) {
+      const key = String(itemId || '');
+      for (const [slotId, id] of Array.from(this.slotIndex.entries())) {
+        if (id === key) this.slotIndex.delete(slotId);
+      }
     }
 
     claimText(slotId, owner) {
@@ -811,11 +945,21 @@
       generation: numberOrDefault(source.generation, 0),
       renderStrategy: stringValue(source.renderStrategy),
       state: stringValue(source.state),
+      status: stringValue(source.status),
+      priority: source.priority === null || typeof source.priority === 'undefined'
+        ? null
+        : numberOrDefault(source.priority, 0),
+      visible: source.visible === true,
+      screenState: stringValue(source.screenState),
+      backgrounded: source.backgrounded === true,
       translationState: stringValue(source.translationState),
       translationReceived: limitText(source.translationReceived),
       translation: limitText(source.translation),
       lastRenderStatus: stringValue(source.lastRenderStatus),
       sourceHint: stringValue(source.sourceHint),
+      metadata: source.metadata && typeof source.metadata === 'object'
+        ? Object.assign({}, source.metadata)
+        : {},
       history: Array.isArray(source.history)
         ? source.history.map((event) => Object.assign({}, event))
         : [],
@@ -955,6 +1099,123 @@
       }
     }
     return output;
+  }
+
+  function normalizePriority(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(0, Math.min(10000, Math.floor(numeric)));
+  }
+
+  function describeTextEligibilityDecision(payload = {}) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    const text = selectEligibilityText(source);
+    const hasText = hasAnyTextValue(source);
+    if (!hasText) {
+      return textEligibilityDecision(false, 'empty', 'emptyInput', '', 'policy', { hasText: false });
+    }
+    if (!String(text || '').trim()) {
+      return textEligibilityDecision(false, 'empty', 'emptyTrimmed', text, 'policy', { hasText: true });
+    }
+    if (isNativeTextInput(source)) {
+      return textEligibilityDecision(false, 'native', String(source.reason || source.skipReason || 'native'), text, 'native', {
+        explicitNative: true,
+      });
+    }
+    if (String(source.status || source.translationStatus || '') === 'skipped') {
+      return textEligibilityDecision(false, 'skipped', String(source.reason || source.skipReason || 'skipped'), text, 'policy', {
+        status: 'skipped',
+      });
+    }
+    const counterText = stripKnownCounterLikeEscapes(String(source.visibleText || text || ''));
+    if (isCounterLikeText(counterText)) {
+      return textEligibilityDecision(false, 'counterLike', 'counterLike', text, 'policy', {
+        visibleText: String(source.visibleText || ''),
+        counterLikeText: counterText,
+      });
+    }
+    return textEligibilityDecision(true, 'eligible', '', text, '', {
+      status: String(source.status || source.translationStatus || 'detected'),
+    });
+  }
+
+  function textEligibilityDecision(eligible, category, reason, text, sourceHint, details = {}) {
+    const normalizedText = String(text || '').trim();
+    return {
+      eligible: eligible === true,
+      skip: eligible !== true,
+      category: String(category || (eligible ? 'eligible' : 'policy')),
+      reason: String(reason || ''),
+      sourceHint: String(sourceHint || ''),
+      providerEligible: eligible === true,
+      providerCategory: String(category || ''),
+      providerReason: String(reason || ''),
+      providerSourceHint: String(sourceHint || ''),
+      text: String(text || ''),
+      normalizedText,
+      details: Object.assign({}, sanitizeDetails(details) || {}, {
+        category: String(category || ''),
+        reason: String(reason || ''),
+        providerEligible: eligible === true,
+        providerCategory: String(category || ''),
+        providerReason: String(reason || ''),
+      }),
+    };
+  }
+
+  function selectEligibilityText(source) {
+    if (hasExplicitTranslationSource(source)) {
+      return stringValue(source.normalizedSource || source.translationSource);
+    }
+    return stringValue(
+      firstNonEmpty(
+        source.visibleText,
+        source.original,
+        source.rawText,
+        source.text,
+      ),
+    );
+  }
+
+  function hasAnyTextValue(source) {
+    return [
+      source.normalizedSource,
+      source.translationSource,
+      source.visibleText,
+      source.original,
+      source.rawText,
+      source.text,
+    ].some((value) => value !== undefined && value !== null && String(value).length > 0);
+  }
+
+  function hasExplicitTranslationSource(source) {
+    return Object.prototype.hasOwnProperty.call(source, 'normalizedSource')
+      || Object.prototype.hasOwnProperty.call(source, 'translationSource');
+  }
+
+  function isNativeTextInput(source) {
+    if (source.isTranslatable === false || source.translatable === false) return true;
+    if (source.native === true || source.keepNative === true || source.skipTranslation === true) return true;
+    return String(source.sourceHint || source.translationSourceKind || '') === 'native';
+  }
+
+  function firstNonEmpty(...values) {
+    for (const value of values) {
+      const text = stringValue(value);
+      if (text) return text;
+    }
+    return '';
+  }
+
+  function stripKnownCounterLikeEscapes(text) {
+    return String(text || '').replace(/(?:\x1b|\\)(?:C\[[^\]]*\]|I\[[^\]]*\]|\{|\}|\$|\.|\||!|>|<|\^)/giu, '').trim();
+  }
+
+  function isCounterLikeText(text) {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    if (/[A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(value)) return false;
+    return /^[\d\s.,:;/%+\-()[\]#]+$/u.test(value);
   }
 
   function normalizeSurfaceDrawDecision(input) {

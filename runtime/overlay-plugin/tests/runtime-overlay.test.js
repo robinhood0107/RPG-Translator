@@ -828,6 +828,90 @@ test('orchestrator validates record-backed render subscriptions and reports deci
   ]);
 });
 
+test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', () => {
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Lifecycle target') return '수명주기 대상';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'lifecycle-target',
+    text: 'Lifecycle target',
+    renderStrategy: 'window-text',
+  });
+
+  assert.equal(orchestrator.setItemTranslationPriority(command.itemId, 250, 'visible-redetected'), true);
+  assert.equal(orchestrator.setItemVisibility(command.itemId, false, {
+    reason: 'window-hidden',
+    screenState: 'hidden',
+  }).visible, false);
+  assert.equal(orchestrator.backgroundItem(command.itemId, {
+    reason: 'message-window-closed',
+    priority: 100,
+  }).backgrounded, true);
+  assert.equal(orchestrator.recordDecision(command.itemId, 'redraw', 'drawTextEx fallback', {
+    strategy: 'messageRedraw',
+  }).id, command.itemId);
+  assert.deepEqual(orchestrator.describeTextEligibility({ text: '' }), {
+    eligible: false,
+    skip: true,
+    category: 'empty',
+    reason: 'emptyInput',
+    sourceHint: 'policy',
+    providerEligible: false,
+    providerCategory: 'empty',
+    providerReason: 'emptyInput',
+    providerSourceHint: 'policy',
+    text: '',
+    normalizedText: '',
+    details: {
+      category: 'empty',
+      reason: 'emptyInput',
+      providerEligible: false,
+      providerCategory: 'empty',
+      providerReason: 'emptyInput',
+      hasText: false,
+    },
+  });
+  assert.equal(orchestrator.describeTextEligibility({
+    text: 'Chapter One',
+    visibleText: 'Chapter One',
+  }).eligible, true);
+
+  assert.equal(orchestrator.retireItem(command.itemId, 'disappeared', {
+    message: 'window removed',
+  }).status, 'disappeared');
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.active_items, 0);
+  assert.equal(diagnostics.archived_items, 1);
+  assert.equal(diagnostics.archived[0].priority, 100);
+  assert.equal(diagnostics.archived[0].visible, false);
+  assert.equal(diagnostics.archived[0].screenState, 'background');
+  assert.equal(diagnostics.archived[0].backgrounded, true);
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.deepEqual(diagnostics.renderQueue.slice(-1).map((entry) => [
+    entry.id,
+    entry.renderStatus,
+    entry.renderReason,
+  ]), [[command.id, 'rejected', 'window removed']]);
+  assert.deepEqual(diagnostics.recent_events.slice(-6).map((event) => [event.type, event.reason]), [
+    ['item.priority_changed', 'visible-redetected'],
+    ['item.hidden', 'window-hidden'],
+    ['item.backgrounded', 'message-window-closed'],
+    ['decision.redraw', 'drawTextEx fallback'],
+    ['renderRejected', 'window removed'],
+    ['item.disappeared', 'window removed'],
+  ]);
+});
+
 test('orchestrator defers surface draws to candidate adapter subscriptions', () => {
   const bitmap = {};
   const events = [];
