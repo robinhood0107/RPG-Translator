@@ -247,46 +247,83 @@ test('cache loader parses static manifest config and jsonl records', async () =>
   assert.equal(bundle.records[0].translation, '세계');
 });
 
-test('cache loader rejects malformed static manifest before cache file fetch', async () => {
-  const files = new Map([
-    [
-      'manifest.json',
-      JSON.stringify({
-        schema_version: 1,
-        project_id: 1,
-        source_language: 'ja',
-        target_language: 'ko',
-        created_timestamp: '1',
-        key_schema_version: 'v1',
-        cache_files: 'cache.jsonl',
-        record_count: 1,
-      }),
-    ],
-    [
-      'overlay-config.json',
-      JSON.stringify({
-        schema_version: 1,
-        diagnostics_enabled: false,
-        startup_toast_enabled: true,
-        startup_toast_text: 'RPG-Translator 작동중',
-      }),
-    ],
-  ]);
-  const fetched = [];
+test('cache loader rejects malformed static bundle metadata before cache file fetch', async () => {
+  const validManifest = {
+    schema_version: 1,
+    project_id: 1,
+    source_language: 'ja',
+    target_language: 'ko',
+    created_timestamp: '1',
+    key_schema_version: 'v1',
+    cache_files: ['cache.jsonl'],
+    record_count: 1,
+  };
+  const validConfig = {
+    schema_version: 1,
+    diagnostics_enabled: false,
+    startup_toast_enabled: true,
+    startup_toast_text: 'RPG-Translator 작동중',
+  };
+  const cases = [
+    {
+      manifest: Object.assign({}, validManifest, { schema_version: 99 }),
+      config: validConfig,
+      error: /manifest schema_version 99 is unsupported/,
+    },
+    {
+      manifest: Object.assign({}, validManifest, { key_schema_version: 'legacy' }),
+      config: validConfig,
+      error: /manifest key_schema_version must be v1/,
+    },
+    {
+      manifest: Object.assign({}, validManifest, { source_language: '' }),
+      config: validConfig,
+      error: /manifest source_language is required/,
+    },
+    {
+      manifest: Object.assign({}, validManifest, { cache_files: 'cache.jsonl' }),
+      config: validConfig,
+      error: /manifest cache_files must be an array/,
+    },
+    {
+      manifest: Object.assign({}, validManifest, { record_count: '1' }),
+      config: validConfig,
+      error: /manifest record_count must be a number/,
+    },
+    {
+      manifest: validManifest,
+      config: Object.assign({}, validConfig, { schema_version: 99 }),
+      error: /overlay config schema_version 99 is unsupported/,
+    },
+    {
+      manifest: validManifest,
+      config: Object.assign({}, validConfig, { diagnostics_enabled: 'yes' }),
+      error: /overlay config diagnostics_enabled must be a boolean when present/,
+    },
+  ];
 
-  await assert.rejects(
-    CacheLoader.load('', async (url) => {
-      fetched.push(url);
-      if (!files.has(url)) throw new Error(`unexpected fetch ${url}`);
-      return {
-        ok: true,
-        text: async () => files.get(url),
-      };
-    }),
-    /manifest cache_files must be an array/,
-  );
+  for (const testCase of cases) {
+    const files = new Map([
+      ['manifest.json', JSON.stringify(testCase.manifest)],
+      ['overlay-config.json', JSON.stringify(testCase.config)],
+      ['cache.jsonl', '{}\n'],
+    ]);
+    const fetched = [];
 
-  assert.deepEqual(fetched, ['manifest.json', 'overlay-config.json']);
+    await assert.rejects(
+      CacheLoader.load('', async (url) => {
+        fetched.push(url);
+        if (url === 'cache.jsonl') throw new Error('cache file should not be fetched');
+        return {
+          ok: true,
+          text: async () => files.get(url),
+        };
+      }),
+      testCase.error,
+    );
+
+    assert.deepEqual(fetched, ['manifest.json', 'overlay-config.json']);
+  }
 });
 
 test('render guard rejects stale render operations after surface changes', () => {
