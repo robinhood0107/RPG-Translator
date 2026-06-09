@@ -76,7 +76,7 @@
       ? translator.observeRecord(request)
       : null;
     const itemId = command && command.itemId ? command.itemId : '';
-    if (itemId) state.slots.set(slotKey, { itemId, sourceText, revision: state.revision });
+    if (itemId) state.slots.set(slotKey, { itemId, sourceText, revision: state.revision, textOwner });
 
     const translated = command
       ? (command.status === 'hit' ? command.translatedText : null)
@@ -132,6 +132,9 @@
     const existing = state.slots.get(slotKey);
     if (!existing || !existing.itemId) return false;
     if (translator && typeof translator.archiveItem === 'function') translator.archiveItem(existing.itemId);
+    if (translator && typeof translator.releaseTextClaim === 'function') {
+      translator.releaseTextClaim(slotKey, existing.textOwner);
+    }
     state.slots.delete(slotKey);
     return true;
   }
@@ -146,12 +149,18 @@
   function retireWindowSurface(translator, windowInstance, reason) {
     const state = getState(windowInstance);
     if (state) {
-      for (const entry of state.slots.values()) {
+      for (const [slotKey, entry] of state.slots.entries()) {
         if (entry && entry.itemId && translator && typeof translator.archiveItem === 'function') {
           translator.archiveItem(entry.itemId);
         }
+        if (entry && translator && typeof translator.releaseTextClaim === 'function') {
+          translator.releaseTextClaim(slotKey, entry.textOwner);
+        }
       }
       state.slots.clear();
+    }
+    if (state && translator && typeof translator.releaseSurface === 'function') {
+      translator.releaseSurface(windowInstance, `window-text:${state.windowId}`);
     }
     if (windowInstance && translator && typeof translator.retireSurface === 'function') {
       translator.retireSurface(windowInstance, reason);

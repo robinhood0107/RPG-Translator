@@ -618,6 +618,11 @@ test('window text adapter retires entries when window contents are mutated', () 
   assert.deepEqual(calls, [['drawText', 'Menu KO', 1, 2], ['contents-clear']]);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.claimSurface(windowInstance, 'bitmap-text'), true);
+  assert.equal(
+    orchestrator.claimText(`window:${windowInstance.__rpgTranslatorWindowTextState.windowId}:drawText:1:2::`, 'bitmap-text:slot'),
+    true,
+  );
 });
 
 test('window text adapter respects ownership and stale render rejection', () => {
