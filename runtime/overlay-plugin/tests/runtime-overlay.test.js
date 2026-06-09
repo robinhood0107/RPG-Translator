@@ -1837,6 +1837,48 @@ test('foresight scanner resumes parent frame after child message origin frames',
   assert.deepEqual(requests, ['Child next', 'Parent resume']);
 });
 
+test('foresight scanner rejects stale interpreter message origins', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const originalList = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Current'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Stale next'] },
+  ];
+  const replacementList = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Replacement'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      interpreter: { _list: replacementList },
+      list: originalList,
+      startIndex: 0,
+      nextIndex: 2,
+      indent: 0,
+      interpreterId: 'map',
+      listId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'miss');
+  assert.equal(scan.stop_reason, 'current-message-unattached');
+});
+
 test('foresight scanner reports common event nested-list missing id and list stops', () => {
   const scanner = new ForesightScanner({
     translate() {

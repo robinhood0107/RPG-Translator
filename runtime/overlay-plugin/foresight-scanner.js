@@ -1391,7 +1391,29 @@
 
   function resolveOrigin(origin) {
     if (!origin || !Array.isArray(origin.list)) return null;
+    if (origin.interpreter && origin.interpreter._list !== origin.list) return null;
+    const startIndex = integerOrNull(origin.startIndex);
+    if (startIndex !== null && !isGeneratedMessageOrigin(origin)) {
+      const nextIndex = integerOrNull(origin.nextIndex);
+      if (nextIndex === null || startIndex < 0 || startIndex >= origin.list.length) return null;
+      if (nextIndex <= startIndex || nextIndex > origin.list.length) return null;
+      const command = origin.list[startIndex];
+      if (!command || Number(command.code) !== 101) return null;
+      const indent = Number.isFinite(Number(origin.indent)) ? Number(origin.indent) : (Number(command.indent) || 0);
+      if (indent !== (Number(command.indent) || 0)) return null;
+      const block = parseMessageBlock(origin.list, startIndex, command);
+      if (!block || block.nextIndex !== nextIndex) return null;
+    }
     return origin;
+  }
+
+  function isGeneratedMessageOrigin(origin) {
+    return !!(origin && origin.originKind === 'game-message-add' && origin.verified === true);
+  }
+
+  function integerOrNull(value) {
+    const number = Number(value);
+    return Number.isInteger(number) ? number : null;
   }
 
   function createDiagnostics(origin, budgetLimit, messageLimit) {
