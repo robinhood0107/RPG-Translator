@@ -122,7 +122,11 @@
     }
 
     getEventCommandMetadata(code) {
-      return this.commandCatalog[String(Number(code))] || getEventCommandMetadata(code);
+      return this.commandCatalog.eventCommands[String(Number(code))] || getEventCommandMetadata(code);
+    }
+
+    getMovementRouteCommandMetadata(code) {
+      return this.commandCatalog.movementRouteCommands[String(Number(code))] || getMovementRouteCommandMetadata(code);
     }
 
     recordScan(diagnostics) {
@@ -220,7 +224,7 @@
         return;
       }
       if (code === 205) {
-        const routeRead = readMovementRouteCommand(list, index, readIndent(command));
+        const routeRead = readMovementRouteCommand(scanner, list, index, readIndent(command));
         diagnostics.route_commands += 1;
         diagnostics.route_command_actions.push(...routeRead.route_command_actions);
         if (routeRead.transparent) {
@@ -735,10 +739,10 @@
     return commonEvents[id] || commonEvents[String(id)] || null;
   }
 
-  function readMovementRouteCommand(list, index, expectedIndent) {
+  function readMovementRouteCommand(scanner, list, index, expectedIndent) {
     const routeCommands = getMovementRouteCommands(list, index, expectedIndent);
     const nextIndex = getMovementRouteNextIndex(list, index, expectedIndent);
-    const routeCommandActions = routeCommands.map(createRouteCommandAction);
+    const routeCommandActions = routeCommands.map((routeCommand) => createRouteCommandAction(scanner, routeCommand));
     if (!routeCommands.length) {
       return {
         transparent: false,
@@ -749,7 +753,7 @@
         route_command_actions: routeCommandActions,
       };
     }
-    const barrier = findRouteBarrierCommand(routeCommands);
+    const barrier = findRouteBarrierCommand(scanner, routeCommands);
     if (barrier) {
       return {
         transparent: false,
@@ -792,13 +796,13 @@
     return isCommand(command) && Number(command.code) === 505 && readIndent(command) === expectedIndent;
   }
 
-  function findRouteBarrierCommand(routeCommands) {
+  function findRouteBarrierCommand(scanner, routeCommands) {
     for (const routeCommand of routeCommands) {
       const code = Number(routeCommand && routeCommand.code);
       if (!Number.isFinite(code)) {
         return { code: null, reason: 'unknown', label: 'Unknown movement-route command' };
       }
-      const metadata = getMovementRouteCommandMetadata(code);
+      const metadata = scanner.getMovementRouteCommandMetadata(code);
       if (metadata.scanBehavior !== 'advance') {
         return {
           code,
@@ -810,9 +814,9 @@
     return null;
   }
 
-  function createRouteCommandAction(routeCommand) {
+  function createRouteCommandAction(scanner, routeCommand) {
     const code = Number(routeCommand && routeCommand.code);
-    const metadata = getMovementRouteCommandMetadata(code);
+    const metadata = scanner.getMovementRouteCommandMetadata(code);
     return {
       code: Number.isFinite(code) ? code : null,
       label: metadata.label,
@@ -1153,25 +1157,41 @@
   const EVENT_EXTERNAL_RISK_CODES = new Set([355, 356, 357, 655, 657]);
 
   function normalizeCommandCatalog(catalog) {
-    const normalized = Object.create(null);
+    const normalized = {
+      eventCommands: Object.create(null),
+      movementRouteCommands: Object.create(null),
+    };
     if (!catalog || typeof catalog !== 'object') return normalized;
-    Object.keys(catalog).forEach((key) => {
+    Object.assign(normalized.eventCommands, normalizeCommandTable(catalog.eventCommands, getEventCommandMetadata));
+    Object.assign(normalized.movementRouteCommands, normalizeCommandTable(catalog.movementRouteCommands, getMovementRouteCommandMetadata));
+    Object.assign(normalized.eventCommands, normalizeCommandTable(catalog, getEventCommandMetadata));
+    return normalized;
+  }
+
+  function normalizeCommandTable(table, fallbackGetter) {
+    const normalized = Object.create(null);
+    if (!table || typeof table !== 'object') return normalized;
+    Object.keys(table).forEach((key) => {
       const numeric = Number(key);
       if (!Number.isFinite(numeric)) return;
-      const entry = catalog[key];
+      const entry = table[key];
       if (!entry || typeof entry !== 'object') return;
-      const fallback = getEventCommandMetadata(numeric);
-      const classification = normalizeClassification(entry.classification);
-      normalized[String(numeric)] = {
-        code: numeric,
-        label: nonEmptyString(entry.label) || fallback.label,
-        scanBehavior: normalizeScanBehavior(entry.scanBehavior, classification) || fallback.scanBehavior,
-        stalenessRisk: normalizeStalenessRisk(entry.stalenessRisk, classification),
-        reason: nonEmptyString(entry.reason),
-        nestedLists: normalizeNestedListSpecs(entry.nestedLists),
-      };
+      normalized[String(numeric)] = normalizeCatalogCommandMetadata(entry, numeric, fallbackGetter(numeric));
     });
     return normalized;
+  }
+
+  function normalizeCatalogCommandMetadata(entry, numeric, fallback) {
+    const classification = normalizeClassification(entry.classification);
+    return {
+      code: numeric,
+      label: nonEmptyString(entry.label) || fallback.label,
+      classification,
+      scanBehavior: normalizeScanBehavior(entry.scanBehavior, classification) || fallback.scanBehavior,
+      stalenessRisk: normalizeStalenessRisk(entry.stalenessRisk, classification),
+      reason: nonEmptyString(entry.reason),
+      nestedLists: normalizeNestedListSpecs(entry.nestedLists),
+    };
   }
 
   function normalizeClassification(value) {

@@ -1415,6 +1415,70 @@ test('foresight scanner stops at unreadable movement route commands', () => {
   assert.equal(scan.path_stops[0].stop_reason, 'movement-route-barrier');
 });
 
+test('foresight scanner uses movement route command catalog metadata', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'After custom route text') return '커스텀 이동 뒤';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commandCatalog: {
+      movementRouteCommands: {
+        999: {
+          label: 'Custom Safe Route Step',
+          classification: 'linear',
+          scanBehavior: 'advance',
+          stalenessRisk: 'context',
+        },
+      },
+    },
+  });
+  const list = [
+    {
+      code: 205,
+      indent: 0,
+      parameters: [0, {
+        list: [
+          { code: 999, parameters: [] },
+          { code: 0, parameters: [] },
+        ],
+      }],
+    },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After custom route text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.kind, block.rawText, block.translation]), [
+    ['message_block', 'After custom route text', '커스텀 이동 뒤'],
+  ]);
+  assert.deepEqual(requests, ['After custom route text']);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'scanned');
+  assert.equal(scan.stop_reason, 'end-of-list');
+  assert.equal(scan.route_barriers, 0);
+  assert.deepEqual(scan.route_command_actions.find((action) => action.code === 999), {
+    code: 999,
+    label: 'Custom Safe Route Step',
+    scan_behavior: 'advance',
+    staleness_risk: 'context',
+    reason: '',
+  });
+});
+
 test('foresight scanner follows catalog transparent commands and records staleness', () => {
   const requests = [];
   const scanner = new ForesightScanner({
