@@ -6006,6 +6006,52 @@ test('pixi text adapter reports frame visibility and priority changes', () => {
   ]);
 });
 
+test('pixi text adapter reports detached screen state for unparented text', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Detached JP') return 'Detached KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+    },
+    PIXI: {},
+    SceneManager: {
+      updateScene() {},
+    },
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const pixiText = new root.PIXI.Text('');
+  pixiText.text = 'Detached JP';
+
+  const active = orchestrator.diagnostics().active[0];
+  assert.equal(pixiText.text, 'Detached KO');
+  assert.equal(pixiText._rpgTranslatorPixiVisible, false);
+  assert.equal(active.visible, false);
+  assert.equal(active.screenState, 'detached');
+  assert.equal(active.priority, 250);
+});
+
 test('pixi text adapter leaves native text when another owner claimed the surface', () => {
   const index = {
     translate({ text }) {

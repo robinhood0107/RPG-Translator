@@ -76,7 +76,7 @@
     state.originalText = text;
     state.renderedText = text;
     state.visible = isRenderable(surface);
-    state.screenState = state.visible ? 'visible' : 'hidden';
+    state.screenState = screenStateFor(surface, state.visible);
     state.priority = priorityFor(surface, state.visible);
     state.itemId = '';
     watched.add(surface);
