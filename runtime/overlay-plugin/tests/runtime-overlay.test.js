@@ -1153,6 +1153,60 @@ test('message adapter redraws completed messages through drawTextEx fallback', (
   assert.equal(orchestrator.diagnostics().render_accepted, 1);
 });
 
+test('message adapter redraws message faces before fallback text', () => {
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['Face JP'] },
+    Window_Message: function WindowMessage() {
+      this.visible = true;
+      this.contents = {
+        clear() {
+          calls.push(['clear']);
+        },
+      };
+    },
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.isOpen = () => true;
+  root.Window_Message.prototype.resetFontSettings = function resetFontSettings() {
+    calls.push(['resetFontSettings']);
+  };
+  root.Window_Message.prototype.drawMessageFace = function drawMessageFace() {
+    calls.push(['drawMessageFace']);
+  };
+  root.Window_Message.prototype.drawTextEx = function drawTextEx(text, x, y) {
+    calls.push(['drawTextEx', text, x, y]);
+    return text.length;
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Face JP') return 'Face KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.processCompleteMessage({
+    visible: 'Face JP',
+    resolved: 'Face JP',
+    translationSource: 'Face JP',
+  }, 'session-face');
+
+  assert.deepEqual(calls, [
+    ['clear'],
+    ['resetFontSettings'],
+    ['drawMessageFace'],
+    ['drawTextEx', 'Face KO', 0, 0],
+  ]);
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {

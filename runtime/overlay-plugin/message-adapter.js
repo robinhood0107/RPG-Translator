@@ -356,6 +356,7 @@
       try { contents.clear(); } catch (_) {}
     }
     if (typeof windowInstance.resetFontSettings === 'function') windowInstance.resetFontSettings();
+    drawMessageFaceIfNeeded(windowInstance);
     const text = redrawText(translated, originalText, windowInstance);
     const x = finiteNumber(windowInstance._trMsgStartX, 0);
     const y = finiteNumber(windowInstance._trMsgStartY, 0);
@@ -366,6 +367,16 @@
       windowInstance.__rpgTranslatorMessageRedrawDepth = Math.max(0, (windowInstance.__rpgTranslatorMessageRedrawDepth || 1) - 1);
     }
     return true;
+  }
+
+  function drawMessageFaceIfNeeded(windowInstance) {
+    if (!windowInstance || typeof windowInstance.drawMessageFace !== 'function') return false;
+    try {
+      windowInstance.drawMessageFace();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function redrawText(translated, originalText, windowInstance) {
