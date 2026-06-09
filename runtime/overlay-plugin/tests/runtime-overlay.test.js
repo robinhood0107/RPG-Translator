@@ -1033,6 +1033,100 @@ test('orchestrator contains record-backed render missing-record callback errors'
   )));
 });
 
+test('orchestrator contains record-backed render decision callback errors', () => {
+  const records = new Map();
+  const routed = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Accepted callback target') return '승인 콜백 대상';
+      if (request.text === 'Rejected callback target') return '거부 콜백 대상';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const acceptedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'accepted-callback-target',
+    text: 'Accepted callback target',
+    renderStrategy: 'window-text',
+  });
+  const rejectedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'rejected-callback-target',
+    text: 'Rejected callback target',
+    renderStrategy: 'window-text',
+  });
+  records.set(acceptedCommand.itemId, {
+    name: 'accepted-callback',
+    generation: acceptedCommand.generation,
+    current: true,
+    decision: true,
+  });
+  records.set(rejectedCommand.itemId, {
+    name: 'rejected-callback',
+    generation: rejectedCommand.generation,
+    current: true,
+    decision: false,
+  });
+
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    getRenderGeneration(record) {
+      return record.generation;
+    },
+    isRenderTargetCurrent(record) {
+      return record.current === true;
+    },
+    onRenderQueued(record) {
+      routed.push(['queued', record.name]);
+      return record.decision;
+    },
+    onRenderAccepted() {
+      throw new Error('accepted callback exploded');
+    },
+    onRenderRejected() {
+      throw new Error('rejected callback exploded');
+    },
+  });
+
+  orchestrator.requestItemTranslation(acceptedCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  orchestrator.requestItemTranslation(rejectedCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  unsubscribe();
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.deepEqual(routed, [
+    ['queued', 'accepted-callback'],
+    ['queued', 'rejected-callback'],
+  ]);
+  assert.equal(diagnostics.render_accepted, 1);
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.render_accepted'
+    && event.itemId === acceptedCommand.itemId
+  )));
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.render_rejected'
+    && event.itemId === rejectedCommand.itemId
+  )));
+});
+
 test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', () => {
   const orchestrator = new TextOrchestrator({
     translate(request) {

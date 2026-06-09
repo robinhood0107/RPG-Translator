@@ -711,7 +711,11 @@
     dispatchSubscriptionRenderAccepted(source, record, decision, route) {
       this.recordRenderAccepted(decision.itemId || route.itemId, decision);
       if (typeof source.onRenderAccepted === 'function') {
-        source.onRenderAccepted(record, decision, route);
+        try {
+          source.onRenderAccepted(record, decision, route);
+        } catch (error) {
+          this.recordAdapterCallbackError('render_accepted', decision.itemId || route.itemId, error);
+        }
       }
     }
 
@@ -722,7 +726,11 @@
     dispatchSubscriptionRenderRejected(source, record, decision, route) {
       this.recordRenderRejected(decision.itemId || route.itemId, decision);
       if (typeof source.onRenderRejected === 'function') {
-        source.onRenderRejected(record, decision, route);
+        try {
+          source.onRenderRejected(record, decision, route);
+        } catch (error) {
+          this.recordAdapterCallbackError('render_rejected', decision.itemId || route.itemId, error);
+        }
       }
     }
 
