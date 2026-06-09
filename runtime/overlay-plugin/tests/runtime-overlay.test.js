@@ -247,6 +247,48 @@ test('cache loader parses static manifest config and jsonl records', async () =>
   assert.equal(bundle.records[0].translation, '세계');
 });
 
+test('cache loader rejects malformed static manifest before cache file fetch', async () => {
+  const files = new Map([
+    [
+      'manifest.json',
+      JSON.stringify({
+        schema_version: 1,
+        project_id: 1,
+        source_language: 'ja',
+        target_language: 'ko',
+        created_timestamp: '1',
+        key_schema_version: 'v1',
+        cache_files: 'cache.jsonl',
+        record_count: 1,
+      }),
+    ],
+    [
+      'overlay-config.json',
+      JSON.stringify({
+        schema_version: 1,
+        diagnostics_enabled: false,
+        startup_toast_enabled: true,
+        startup_toast_text: 'RPG-Translator 작동중',
+      }),
+    ],
+  ]);
+  const fetched = [];
+
+  await assert.rejects(
+    CacheLoader.load('', async (url) => {
+      fetched.push(url);
+      if (!files.has(url)) throw new Error(`unexpected fetch ${url}`);
+      return {
+        ok: true,
+        text: async () => files.get(url),
+      };
+    }),
+    /manifest cache_files must be an array/,
+  );
+
+  assert.deepEqual(fetched, ['manifest.json', 'overlay-config.json']);
+});
+
 test('render guard rejects stale render operations after surface changes', () => {
   const guard = new RenderGuard();
   const surface = {};

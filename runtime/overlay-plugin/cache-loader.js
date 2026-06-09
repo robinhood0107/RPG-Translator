@@ -5,6 +5,7 @@
       if (typeof fetcher !== 'function') throw new Error('fetch function is required');
       const manifest = await loadJson(fetcher, joinUrl(baseUrl, 'manifest.json'));
       const config = await loadJson(fetcher, joinUrl(baseUrl, 'overlay-config.json'));
+      validateManifest(manifest);
       const records = [];
       for (const cacheFile of manifest.cache_files || []) {
         const text = await loadText(fetcher, joinUrl(baseUrl, cacheFile));
@@ -28,6 +29,15 @@
     const response = await fetcher(url);
     if (!response || response.ok === false) throw new Error(`failed to load ${url}`);
     return response.text();
+  }
+
+  function validateManifest(manifest) {
+    if (!manifest || typeof manifest !== 'object') {
+      throw new Error('manifest must be an object');
+    }
+    if (!Array.isArray(manifest.cache_files)) {
+      throw new Error('manifest cache_files must be an array');
+    }
   }
 
   function joinUrl(baseUrl, file) {
