@@ -60,8 +60,8 @@ fn usable_parity_smoke_scans_exports_installs_and_rolls_back_copy_game() -> Resu
 
     let rows = db.review_queue_rows(scan.project_id, "ko", None)?;
     assert!(
-        rows.iter()
-            .any(|row| row.normalized_text == "Emma looks at the locked gate.\nThe city keeps its secrets."),
+        rows.iter().any(|row| row.normalized_text
+            == "Emma looks at the locked gate.\nThe city keeps its secrets."),
         "scanner should keep Show Text as one runtime message block"
     );
     for row in rows {
@@ -115,7 +115,10 @@ fn usable_parity_smoke_scans_exports_installs_and_rolls_back_copy_game() -> Resu
         },
     )?;
     assert!(game.join("js/plugins/RPGTranslator.js").is_file());
-    assert!(game.join("js/plugins/rpg-translator/overlay-config.json").is_file());
+    assert!(
+        game.join("js/plugins/rpg-translator/overlay-config.json")
+            .is_file()
+    );
     assert!(
         fs::read_to_string(game.join("js/plugins.js"))
             .expect("read plugins")
