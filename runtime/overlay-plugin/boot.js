@@ -1,7 +1,11 @@
 (function attach(root) {
   const { CacheLoader } = loadDependency(root, './cache-loader');
   const { LookupIndex } = loadDependency(root, './lookup-index');
+  const { BitmapTextAdapter } = loadDependency(root, './bitmap-text-adapter');
   const { MessageAdapter } = loadDependency(root, './message-adapter');
+  const { PixiTextAdapter } = loadDependency(root, './pixi-text-adapter');
+  const { RuntimeMissLogger } = loadDependency(root, './runtime-miss-logger');
+  const { SpriteTextAdapter } = loadDependency(root, './sprite-text-adapter');
   const { StartupToast } = loadDependency(root, './startup-toast');
   const { WindowTextAdapter } = loadDependency(root, './window-text-adapter');
 
@@ -11,7 +15,10 @@
       if (overlay.installed) return overlay;
 
       const bundle = options.bundle || await CacheLoader.load(options.baseUrl || '', options.fetch);
-      const index = new LookupIndex(bundle);
+      const missLogger = RuntimeMissLogger
+        ? RuntimeMissLogger.fromConfig(bundle.config || {}, options.missLogger || {})
+        : null;
+      const index = new LookupIndex(Object.assign({}, bundle, { missLogger }));
       const nextOverlay = Object.assign(overlay, {
         installed: true,
         engine: options.engine || 'unknown',
@@ -23,6 +30,9 @@
 
       MessageAdapter.install(scope, index);
       WindowTextAdapter.install(scope, index);
+      BitmapTextAdapter.install(scope, index);
+      SpriteTextAdapter.install(scope, index);
+      PixiTextAdapter.install(scope, index);
       if (bundle.config && bundle.config.startup_toast_enabled !== false) {
         new StartupToast({ document: scope.document, setTimeout: scope.setTimeout }).show(bundle.config);
       }
@@ -35,7 +45,11 @@
     const dependencyNames = {
       './cache-loader': 'CacheLoader',
       './lookup-index': 'LookupIndex',
+      './bitmap-text-adapter': 'BitmapTextAdapter',
       './message-adapter': 'MessageAdapter',
+      './pixi-text-adapter': 'PixiTextAdapter',
+      './runtime-miss-logger': 'RuntimeMissLogger',
+      './sprite-text-adapter': 'SpriteTextAdapter',
       './startup-toast': 'StartupToast',
       './window-text-adapter': 'WindowTextAdapter',
     };

@@ -14,14 +14,18 @@ path = "src/main.rs"
 
 [dependencies]
 rpg-translator-core.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11.2" }
+tauri = { version = "2.11.2", features = ["custom-protocol"] }
+tauri-plugin-dialog = "2.7.1"
+tokio = { version = "1", features = ["macros", "time"] }
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

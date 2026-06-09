@@ -55,6 +55,10 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
 
+      - name: Frontend build
+        working-directory: apps/desktop
+        run: npm run web:build
+
       - name: Rust format
         run: cargo fmt --check
 
@@ -75,15 +79,14 @@ jobs:
         working-directory: apps/desktop
         run: npm run typecheck
 
-      - name: Frontend build
-        working-directory: apps/desktop
-        run: npm run build
-
       - name: Runtime overlay tests
         run: node --test runtime/overlay-plugin/tests/runtime-overlay.test.js
 
       - name: Local-only source guard
         run: scripts/check-local-only.sh --tree
+
+      - name: Production hardcoding guard
+        run: scripts/check-production-hardcoding.sh
 
       - name: Release archive dry-run guard
         run: scripts/check-release-archive.sh

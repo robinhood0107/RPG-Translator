@@ -5,7 +5,7 @@ use rpg_translator_core::{
     BatchTranslator, BatchTranslatorConfig, Engine, InstallStatusRecord, LocalOpenAiConfig,
     LocalOpenAiProvider, LocalProviderTransport, NewInstallRecord, NewProject, NewSourceText,
     NewTranslation, ProviderBatchRequest, Result, ScanOptions, TextCodec, TranslationDb,
-    WorkbenchService,
+    TranslationJobProgressUpdate, WorkbenchService,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -61,7 +61,7 @@ impl LocalProviderTransport for RecordingTransport {
         Ok(json!({
             "model": "fixture-model",
             "choices": [
-                { "message": { "content": "{\"id\":1,\"translation\":\"안녕¤\"}" } }
+                { "message": { "content": "<|channel>thought\n<channel|>{\"id\":1,\"translation\":\"안녕¤\"}" } }
             ]
         }))
     }
@@ -69,12 +69,14 @@ impl LocalProviderTransport for RecordingTransport {
 
 #[test]
 fn local_openai_provider_builds_safe_request_and_parses_chat_response() -> Result<()> {
+    let ui_prompt = "UI prompt first.";
     let mut provider = LocalOpenAiProvider::new(
         LocalOpenAiConfig {
             base_url: "http://127.0.0.1:1234".to_string(),
             model: "fixture-model".to_string(),
             source_language: "ja".to_string(),
             target_language: "ko".to_string(),
+            system_prompt: ui_prompt.to_string(),
             temperature: Some(0.2),
             top_p: Some(0.9),
             max_output_tokens: Some(256),
@@ -87,6 +89,7 @@ fn local_openai_provider_builds_safe_request_and_parses_chat_response() -> Resul
             id: 1,
             text: "こんにちは¤".to_string(),
         }],
+        instruction: None,
     })?;
 
     let transport = provider.transport();
@@ -109,18 +112,14 @@ fn local_openai_provider_builds_safe_request_and_parses_chat_response() -> Resul
             .expect("user prompt content")
             .contains("\"id\":1")
     );
-    assert!(system_prompt.contains("JSONL"));
-    for forbidden in [
-        "jailbreak",
-        "ignore previous",
-        "policy override",
-        "developer mode",
-    ] {
-        assert!(
-            !system_prompt.to_ascii_lowercase().contains(forbidden),
-            "prompt contains forbidden phrase {forbidden}"
-        );
-    }
+    assert!(system_prompt.contains("JSON Lines"));
+    assert!(system_prompt.contains(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
+    assert!(
+        system_prompt.find(ui_prompt).expect("ui prompt present")
+            < system_prompt
+                .find(rpg_translator_core::DEFAULT_SYSTEM_PROMPT)
+                .expect("rust default prompt present")
+    );
     assert_eq!(response.raw_output, "{\"id\":1,\"translation\":\"안녕¤\"}");
 
     Ok(())
@@ -199,6 +198,7 @@ fn dashboard_reports_latest_export_install_and_provider_status() -> Result<()> {
         translated_text: "세계".to_string(),
         provider: "local-openai-compatible".to_string(),
         model: Some("fixture-model".to_string()),
+        provider_run_id: None,
         review_state: "accepted".to_string(),
         qa_state: "passed".to_string(),
     })?;
@@ -254,6 +254,85 @@ fn dashboard_reports_latest_export_install_and_provider_status() -> Result<()> {
             .unwrap_or_default()
             .contains("batch")
     );
+
+    Ok(())
+}
+
+#[test]
+fn translation_job_progress_survives_restart_and_reports_latest_summary() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let db_path = temp.path().join("workbench.sqlite");
+    {
+        let mut db = TranslationDb::open(&db_path)?;
+        db.migrate()?;
+        let project_id = db.upsert_project(&NewProject {
+            game_root: "/synthetic/workbench".to_string(),
+            display_name: "Synthetic Workbench".to_string(),
+            engine: Engine::Mz,
+        })?;
+        let provider_run_id = db.start_provider_run(&rpg_translator_core::NewProviderRun {
+            provider: "local-openai-compatible".to_string(),
+            model: Some("gemma-4-26B-IQ4_NL.gguf".to_string()),
+            request_settings_json: "{}".to_string(),
+        })?;
+        db.upsert_translation_job_progress(&TranslationJobProgressUpdate {
+            provider_run_id,
+            project_id: Some(project_id),
+            source_language: "en".to_string(),
+            target_language: "ko".to_string(),
+            checkpoint_path: "/tmp/workbench.sqlite.translation-ko.checkpoint.json".to_string(),
+            status: "paused".to_string(),
+            completed_items: 3_831,
+            failed_items: 11_841,
+            total_items: 20_630,
+            processed_batches: 952,
+            total_batches: 1_290,
+            split_batches: 7,
+            parse_failed_items: 3,
+            validation_failed_items: 5,
+            skipped_items: 2,
+            censored_retry_count: 1,
+            retry_pending_items: 11_841,
+            recoverable_provider_failures: 11_841,
+            final_failed_items: 0,
+            provider_backoff_ms: None,
+            effective_batch_size: 8,
+            speed_mode: "backoff".to_string(),
+            success_streak: 0,
+            success_delay_floor_ms: 1500,
+            next_delay_ms: Some(5_000),
+            failure_reason_counts_json: "{\"provider-503\":6367,\"provider-connection\":5462}"
+                .to_string(),
+            legacy_checkpoint_only: false,
+            item_eta_ms: Some(26_880_000),
+            batch_eta_ms: Some(1_880_000),
+            last_batch_elapsed_ms: Some(17_000),
+            avg_batch_elapsed_ms: Some(11_000),
+            current_batch_items: 16,
+            elapsed_ms: 5_298_000,
+            model: Some("gemma-4-26B-IQ4_NL.gguf".to_string()),
+        })?;
+    }
+
+    let mut reopened = TranslationDb::open(&db_path)?;
+    reopened.migrate()?;
+    let summary = reopened
+        .latest_translation_job_summary(Some("ko"))?
+        .expect("latest job summary");
+
+    assert_eq!(summary.status, "paused");
+    assert_eq!(summary.completed_items, 3_831);
+    assert_eq!(summary.failed_items, 11_841);
+    assert_eq!(summary.processed_batches, 952);
+    assert_eq!(summary.total_batches, 1_290);
+    assert_eq!(summary.split_batches, 7);
+    assert_eq!(summary.parse_failed_items, 3);
+    assert_eq!(summary.validation_failed_items, 5);
+    assert_eq!(summary.skipped_items, 2);
+    assert_eq!(summary.censored_retry_count, 1);
+    assert_eq!(summary.item_eta_ms, Some(26_880_000));
+    assert_eq!(summary.batch_eta_ms, Some(1_880_000));
+    assert_eq!(summary.model.as_deref(), Some("gemma-4-26B-IQ4_NL.gguf"));
 
     Ok(())
 }

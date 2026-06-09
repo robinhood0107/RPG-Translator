@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.rpgtranslator.workbench",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run web:dev",
+    "beforeBuildCommand": "npm run web:build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -37,6 +37,7 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }

@@ -61,7 +61,6 @@ fn install_options(game_root: PathBuf, export_dir: PathBuf, export_id: i64) -> I
         runtime_dir: None,
         project_id: None,
         export_id: Some(export_id),
-        allow_dontupload: false,
     }
 }
 
@@ -106,6 +105,7 @@ fn synthetic_full_flow_smoke_scans_translates_exports_installs_and_rolls_back() 
             translated_text: translation.translated_text,
             provider: translation.provider,
             model: translation.model,
+            provider_run_id: translation.provider_run_id,
             review_state: "accepted".to_string(),
             qa_state: "passed".to_string(),
         })?;
@@ -138,7 +138,6 @@ fn synthetic_full_flow_smoke_scans_translates_exports_installs_and_rolls_back() 
 
     let rollback = RollbackManager::rollback(&RollbackOptions {
         manifest_path: install_report.install_manifest_path,
-        allow_dontupload: false,
     })?;
     assert_eq!(
         fs::read_to_string(game.join("js/plugins.js")).expect("read rolled back plugins"),

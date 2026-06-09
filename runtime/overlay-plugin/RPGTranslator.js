@@ -2,10 +2,14 @@
   const SUPPORT_DIRECTORY = 'rpg-translator';
   const MODULE_FILES = [
     'text-codec.js',
+    'runtime-miss-logger.js',
     'lookup-index.js',
     'cache-loader.js',
     'message-adapter.js',
     'window-text-adapter.js',
+    'bitmap-text-adapter.js',
+    'sprite-text-adapter.js',
+    'pixi-text-adapter.js',
     'startup-toast.js',
     'boot.js',
   ];

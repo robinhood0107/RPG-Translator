@@ -1,18 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import {
-  mockDashboard,
-  mockDiagnostics,
-  mockExport,
-  mockInstall,
-  mockProjects,
-  mockRows,
-  mockScanReport,
-  mockTranslate,
-} from "./mockData";
 import type {
   DiagnosticsResponse,
+  DuplicateProjectCleanupReport,
   ExportBundleResponse,
+  HydrateWorkbenchResponse,
   InstallOverlayResponse,
+  ProviderSpeedBenchmarkReport,
+  ProjectWorkspaceSummary,
   ProjectSummary,
   ReviewQueueRow,
   ScanPersistenceReport,
@@ -20,18 +14,162 @@ import type {
 } from "./types";
 
 type CommandMap = {
+  hydrate_workbench: { request: { db_path?: string; project_file_path?: string }; response: HydrateWorkbenchResponse };
+  save_workbench_settings: {
+    request: {
+      db_path: string;
+      selected_project_id?: number | null;
+      source_language?: string;
+      target_language?: string;
+      provider_base_url?: string;
+      provider_model?: string;
+      system_prompt?: string;
+      export_dir?: string;
+      active_tab?: string;
+      show_hover_help?: boolean;
+      ui_font_size?: "small" | "medium" | "large";
+    };
+    response: { settings: HydrateWorkbenchResponse["settings"] };
+  };
+  save_workbench_state: {
+    request: {
+      db_path: string;
+      selected_project_id?: number | null;
+      source_language?: string;
+      target_language?: string;
+      provider_base_url?: string;
+      provider_model?: string;
+      system_prompt?: string;
+      export_dir?: string;
+      active_tab?: string;
+      show_hover_help?: boolean;
+      ui_font_size?: "small" | "medium" | "large";
+      review_drafts?: Array<{
+        source_text_id: number;
+        target_language: string;
+        draft_text: string;
+        base_translation_updated_at?: string | null;
+      }>;
+    };
+    response: { settings: HydrateWorkbenchResponse["settings"]; saved_drafts: number; saved_at: string };
+  };
   list_projects: { request: { db_path: string }; response: { projects: ProjectSummary[] } };
   open_project: {
-    request: { db_path: string; game_root: string };
-    response: { project: ProjectSummary; layout: string; data_path: string; plugin_path: string };
+    request: { game_root: string };
+    response: {
+      project?: ProjectSummary | null;
+      workspace: ProjectWorkspaceSummary;
+      layout: string;
+      data_path: string;
+      plugin_path: string;
+      database_missing: boolean;
+      manifest_created: boolean;
+    };
+  };
+  open_project_file: {
+    request: { project_file_path: string };
+    response: {
+      project?: ProjectSummary | null;
+      workspace: ProjectWorkspaceSummary;
+      layout: string;
+      data_path: string;
+      plugin_path: string;
+      database_missing: boolean;
+      manifest_created: boolean;
+    };
+  };
+  recreate_project_database: {
+    request: { project_file_path: string };
+    response: {
+      project?: ProjectSummary | null;
+      workspace: ProjectWorkspaceSummary;
+      layout: string;
+      data_path: string;
+      plugin_path: string;
+      database_missing: boolean;
+      manifest_created: boolean;
+    };
+  };
+  cleanup_duplicate_projects: {
+    request: { db_path: string };
+    response: { report: DuplicateProjectCleanupReport };
+  };
+  reveal_path_in_explorer: {
+    request: { project_file_path: string; target_path: string };
+    response: { path: string };
+  };
+  open_folder_in_explorer: {
+    request: { project_file_path: string; target_path: string };
+    response: { path: string };
+  };
+  copy_path_to_clipboard: {
+    request: { project_file_path: string; target_path: string };
+    response: { path: string };
   };
   scan_game: {
-    request: { db_path: string; game_root: string; source_language?: string };
+    request: { db_path: string; game_root: string; source_language?: string; disable_cjk_filter?: boolean };
     response: { report: ScanPersistenceReport };
   };
-  translate_with_fake_provider: {
-    request: { db_path: string; target_language: string; batch_size?: number };
+  translate_with_local_provider: {
+    request: {
+      db_path: string;
+      project_id?: number | null;
+      source_language: string;
+      target_language: string;
+      batch_size?: number;
+      base_url: string;
+      model: string;
+      system_prompt: string;
+      temperature?: number | null;
+      top_p?: number | null;
+      max_output_tokens?: number | null;
+      source_text_ids?: number[] | null;
+      issue_filter?: string | null;
+      retranslate_mode?: "normal" | "selected_issue_rows" | "current_issue_filter" | null;
+    };
     response: TranslateResponse;
+  };
+  pause_translation: {
+    request: Record<string, never>;
+    response: { requested: boolean; provider_run_id?: number | null; mode: string };
+  };
+  prepare_safe_shutdown: {
+    request: { db_path?: string | null };
+    response: {
+      pause_requested: boolean;
+      provider_run_id?: number | null;
+      mode: string;
+      stale_runs_interrupted: number;
+    };
+  };
+	  test_local_provider: {
+    request: {
+      base_url: string;
+      model: string;
+      source_language: string;
+      target_language: string;
+      system_prompt: string;
+      sample_text?: string | null;
+    };
+	    response: { ok: boolean; latency_ms: number; raw_output: string; model?: string | null; message?: string | null };
+	  };
+  benchmark_provider_translation_speed: {
+    request: {
+      db_path: string;
+      project_id?: number | null;
+      source_language: string;
+      target_language: string;
+      batch_size?: number;
+      base_url: string;
+      model: string;
+      system_prompt: string;
+      temperature?: number | null;
+      top_p?: number | null;
+      max_output_tokens?: number | null;
+      warmup_runs?: number | null;
+      measured_runs?: number | null;
+    };
+    response: ProviderSpeedBenchmarkReport;
   };
   review_queue: {
     request: {
@@ -39,8 +177,20 @@ type CommandMap = {
       project_id: number;
       target_language: string;
       review_state?: string | null;
+      issue_filter?: string | null;
+      limit?: number;
+      offset?: number;
     };
-    response: { rows: ReviewQueueRow[] };
+    response: {
+      rows: ReviewQueueRow[];
+      total_count: number;
+      next_offset: number | null;
+      page: number;
+      page_size: number;
+      total_pages: number;
+      range_start: number;
+      range_end: number;
+    };
   };
   update_review_state: {
     request: {
@@ -54,6 +204,35 @@ type CommandMap = {
       qa_state: string;
     };
     response: { translation: { review_state: string; qa_state: string } };
+  };
+  update_review_row: {
+    request: {
+      db_path: string;
+      source_text_id: number;
+      target_language: string;
+      translated_text: string;
+      provider: string;
+      model?: string | null;
+      review_state: string;
+      qa_state: string;
+      expected_updated_at?: string | null;
+    };
+    response: { row: ReviewQueueRow };
+  };
+  bulk_approve_review_rows: {
+    request: {
+      db_path: string;
+      project_id: number;
+      target_language: string;
+      source_text_ids?: number[] | null;
+    };
+    response: {
+      updated_count: number;
+      skipped_missing_count?: number;
+      skipped_finding_count?: number;
+      skipped_attention_count?: number;
+      skipped_validation_count?: number;
+    };
   };
   export_bundle: {
     request: { db_path: string; project_id: number; target_language: string; output_dir: string };
@@ -81,81 +260,42 @@ type CommandMap = {
 
 type CommandName = keyof CommandMap;
 
-const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-
 export async function callCommand<Name extends CommandName>(
   name: Name,
   request: CommandMap[Name]["request"],
 ): Promise<CommandMap[Name]["response"]> {
-  if (isTauriRuntime()) {
-    return invoke<CommandMap[Name]["response"]>(name, { request });
+  if (!isDesktopRuntime()) {
+    throw new Error(`desktop runtime is required for ${String(name)}`);
   }
-  return mockCommand(name, request);
+  try {
+    return await invoke<CommandMap[Name]["response"]>(name, { request });
+  } catch (caught) {
+    throw new Error(commandErrorMessage(caught));
+  }
 }
 
-function isTauriRuntime() {
+export function isDesktopRuntime() {
   return Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 }
 
-async function mockCommand<Name extends CommandName>(
-  name: Name,
-  request: CommandMap[Name]["request"],
-): Promise<CommandMap[Name]["response"]> {
-  await delay(25);
-  if ("game_root" in request && String(request.game_root).includes("fail")) {
-    throw new Error("synthetic command failure");
+function commandErrorMessage(caught: unknown) {
+  const normalize = (message: string) => message.replace(/^(invalid input|invalid_input):\s*/i, "").trim();
+  if (caught instanceof Error) {
+    return normalize(caught.message);
   }
-
-  switch (name) {
-    case "list_projects":
-      return { projects: mockProjects } as CommandMap[Name]["response"];
-    case "open_project":
-      return {
-        project: mockProjects[0],
-        layout: "direct",
-        data_path: `${mockProjects[0].game_root}/data`,
-        plugin_path: `${mockProjects[0].game_root}/js/plugins.js`,
-      } as CommandMap[Name]["response"];
-    case "scan_game":
-      return { report: mockScanReport } as CommandMap[Name]["response"];
-    case "translate_with_fake_provider":
-      return mockTranslate as CommandMap[Name]["response"];
-    case "review_queue":
-      return {
-        rows: filterRows(
-          mockRows,
-          (request as CommandMap["review_queue"]["request"]).review_state,
-        ),
-      } as CommandMap[Name]["response"];
-    case "update_review_state":
-      return {
-        translation: {
-          ...mockRows[0],
-          review_state: (request as CommandMap["update_review_state"]["request"]).review_state,
-        },
-      } as CommandMap[Name]["response"];
-    case "export_bundle":
-      return mockExport as CommandMap[Name]["response"];
-    case "install_overlay":
-      return mockInstall as CommandMap[Name]["response"];
-    case "rollback_overlay":
-      return {
-        restored_plugins_file: "js/plugins.js",
-        removed_files: ["js/plugins/RPGTranslator.js"],
-      } as CommandMap[Name]["response"];
-    case "diagnostics_summary":
-      return mockDiagnostics as CommandMap[Name]["response"];
-    default:
-      throw new Error(`unknown command ${String(name)}`);
+  if (typeof caught === "string") {
+    return normalize(caught);
   }
-}
-
-function filterRows(rows: ReviewQueueRow[], filter?: string | null) {
-  if (!filter || filter === "all") {
-    return rows;
+  if (caught && typeof caught === "object") {
+    const message = (caught as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim() !== "") {
+      return normalize(message);
+    }
+    try {
+      return normalize(JSON.stringify(caught));
+    } catch {
+      return normalize(String(caught));
+    }
   }
-  if (filter === "attention") {
-    return rows.filter((row) => row.qa_state === "failed" || row.qa_finding_count > 0);
-  }
-  return rows.filter((row) => row.review_state === filter);
+  return normalize(String(caught));
 }
