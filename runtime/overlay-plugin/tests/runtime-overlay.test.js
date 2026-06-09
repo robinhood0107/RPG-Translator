@@ -711,6 +711,123 @@ test('orchestrator routes render commands through record subscriptions', () => {
   ]);
 });
 
+test('orchestrator validates record-backed render subscriptions and reports decisions', () => {
+  const records = new Map();
+  const routed = [];
+  const misses = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Accepted target') return '승인 대상';
+      if (request.text === 'Stale target') return '오래된 대상';
+      if (request.text === 'Missing target') return '없는 대상';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const acceptedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'accepted-target',
+    text: 'Accepted target',
+    renderStrategy: 'window-text',
+  });
+  records.set(acceptedCommand.itemId, {
+    name: 'accepted',
+    generation: acceptedCommand.generation,
+    current: true,
+    decision: true,
+  });
+
+  const staleSurface = {};
+  orchestrator.markSurfaceChanged(staleSurface);
+  const staleCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: staleSurface,
+    slotKey: 'stale-target',
+    text: 'Stale target',
+    renderStrategy: 'window-text',
+  });
+  records.set(staleCommand.itemId, {
+    name: 'stale',
+    generation: staleCommand.generation + 1,
+    current: true,
+    decision: true,
+  });
+
+  const missingCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'missing-target',
+    text: 'Missing target',
+    renderStrategy: 'window-text',
+  });
+
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    getRenderGeneration(record) {
+      return record.generation;
+    },
+    isRenderTargetCurrent(record) {
+      return record.current === true ? true : { reason: 'target-not-current' };
+    },
+    onRenderQueued(record, command, route) {
+      routed.push(['queued', record.name, command.translatedText, route.commandId]);
+      return record.decision;
+    },
+    onRenderAccepted(record, decision, route) {
+      routed.push(['accepted', record.name, decision.reason, route.commandId]);
+    },
+    onRenderRejected(record, decision, route) {
+      routed.push(['rejected', record && record.name || 'missing', decision.reason, route.commandId]);
+    },
+    onMissingRecord(route) {
+      misses.push([route.itemId, route.commandId, route.reason]);
+    },
+  });
+
+  orchestrator.requestItemTranslation(acceptedCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  orchestrator.requestItemTranslation(staleCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  orchestrator.requestItemTranslation(missingCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  unsubscribe();
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.deepEqual(routed, [
+    ['queued', 'accepted', '승인 대상', acceptedCommand.id],
+    ['accepted', 'accepted', 'accepted', acceptedCommand.id],
+    ['rejected', 'stale', 'generation-mismatch', staleCommand.id],
+    ['rejected', 'missing', 'missing-adapter-record', missingCommand.id],
+  ]);
+  assert.deepEqual(misses, [[missingCommand.itemId, missingCommand.id, 'missing-adapter-record']]);
+  assert.equal(diagnostics.render_accepted, 1);
+  assert.equal(diagnostics.render_rejected, 2);
+  assert.deepEqual(diagnostics.renderQueue.slice(-3).map((entry) => [
+    entry.id,
+    entry.renderStatus,
+    entry.renderReason,
+  ]), [
+    [acceptedCommand.id, 'accepted', 'accepted'],
+    [staleCommand.id, 'rejected', 'generation-mismatch'],
+    [missingCommand.id, 'rejected', 'missing-adapter-record'],
+  ]);
+});
+
 test('orchestrator defers surface draws to candidate adapter subscriptions', () => {
   const bitmap = {};
   const events = [];

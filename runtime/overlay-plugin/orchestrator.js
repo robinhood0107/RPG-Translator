@@ -392,12 +392,17 @@
     subscribeRecords(options = {}) {
       const source = options && typeof options === 'object' ? options : {};
       const renderStrategy = String(source.renderStrategy || source.strategy || '');
+      const recordBacked = isRecordBackedSubscription(source);
       return this.subscribe((event) => {
         if (!event || typeof event !== 'object') return;
         const command = event.payload || null;
         if (!command || typeof command !== 'object') return;
         if (renderStrategy && String(command.strategy || '') !== renderStrategy) return;
         if (event.type === 'renderQueued' && typeof source.onRenderQueued === 'function') {
+          if (recordBacked) {
+            this.dispatchRecordBackedRender(source, command);
+            return;
+          }
           const route = this.renderRoute('item.render_queued', command);
           const decision = source.onRenderQueued(command, route);
           if (decision === false && typeof source.onRenderRejected === 'function') {
@@ -405,6 +410,7 @@
           }
           return;
         }
+        if (recordBacked) return;
         if (event.type === 'renderAccepted' && typeof source.onRenderAccepted === 'function') {
           source.onRenderAccepted(command, this.renderRoute('item.render_accepted', command));
           return;
@@ -413,6 +419,90 @@
           source.onRenderRejected(command, this.renderRoute('item.render_rejected', command, 'render-rejected'));
         }
       });
+    }
+
+    dispatchRecordBackedRender(source, command) {
+      const route = this.renderRoute('item.render_queued', command);
+      route.recordId = command.itemId || '';
+      route.commandId = command.id || '';
+      route.commandGeneration = numberOrDefault(command.generation, 0);
+      const target = resolveSubscriptionRecord(source, route.recordId, command, route);
+      if (!target) {
+        const decision = createSubscriptionRenderDecision('rejected', 'missing-adapter-record', command, route);
+        this.dispatchSubscriptionRenderRejected(source, null, decision, route);
+        if (typeof source.onMissingRecord === 'function') {
+          source.onMissingRecord(Object.assign({}, route, { reason: decision.reason }), { type: 'item.render_queued' }, command);
+        }
+        return false;
+      }
+
+      const lifecycleRecord = resolveLifecycleRecord(source, target, command, route);
+      const validationFailure = this.validateSubscriptionRenderCommand(source, target, lifecycleRecord, command, route);
+      if (validationFailure) {
+        this.dispatchSubscriptionRenderRejected(source, target, validationFailure, route);
+        return false;
+      }
+
+      let callbackDecision = null;
+      try {
+        callbackDecision = normalizeSubscriptionRenderCallbackDecision(
+          source.onRenderQueued(target, command, route),
+          command,
+          route,
+        );
+      } catch (error) {
+        callbackDecision = createSubscriptionRenderDecision('rejected', 'adapter-render-error', command, route, {
+          message: error && error.message ? String(error.message) : String(error || ''),
+        });
+      }
+
+      if (callbackDecision.status === 'deferred') {
+        this.dispatchSubscriptionRenderDeferred(callbackDecision, route);
+        return true;
+      }
+      if (callbackDecision.status !== 'accepted') {
+        this.dispatchSubscriptionRenderRejected(source, target, callbackDecision, route);
+        return false;
+      }
+      this.dispatchSubscriptionRenderAccepted(source, target, callbackDecision, route);
+      return true;
+    }
+
+    validateSubscriptionRenderCommand(source, target, lifecycleRecord, command, route) {
+      if (!command.itemId || !command.strategy) {
+        return createSubscriptionRenderDecision('rejected', 'invalid-command', command, route);
+      }
+      if (!lifecycleRecord || (typeof lifecycleRecord !== 'object' && typeof lifecycleRecord !== 'function')) {
+        return createSubscriptionRenderDecision('rejected', 'missing-lifecycle-record', command, route);
+      }
+      const generationFailure = validateSubscriptionGeneration(source, target, command, route);
+      if (generationFailure) return generationFailure;
+      if (typeof source.isRenderTargetCurrent !== 'function') {
+        return createSubscriptionRenderDecision('rejected', 'missing-current-validator', command, route);
+      }
+      const current = source.isRenderTargetCurrent(target, command, route);
+      if (current === true) return null;
+      const details = current && typeof current === 'object' ? current : {};
+      const reason = String(details.reason || details.status || current || 'target-not-current');
+      return createSubscriptionRenderDecision('rejected', reason, command, route, details);
+    }
+
+    dispatchSubscriptionRenderAccepted(source, record, decision, route) {
+      this.recordRenderAccepted(decision.itemId || route.itemId, decision);
+      if (typeof source.onRenderAccepted === 'function') {
+        source.onRenderAccepted(record, decision, route);
+      }
+    }
+
+    dispatchSubscriptionRenderDeferred(decision, route) {
+      this.recordRenderDeferred(decision.itemId || route.itemId, decision);
+    }
+
+    dispatchSubscriptionRenderRejected(source, record, decision, route) {
+      this.recordRenderRejected(decision.itemId || route.itemId, decision);
+      if (typeof source.onRenderRejected === 'function') {
+        source.onRenderRejected(record, decision, route);
+      }
     }
 
     subscribeSurfaceDraws(listener, options = {}) {
@@ -776,6 +866,84 @@
     if (status === 'accepted') return 'renderAccepted';
     if (status === 'deferred') return 'renderDeferred';
     return 'renderRejected';
+  }
+
+  function isRecordBackedSubscription(source) {
+    return Boolean(source && (
+      source.records
+      || source.recordRegistry
+      || source.recordsById
+      || source.resolveRecord
+      || source.getLifecycleRecord
+      || source.getRenderGeneration
+      || source.isRenderTargetCurrent
+      || source.onMissingRecord
+    ));
+  }
+
+  function resolveSubscriptionRecord(source, recordId, command, route) {
+    if (source && typeof source.resolveRecord === 'function') {
+      return source.resolveRecord(recordId, { type: 'item.render_queued' }, command, route) || null;
+    }
+    const records = source && (source.records || source.recordRegistry || source.recordsById);
+    if (!records || !recordId) return null;
+    if (typeof records.get === 'function') return records.get(recordId) || null;
+    if (Object.prototype.hasOwnProperty.call(records, recordId)) return records[recordId] || null;
+    return null;
+  }
+
+  function resolveLifecycleRecord(source, target, command, route) {
+    if (source && typeof source.getLifecycleRecord === 'function') {
+      return source.getLifecycleRecord(target, command, route) || null;
+    }
+    return target || null;
+  }
+
+  function validateSubscriptionGeneration(source, target, command, route) {
+    const commandGeneration = numberOrDefault(command && command.generation, 0);
+    if (!commandGeneration) return null;
+    if (!source || typeof source.getRenderGeneration !== 'function') return null;
+    const targetGeneration = Number(source.getRenderGeneration(target, command, route));
+    if (!Number.isFinite(targetGeneration)) {
+      return createSubscriptionRenderDecision('rejected', 'missing-generation', command, route, {
+        commandGeneration,
+      });
+    }
+    if (targetGeneration !== commandGeneration) {
+      return createSubscriptionRenderDecision('rejected', 'generation-mismatch', command, route, {
+        commandGeneration,
+        targetGeneration,
+      });
+    }
+    return null;
+  }
+
+  function createSubscriptionRenderDecision(status, reason, command, route, details = {}) {
+    const normalizedStatus = normalizeRenderDecisionStatus(status);
+    return {
+      status: normalizedStatus,
+      reason: String(reason || normalizedStatus),
+      recordId: String((route && route.recordId) || (command && command.itemId) || ''),
+      itemId: String((route && route.itemId) || (command && command.itemId) || ''),
+      commandId: String((command && command.id) || (route && route.commandId) || ''),
+      strategy: String((command && command.strategy) || (route && route.strategy) || ''),
+      commandGeneration: numberOrDefault((command && command.generation) || (route && route.commandGeneration), 0),
+      details: sanitizeDetails(details) || {},
+    };
+  }
+
+  function normalizeSubscriptionRenderCallbackDecision(value, command, route) {
+    if (value === true) return createSubscriptionRenderDecision('accepted', 'accepted', command, route);
+    if (typeof value === 'string') {
+      const status = normalizeRenderDecisionStatus(value);
+      return createSubscriptionRenderDecision(status, value || status, command, route);
+    }
+    if (value && typeof value === 'object') {
+      const status = normalizeRenderDecisionStatus(value.status || value.result || value.decision);
+      const fallbackReason = status === 'accepted' ? 'accepted' : (status === 'deferred' ? 'deferred' : 'adapter-declined');
+      return createSubscriptionRenderDecision(status, value.reason || fallbackReason, command, route, value.details || {});
+    }
+    return createSubscriptionRenderDecision('rejected', 'adapter-declined', command, route);
   }
 
   function sanitizeDetails(details) {
