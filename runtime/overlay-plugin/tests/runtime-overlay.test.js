@@ -398,6 +398,23 @@ test('message wrapper applies font-size escapes before measuring following text'
   );
 });
 
+test('message wrapper restores font settings after measured wrapping', () => {
+  let scale = 1;
+  const messageWindow = {
+    contents: { width: 60, height: 96 },
+    lineHeight() { return 24; },
+    resetFontSettings() { scale = 1; },
+    makeFontBigger() { scale = 2; },
+    textWidth(text) { return String(text).length * 10 * scale; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('\\{abc d', { window: messageWindow }),
+    ['\\{abc', 'd'],
+  );
+  assert.equal(scale, 1);
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };

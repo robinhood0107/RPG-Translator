@@ -6,10 +6,15 @@
       const useMeasuredWrap = !Number.isFinite(options.capacity) && canMeasureWindow(options.window);
       const contentsWidth = useMeasuredWrap ? resolveContentsWidth(options.window) : NaN;
       const output = [];
-      for (const hardLine of String(text ?? '').replace(/\r\n?/gu, '\n').split('\n')) {
-        if (!allowSoftWrap) pushUnwrappedLine(output, hardLine);
-        else if (useMeasuredWrap) pushMeasuredLine(output, hardLine, options.window, contentsWidth);
-        else pushWrappedLine(output, hardLine, capacity);
+      if (useMeasuredWrap) resetMessageFontSettings(options.window);
+      try {
+        for (const hardLine of String(text ?? '').replace(/\r\n?/gu, '\n').split('\n')) {
+          if (!allowSoftWrap) pushUnwrappedLine(output, hardLine);
+          else if (useMeasuredWrap) pushMeasuredLine(output, hardLine, options.window, contentsWidth);
+          else pushWrappedLine(output, hardLine, capacity);
+        }
+      } finally {
+        if (useMeasuredWrap) resetMessageFontSettings(options.window);
       }
       return output.length > 0 ? output : [''];
     }
@@ -186,6 +191,14 @@
         (windowInstance && typeof windowInstance.textWidth === 'function')
         || (windowInstance && windowInstance.contents && typeof windowInstance.contents.measureTextWidth === 'function')
       );
+  }
+
+  function resetMessageFontSettings(windowInstance) {
+    if (windowInstance && typeof windowInstance.resetFontSettings === 'function') {
+      try {
+        windowInstance.resetFontSettings();
+      } catch (_) {}
+    }
   }
 
   function measureTokenWidth(windowInstance, token) {
