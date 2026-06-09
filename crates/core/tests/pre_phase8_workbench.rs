@@ -333,6 +333,8 @@ fn translation_job_progress_survives_restart_and_reports_latest_summary() -> Res
             final_failed_items: 0,
             provider_backoff_ms: None,
             effective_batch_size: 8,
+            next_experiment_batch_size: 8,
+            input_token_budget: 4096,
             speed_mode: "backoff".to_string(),
             success_streak: 0,
             success_delay_floor_ms: 1500,

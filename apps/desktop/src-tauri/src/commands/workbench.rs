@@ -247,6 +247,8 @@ fn backfill_latest_job_from_checkpoint(
         final_failed_items: 0,
         provider_backoff_ms: None,
         effective_batch_size: 0,
+        next_experiment_batch_size: 0,
+        input_token_budget: 4096,
         speed_mode: "steady".to_string(),
         success_streak: 0,
         success_delay_floor_ms: 1500,

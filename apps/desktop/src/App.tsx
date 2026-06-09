@@ -154,6 +154,8 @@ type TranslateProgressSnapshot = {
   finalFailedItems: number;
   providerBackoffMs?: number | null;
   effectiveBatchSize: number;
+  nextExperimentBatchSize: number;
+  inputTokenBudget: number;
   speedMode: string;
   successStreak: number;
   successDelayFloorMs: number;
@@ -190,6 +192,8 @@ type TranslateProgressEventData = {
   final_failed_items?: number;
   provider_backoff_ms?: number | null;
   effective_batch_size?: number;
+  next_experiment_batch_size?: number;
+  input_token_budget?: number;
   speed_mode?: string;
   success_streak?: number;
   success_delay_floor_ms?: number;
@@ -364,6 +368,8 @@ export const text = {
     successStreak: "Success streak",
     successDelayFloor: "Success wait floor",
     nextDelay: "Next wait",
+    nextExperimentBatch: "Next experiment batch",
+    inputTokenBudget: "Input token budget",
     recentAverageSpeed: "Recent average speed",
     adaptiveDecisionReason: "Speed tuning reason",
     failureReasons: "Recent failure reasons",
@@ -754,6 +760,8 @@ export const text = {
     successStreak: "연속 성공",
     successDelayFloor: "성공 후 최소 대기",
     nextDelay: "다음 대기",
+    nextExperimentBatch: "다음 실험 배치",
+    inputTokenBudget: "입력 토큰 예산",
     recentAverageSpeed: "최근 평균 속도",
     adaptiveDecisionReason: "속도 조정 사유",
     failureReasons: "최근 실패 원인",
@@ -3367,6 +3375,8 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
       finalFailedItems: Math.max(jobFinalFailures, checkpointFinalFailures),
       providerBackoffMs: job.provider_backoff_ms ?? null,
       effectiveBatchSize: job.effective_batch_size ?? 0,
+      nextExperimentBatchSize: job.next_experiment_batch_size ?? job.effective_batch_size ?? 0,
+      inputTokenBudget: job.input_token_budget ?? 4096,
       speedMode: job.speed_mode ?? "steady",
       successStreak: job.success_streak ?? 0,
       successDelayFloorMs: job.success_delay_floor_ms ?? 1500,
@@ -3409,6 +3419,8 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
     finalFailedItems: 0,
     providerBackoffMs: null,
     effectiveBatchSize: 0,
+    nextExperimentBatchSize: 0,
+    inputTokenBudget: 4096,
     speedMode: "steady",
     successStreak: 0,
     successDelayFloorMs: 1500,
@@ -3573,6 +3585,8 @@ function progressFromTranslateResponse(
     finalFailedItems: response.final_failed_items ?? response.failed_items,
     providerBackoffMs: response.provider_backoff_ms ?? null,
     effectiveBatchSize: response.effective_batch_size ?? 0,
+    nextExperimentBatchSize: response.next_experiment_batch_size ?? response.effective_batch_size ?? 0,
+    inputTokenBudget: response.input_token_budget ?? 4096,
     speedMode: response.speed_mode ?? "steady",
     successStreak: response.success_streak ?? 0,
     successDelayFloorMs: response.success_delay_floor_ms ?? 1500,
@@ -3615,6 +3629,8 @@ function translateProgressFromEvent(
     finalFailedItems: event.final_failed_items ?? event.failed_items,
     providerBackoffMs: event.provider_backoff_ms ?? null,
     effectiveBatchSize: event.effective_batch_size ?? 0,
+    nextExperimentBatchSize: event.next_experiment_batch_size ?? event.effective_batch_size ?? 0,
+    inputTokenBudget: event.input_token_budget ?? 4096,
     speedMode: event.speed_mode ?? "steady",
     successStreak: event.success_streak ?? 0,
     successDelayFloorMs: event.success_delay_floor_ms ?? 1500,
@@ -4440,6 +4456,8 @@ function TranslateProgressView({
         <span>{t.recoverableProviderFailures}: {progress.recoverableProviderFailures.toLocaleString()}</span>
         <span>{t.finalFailed}: {progress.finalFailedItems.toLocaleString()}</span>
         <span>{t.effectiveBatch}: {progress.effectiveBatchSize.toLocaleString()}</span>
+        <span>{t.nextExperimentBatch}: {progress.nextExperimentBatchSize.toLocaleString()}</span>
+        <span>{t.inputTokenBudget}: {progress.inputTokenBudget.toLocaleString()}</span>
         <span>{t.providerBackoff}: {progress.providerBackoffMs === null || progress.providerBackoffMs === undefined ? "--:--:--" : formatDuration(progress.providerBackoffMs)}</span>
         <span>{t.parseFailed}: {progress.parseFailedItems.toLocaleString()}</span>
         <span>{t.validationFailed}: {progress.validationFailedItems.toLocaleString()}</span>

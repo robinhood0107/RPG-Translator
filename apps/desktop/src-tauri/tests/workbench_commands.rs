@@ -374,6 +374,8 @@ fn hydrate_migrates_legacy_speed_columns_with_schema_backup() {
         assert_eq!(latest_job.success_delay_floor_ms, 1500);
         assert_eq!(latest_job.next_delay_ms, None);
         assert_eq!(latest_job.effective_batch_size, 8);
+        assert_eq!(latest_job.next_experiment_batch_size, 8);
+        assert_eq!(latest_job.input_token_budget, 4096);
         assert_eq!(hydrated.stale_runs_interrupted, 1);
 
         let backups_dir = temp.path().join("backups");
@@ -403,13 +405,13 @@ fn hydrate_migrates_legacy_speed_columns_with_schema_backup() {
                 "
                 SELECT COUNT(*)
                 FROM pragma_table_info('translation_jobs')
-                WHERE name IN ('speed_mode', 'success_streak', 'success_delay_floor_ms', 'next_delay_ms')
+                WHERE name IN ('speed_mode', 'success_streak', 'success_delay_floor_ms', 'next_delay_ms', 'next_experiment_batch_size', 'input_token_budget')
                 ",
                 [],
                 |row| row.get(0),
             )
             .expect("query speed columns");
-        assert_eq!(speed_columns, 4);
+        assert_eq!(speed_columns, 6);
     });
 }
 
@@ -1055,6 +1057,8 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             final_failed_items: 0,
             provider_backoff_ms: Some(5_000),
             effective_batch_size: 8,
+            next_experiment_batch_size: 8,
+            input_token_budget: 6144,
             speed_mode: "backoff".to_string(),
             success_streak: 0,
             success_delay_floor_ms: 1500,
@@ -1066,7 +1070,7 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
     ));
     assert_eq!(
         line,
-        "[RPG-Translator][translate] batch_done run=9 batch=12/1299 text=192/20774 retry_pending=16 provider_failures=16 final_failed=0 parse_failed=3 validation_failed=5 skipped=7 censored_retry=1 split=0 speed_mode=backoff success_streak=0 success_floor=00:00:01 next_delay=00:00:05 effective_batch=8 backoff=00:00:05 reasons=provider-503:16 adaptive=\"adaptive: conservative from history\" current_items=16 last_batch=00:00:01 avg_batch=00:00:15 elapsed=00:03:10 eta_text=05:21:44 eta_batch=05:39:37 model=gemma.gguf target=ko"
+        "[RPG-Translator][translate] batch_done run=9 batch=12/1299 text=192/20774 retry_pending=16 provider_failures=16 final_failed=0 parse_failed=3 validation_failed=5 skipped=7 censored_retry=1 split=0 speed_mode=backoff success_streak=0 success_floor=00:00:01 next_delay=00:00:05 effective_batch=8 next_experiment_batch=8 token_budget=6144 backoff=00:00:05 reasons=provider-503:16 adaptive=\"adaptive: conservative from history\" current_items=16 last_batch=00:00:01 avg_batch=00:00:15 elapsed=00:03:10 eta_text=05:21:44 eta_batch=05:39:37 model=gemma.gguf target=ko"
     );
 
     let paused = translate::format_translate_progress_event(&TranslateProgressEvent::Paused(
@@ -1097,6 +1101,8 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             final_failed_items: 0,
             provider_backoff_ms: None,
             effective_batch_size: 16,
+            next_experiment_batch_size: 16,
+            input_token_budget: 4096,
             speed_mode: "steady".to_string(),
             success_streak: 3,
             success_delay_floor_ms: 1500,

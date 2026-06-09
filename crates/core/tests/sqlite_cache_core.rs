@@ -869,6 +869,8 @@ fn migration_backfills_speed_columns_and_review_drafts_for_existing_db() -> Resu
     assert_eq!(latest.completed_items, 10);
     assert_eq!(latest.failed_items, 2);
     assert_eq!(latest.effective_batch_size, 8);
+    assert_eq!(latest.next_experiment_batch_size, 8);
+    assert_eq!(latest.input_token_budget, 4096);
     assert_eq!(latest.success_delay_floor_ms, 1500);
     assert_eq!(latest.next_delay_ms, Some(10_000));
     assert_eq!(latest.speed_mode, "backoff");
@@ -1204,6 +1206,8 @@ fn stale_running_translation_jobs_become_terminal_on_hydrate_repair() -> Result<
         final_failed_items: 2,
         provider_backoff_ms: None,
         effective_batch_size: 8,
+        next_experiment_batch_size: 8,
+        input_token_budget: 4096,
         speed_mode: "steady".to_string(),
         success_streak: 0,
         success_delay_floor_ms: 1500,

@@ -128,6 +128,8 @@ export type TranslationJobSummary = {
   final_failed_items?: number;
 	  provider_backoff_ms?: number | null;
 	  effective_batch_size?: number;
+	  next_experiment_batch_size?: number;
+	  input_token_budget?: number;
 	  speed_mode?: string;
 	  success_streak?: number;
 	  success_delay_floor_ms?: number;
@@ -236,6 +238,8 @@ export type TranslateResponse = {
   final_failed_items?: number;
 	  provider_backoff_ms?: number | null;
 	  effective_batch_size?: number;
+	  next_experiment_batch_size?: number;
+	  input_token_budget?: number;
 	  speed_mode?: string;
 	  success_streak?: number;
 	  success_delay_floor_ms?: number;

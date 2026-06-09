@@ -238,6 +238,8 @@ impl TranslationDb {
                 final_failed_items INTEGER NOT NULL DEFAULT 0,
                 provider_backoff_ms INTEGER,
                 effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                next_experiment_batch_size INTEGER NOT NULL DEFAULT 0,
+                input_token_budget INTEGER NOT NULL DEFAULT 4096,
                 speed_mode TEXT NOT NULL DEFAULT 'steady',
                 success_streak INTEGER NOT NULL DEFAULT 0,
                 success_delay_floor_ms INTEGER NOT NULL DEFAULT 1500,
@@ -319,6 +321,8 @@ impl TranslationDb {
                 "recoverable_provider_failures",
                 "final_failed_items",
                 "effective_batch_size",
+                "next_experiment_batch_size",
+                "input_token_budget",
                 "speed_mode",
                 "success_streak",
                 "success_delay_floor_ms",
@@ -577,6 +581,8 @@ impl TranslationDb {
             ("final_failed_items", "INTEGER NOT NULL DEFAULT 0"),
             ("provider_backoff_ms", "INTEGER"),
             ("effective_batch_size", "INTEGER NOT NULL DEFAULT 0"),
+            ("next_experiment_batch_size", "INTEGER NOT NULL DEFAULT 0"),
+            ("input_token_budget", "INTEGER NOT NULL DEFAULT 4096"),
             ("speed_mode", "TEXT NOT NULL DEFAULT 'steady'"),
             ("success_streak", "INTEGER NOT NULL DEFAULT 0"),
             ("success_delay_floor_ms", "INTEGER NOT NULL DEFAULT 1500"),
@@ -621,6 +627,19 @@ impl TranslationDb {
                             ELSE 16
                         END
                     ELSE effective_batch_size
+                END,
+                next_experiment_batch_size = CASE
+                    WHEN next_experiment_batch_size IS NULL OR next_experiment_batch_size <= 0 THEN
+                        CASE
+                            WHEN effective_batch_size > 0 THEN effective_batch_size
+                            WHEN current_batch_items > 0 THEN current_batch_items
+                            ELSE 16
+                        END
+                    ELSE next_experiment_batch_size
+                END,
+                input_token_budget = CASE
+                    WHEN input_token_budget IS NULL OR input_token_budget <= 0 THEN 4096
+                    ELSE input_token_budget
                 END,
                 failure_reason_counts_json = COALESCE(NULLIF(failure_reason_counts_json, ''), '{}'),
                 adaptive_decision_reason = COALESCE(adaptive_decision_reason, ''),
@@ -2509,13 +2528,15 @@ impl TranslationDb {
                     final_failed_items = ?25,
                     provider_backoff_ms = ?26,
                     effective_batch_size = ?27,
-                    speed_mode = ?28,
-                    success_streak = ?29,
-                    success_delay_floor_ms = ?30,
-                    next_delay_ms = ?31,
-                    failure_reason_counts_json = ?32,
-                    adaptive_decision_reason = ?33,
-                    legacy_checkpoint_only = ?34,
+                    next_experiment_batch_size = ?28,
+                    input_token_budget = ?29,
+                    speed_mode = ?30,
+                    success_streak = ?31,
+                    success_delay_floor_ms = ?32,
+                    next_delay_ms = ?33,
+                    failure_reason_counts_json = ?34,
+                    adaptive_decision_reason = ?35,
+                    legacy_checkpoint_only = ?36,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?1
                 ",
@@ -2547,6 +2568,8 @@ impl TranslationDb {
                     input.final_failed_items,
                     input.provider_backoff_ms,
                     input.effective_batch_size,
+                    input.next_experiment_batch_size,
+                    input.input_token_budget,
                     input.speed_mode,
                     input.success_streak,
                     input.success_delay_floor_ms,
@@ -2588,6 +2611,8 @@ impl TranslationDb {
                     final_failed_items,
                     provider_backoff_ms,
                     effective_batch_size,
+                    next_experiment_batch_size,
+                    input_token_budget,
                     speed_mode,
                     success_streak,
                     success_delay_floor_ms,
@@ -2596,7 +2621,7 @@ impl TranslationDb {
                     adaptive_decision_reason,
                     legacy_checkpoint_only
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)
                 ",
                 params![
                     input.provider_run_id,
@@ -2626,6 +2651,8 @@ impl TranslationDb {
                     input.final_failed_items,
                     input.provider_backoff_ms,
                     input.effective_batch_size,
+                    input.next_experiment_batch_size,
+                    input.input_token_budget,
                     input.speed_mode,
                     input.success_streak,
                     input.success_delay_floor_ms,
@@ -2788,6 +2815,8 @@ impl TranslationDb {
                 translation_jobs.final_failed_items,
                 translation_jobs.provider_backoff_ms,
                 translation_jobs.effective_batch_size,
+                translation_jobs.next_experiment_batch_size,
+                translation_jobs.input_token_budget,
                 translation_jobs.speed_mode,
                 translation_jobs.success_streak,
                 translation_jobs.success_delay_floor_ms,
@@ -2833,6 +2862,8 @@ impl TranslationDb {
                 translation_jobs.final_failed_items,
                 translation_jobs.provider_backoff_ms,
                 translation_jobs.effective_batch_size,
+                translation_jobs.next_experiment_batch_size,
+                translation_jobs.input_token_budget,
                 translation_jobs.speed_mode,
                 translation_jobs.success_streak,
                 translation_jobs.success_delay_floor_ms,
@@ -2878,14 +2909,16 @@ impl TranslationDb {
                 final_failed_items: row.get(25)?,
                 provider_backoff_ms: row.get(26)?,
                 effective_batch_size: row.get(27)?,
-                speed_mode: row.get(28)?,
-                success_streak: row.get(29)?,
-                success_delay_floor_ms: row.get(30)?,
-                next_delay_ms: row.get(31)?,
-                failure_reason_counts_json: row.get(32)?,
-                adaptive_decision_reason: row.get(33)?,
-                legacy_checkpoint_only: row.get(34)?,
-                model: row.get(35)?,
+                next_experiment_batch_size: row.get(28)?,
+                input_token_budget: row.get(29)?,
+                speed_mode: row.get(30)?,
+                success_streak: row.get(31)?,
+                success_delay_floor_ms: row.get(32)?,
+                next_delay_ms: row.get(33)?,
+                failure_reason_counts_json: row.get(34)?,
+                adaptive_decision_reason: row.get(35)?,
+                legacy_checkpoint_only: row.get(36)?,
+                model: row.get(37)?,
             })
         };
         if let Some(target_language) = target_language {

@@ -324,6 +324,8 @@ async fn translate_with_local_provider_running(
             final_failed_items: report.final_failed_items,
             provider_backoff_ms: report.provider_backoff_ms,
             effective_batch_size: report.effective_batch_size,
+            next_experiment_batch_size: report.next_experiment_batch_size,
+            input_token_budget: report.input_token_budget,
             speed_mode: report.speed_mode,
             success_streak: report.success_streak,
             success_delay_floor_ms: report.success_delay_floor_ms,
@@ -522,6 +524,8 @@ pub struct TranslateResponse {
     pub final_failed_items: usize,
     pub provider_backoff_ms: Option<u64>,
     pub effective_batch_size: usize,
+    pub next_experiment_batch_size: usize,
+    pub input_token_budget: usize,
     pub speed_mode: String,
     pub success_streak: usize,
     pub success_delay_floor_ms: u64,
@@ -686,7 +690,7 @@ fn translate_log_env_override(value: &str) -> Option<bool> {
 pub fn format_translate_progress_event(event: &TranslateProgressEvent) -> String {
     let (name, parts) = translate_progress_parts(event);
     format!(
-        "[RPG-Translator][translate] {name} run={run} batch={batch_done}/{batch_total} text={items_done}/{items_total} retry_pending={retry_pending} provider_failures={provider_failures} final_failed={final_failed} parse_failed={parse_failed} validation_failed={validation_failed} skipped={skipped} censored_retry={censored_retry} split={split} speed_mode={speed_mode} success_streak={success_streak} success_floor={success_floor} next_delay={next_delay} effective_batch={effective_batch} backoff={backoff} reasons={reasons} adaptive=\"{adaptive}\" current_items={current_items} last_batch={last_batch} avg_batch={avg_batch} elapsed={elapsed} eta_text={eta_text} eta_batch={eta_batch} model={model} target={target}",
+        "[RPG-Translator][translate] {name} run={run} batch={batch_done}/{batch_total} text={items_done}/{items_total} retry_pending={retry_pending} provider_failures={provider_failures} final_failed={final_failed} parse_failed={parse_failed} validation_failed={validation_failed} skipped={skipped} censored_retry={censored_retry} split={split} speed_mode={speed_mode} success_streak={success_streak} success_floor={success_floor} next_delay={next_delay} effective_batch={effective_batch} next_experiment_batch={next_experiment_batch} token_budget={token_budget} backoff={backoff} reasons={reasons} adaptive=\"{adaptive}\" current_items={current_items} last_batch={last_batch} avg_batch={avg_batch} elapsed={elapsed} eta_text={eta_text} eta_batch={eta_batch} model={model} target={target}",
         name = name,
         run = parts.provider_run_id,
         batch_done = parts.processed_batches,
@@ -709,6 +713,8 @@ pub fn format_translate_progress_event(event: &TranslateProgressEvent) -> String
             .map(format_duration)
             .unwrap_or_else(|| "--:--:--".to_string()),
         effective_batch = parts.effective_batch_size,
+        next_experiment_batch = parts.next_experiment_batch_size,
+        token_budget = parts.input_token_budget,
         backoff = parts
             .provider_backoff_ms
             .map(format_duration)

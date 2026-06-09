@@ -1426,6 +1426,8 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
 	          final_failed_items: 16,
 	          provider_backoff_ms: null,
 	          effective_batch_size: 8,
+          next_experiment_batch_size: 12,
+          input_token_budget: 6144,
 	          speed_mode: "steady",
 	          success_streak: 4,
 	          success_delay_floor_ms: 1250,
@@ -1461,6 +1463,8 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
   expect(screen.getByText("번역 검증 오류: 6")).toBeInTheDocument();
   expect(screen.getByText("건너뜀: 2")).toBeInTheDocument();
   expect(screen.getByText("별표 재시도: 1")).toBeInTheDocument();
+  expect(screen.getByText("다음 실험 배치: 12")).toBeInTheDocument();
+  expect(screen.getByText("입력 토큰 예산: 6,144")).toBeInTheDocument();
   expect(screen.getByText("DB 저장 완료")).toBeInTheDocument();
   expect(screen.getByText("번역 DB에 저장된 행 수입니다. 검토 승인 수가 아닙니다.")).toBeInTheDocument();
   expect(screen.getByText("이어하기 때 재시도")).toBeInTheDocument();

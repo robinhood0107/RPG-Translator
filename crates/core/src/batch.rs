@@ -539,6 +539,8 @@ pub struct BatchRunReport {
     pub final_failed_items: usize,
     pub provider_backoff_ms: Option<u64>,
     pub effective_batch_size: usize,
+    pub next_experiment_batch_size: usize,
+    pub input_token_budget: usize,
     pub speed_mode: String,
     pub success_streak: usize,
     pub success_delay_floor_ms: u64,
@@ -806,6 +808,8 @@ impl BatchTranslator {
             final_failed_items: 0,
             provider_backoff_ms: None,
             effective_batch_size: config.max_items_per_batch.max(1),
+            next_experiment_batch_size: config.max_items_per_batch.max(1),
+            input_token_budget: config.input_token_budget.max(1),
             speed_mode: "steady".to_string(),
             success_streak: 0,
             success_delay_floor_ms: config.provider_spacing.base_success_spacing_ms,
@@ -1041,6 +1045,8 @@ fn emit_batch_progress<F>(
         final_failed_items: report.final_failed_items,
         provider_backoff_ms: report.provider_backoff_ms,
         effective_batch_size: report.effective_batch_size,
+        next_experiment_batch_size: report.next_experiment_batch_size,
+        input_token_budget: report.input_token_budget,
         speed_mode: report.speed_mode.clone(),
         success_streak: report.success_streak,
         success_delay_floor_ms: report.success_delay_floor_ms,
@@ -1110,6 +1116,8 @@ fn persist_translation_job_progress(
         final_failed_items: usize_to_i64(report.final_failed_items),
         provider_backoff_ms: report.provider_backoff_ms.map(u64_to_i64),
         effective_batch_size: usize_to_i64(report.effective_batch_size),
+        next_experiment_batch_size: usize_to_i64(report.next_experiment_batch_size),
+        input_token_budget: usize_to_i64(report.input_token_budget),
         speed_mode: report.speed_mode.clone(),
         success_streak: usize_to_i64(report.success_streak),
         success_delay_floor_ms: u64_to_i64(report.success_delay_floor_ms),
@@ -1448,6 +1456,7 @@ impl BatchProcessor<'_> {
             {
                 self.report.effective_batch_size = (self.report.effective_batch_size / 2).max(1);
             }
+            self.report.next_experiment_batch_size = self.report.effective_batch_size;
             persist_translation_job_progress(
                 self.db,
                 self.report,
@@ -1586,6 +1595,7 @@ impl BatchProcessor<'_> {
                 }
             }
         }
+        self.report.next_experiment_batch_size = self.report.effective_batch_size;
 
         let delay_ms = success_delay_ms(
             request_elapsed_ms,
