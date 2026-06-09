@@ -259,13 +259,6 @@ impl BatchValidator {
                     "provider returned empty translation for id {id}"
                 )));
             }
-            let expected_line_breaks = job.provider_state.provider_text.matches('\n').count();
-            let actual_line_breaks = translation.matches('\n').count();
-            if expected_line_breaks != actual_line_breaks {
-                return Err(Error::invalid_input(format!(
-                    "provider row {id} line-break mismatch: expected {expected_line_breaks}, got {actual_line_breaks}"
-                )));
-            }
             let restored =
                 TextCodec::restore_provider_translation(translation, &job.provider_state)?;
             validated.push(ValidatedTranslation {

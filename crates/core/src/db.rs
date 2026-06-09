@@ -3712,14 +3712,14 @@ fn review_translation_validation_messages_tx(
     if translated_text.trim().is_empty() {
         return Ok(vec!["번역문이 비어 있습니다.".to_string()]);
     }
-    let (source_normalized, source_signature): (String, String) = tx.query_row(
+    let (source_normalized, source_signature, unit_kind): (String, String, String) = tx.query_row(
         "
-        SELECT normalized_text, control_code_signature
+        SELECT normalized_text, control_code_signature, unit_kind
         FROM source_texts
         WHERE id = ?1
         ",
         params![source_text_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let translated = TextCodec::analyze(translated_text);
     let mut messages = Vec::new();
@@ -3732,12 +3732,16 @@ fn review_translation_validation_messages_tx(
     }
     let source_line_breaks = source_normalized.matches('\n').count();
     let translated_line_breaks = translated.normalized_text.matches('\n').count();
-    if source_line_breaks != translated_line_breaks {
+    if source_line_breaks != translated_line_breaks && !is_wrapped_runtime_unit(&unit_kind) {
         messages.push(format!(
             "줄바꿈 수가 원문과 다릅니다. 원문 {source_line_breaks}개, 번역 {translated_line_breaks}개"
         ));
     }
     Ok(messages)
+}
+
+fn is_wrapped_runtime_unit(unit_kind: &str) -> bool {
+    matches!(unit_kind, "message_block" | "scroll_block")
 }
 
 fn insert_qa_finding_tx(tx: &Transaction<'_>, input: &NewQaFinding) -> Result<i64> {

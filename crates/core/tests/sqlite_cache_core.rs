@@ -1363,6 +1363,33 @@ fn review_update_resolves_findings_only_after_machine_validation_passes() -> Res
 }
 
 #[test]
+fn review_update_allows_message_block_line_break_changes_for_runtime_wrapping() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let mut source = source_text("Line one\nLine two");
+    source.unit_kind = "message_block".to_string();
+    let source_id = db.upsert_source_text(&source)?;
+
+    let updated = db.update_review_row(&ReviewUpdateRequest {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text: "런타임에서 감쌀 긴 한 줄 번역".to_string(),
+        provider: "manual-review".to_string(),
+        model: None,
+        review_state: "accepted".to_string(),
+        qa_state: "passed".to_string(),
+        expected_updated_at: None,
+    })?;
+
+    assert_eq!(updated.review_state, "accepted");
+    assert_eq!(updated.qa_state, "passed");
+    assert_eq!(updated.qa_finding_count, 0);
+    assert!(db.qa_findings_for_source(source_id)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
 fn batch_translation_transaction_rolls_back_when_one_row_fails() -> Result<()> {
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;

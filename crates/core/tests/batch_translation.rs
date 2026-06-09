@@ -330,17 +330,16 @@ fn validator_rejects_bad_model_output_shapes() {
 }
 
 #[test]
-fn validator_rejects_message_block_line_break_mismatch() {
+fn validator_allows_message_block_line_break_mismatch_for_runtime_wrapping() {
     let item = ProviderBatchItem {
         id: 1,
         text: "Line one\nLine two".to_string(),
     };
     let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
 
-    assert!(
-        BatchValidator::validate(r#"{"id":1,"translation":"한 줄로 합침"}"#, &jobs).is_err(),
-        "message and scroll block translations must preserve hard newline count"
-    );
+    let validated = BatchValidator::validate(r#"{"id":1,"translation":"한 줄로 합침"}"#, &jobs)
+        .expect("runtime wrapping handles line count changes");
+    assert_eq!(validated[0].translated_text, "한 줄로 합침");
 }
 
 #[test]
