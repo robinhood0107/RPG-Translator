@@ -132,10 +132,27 @@
       return true;
     }
 
+    releaseSurface(surface, owner) {
+      if (!surface || (typeof surface !== 'object' && typeof surface !== 'function')) return false;
+      const current = this.surfaceClaims.get(surface);
+      if (!current) return false;
+      if (owner && current !== owner) return false;
+      this.surfaceClaims.delete(surface);
+      return true;
+    }
+
     claimText(slotId, owner) {
       const current = this.textClaims.get(slotId);
       if (current && current !== owner) return false;
       this.textClaims.set(slotId, owner);
+      return true;
+    }
+
+    releaseTextClaim(slotId, owner) {
+      const current = this.textClaims.get(slotId);
+      if (!current) return false;
+      if (owner && current !== owner) return false;
+      this.textClaims.delete(slotId);
       return true;
     }
 

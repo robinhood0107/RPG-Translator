@@ -295,6 +295,17 @@ test('orchestrator records canonical items and rejects stale render commands', (
   });
 });
 
+test('orchestrator releases surface ownership explicitly', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({ translate: () => null });
+
+  assert.equal(orchestrator.claimSurface(surface, 'window-text'), true);
+  assert.equal(orchestrator.claimSurface(surface, 'bitmap-text'), false);
+  assert.equal(orchestrator.releaseSurface(surface, 'other-owner'), false);
+  assert.equal(orchestrator.releaseSurface(surface, 'window-text'), true);
+  assert.equal(orchestrator.claimSurface(surface, 'bitmap-text'), true);
+});
+
 test('message wrapper preserves escapes and wraps soft lines by capacity', () => {
   assert.deepEqual(
     MessageWrapper.wrap('\\C[3]Emma\\C[0] has a very long thought', { capacity: 12 }),
