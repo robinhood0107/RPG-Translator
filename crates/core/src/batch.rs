@@ -1488,7 +1488,15 @@ impl BatchProcessor<'_> {
             if self.report.recoverable_provider_failures >= source_count.saturating_mul(2)
                 && self.report.effective_batch_size > 1
             {
+                let previous_batch_size = self.report.effective_batch_size;
                 self.report.effective_batch_size = (self.report.effective_batch_size / 2).max(1);
+                self.report.adaptive_decision_reason = format!(
+                    "adaptive: runtime conservative after {}; recoverable_provider_failures={}; batch {}->{}",
+                    reason.as_key(),
+                    self.report.recoverable_provider_failures,
+                    previous_batch_size,
+                    self.report.effective_batch_size
+                );
             }
             self.report.next_experiment_batch_size = self.report.effective_batch_size;
             persist_translation_job_progress(

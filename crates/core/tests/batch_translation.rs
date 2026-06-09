@@ -729,10 +729,31 @@ fn connection_failures_backoff_and_only_then_become_final_failures() {
             .copied(),
         Some(6)
     );
+    assert!(
+        report
+            .adaptive_decision_reason
+            .contains("provider-connection"),
+        "runtime adaptive reductions should explain the provider failure reason"
+    );
+    assert!(
+        report.adaptive_decision_reason.contains("batch"),
+        "runtime adaptive reductions should explain the batch-size decision"
+    );
     assert_eq!(db.qa_finding_count().expect("qa count"), 2);
     let samples = db
         .recent_translation_speed_samples(None, None, 10)
         .expect("speed samples");
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.status == "recoverable_provider"
+                && sample.failure_type.as_deref() == Some("provider-connection")
+                && sample
+                    .adaptive_decision_reason
+                    .contains("provider-connection")
+                && sample.adaptive_decision_reason.contains("batch")),
+        "recoverable provider samples should carry the adaptive reduction reason"
+    );
     assert!(
         samples.iter().any(|sample| sample.status == "final_failed"
             && sample.failure_type.as_deref() == Some("provider-connection")
