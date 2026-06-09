@@ -614,6 +614,82 @@ test('pixi text adapter leaves native text when another owner claimed the surfac
   assert.equal(orchestrator.diagnostics().active_items, 0);
 });
 
+test('pixi text adapter retires removeChildAt removeChildren and destroyed text objects', () => {
+  const index = {
+    translate({ text }) {
+      if (text.endsWith(' JP')) return text.replace(' JP', ' KO');
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+    },
+    PIXI: {},
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+  };
+  root.PIXI.Container.prototype.removeChildAt = function removeChildAt(index) {
+    const [removed] = this.children.splice(index, 1);
+    if (removed) removed.parent = null;
+    return removed;
+  };
+  root.PIXI.Container.prototype.removeChildren = function removeChildren(begin, end) {
+    const removed = this.children.splice(begin, end - begin);
+    removed.forEach((child) => { child.parent = null; });
+    return removed;
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+  root.PIXI.Text.prototype.destroy = function destroy() {
+    this.destroyed = true;
+  };
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const container = new root.PIXI.Container();
+  const first = new root.PIXI.Text('');
+  const second = new root.PIXI.Text('');
+  const third = new root.PIXI.Text('');
+  for (const child of [first, second, third]) {
+    child.parent = container;
+    container.children.push(child);
+  }
+
+  first.text = 'First JP';
+  second.text = 'Second JP';
+  third.text = 'Third JP';
+  assert.equal(orchestrator.diagnostics().active_items, 3);
+
+  assert.equal(container.removeChildAt(0), first);
+  assert.equal(orchestrator.diagnostics().active_items, 2);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+
+  assert.deepEqual(container.removeChildren(0, 1), [second]);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+  assert.equal(orchestrator.diagnostics().archived_items, 2);
+
+  third.destroy();
+  assert.equal(third._rpgTranslatorPixiItemId, null);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 3);
+});
+
 test('boot installs cache-only overlay without provider surfaces', async () => {
   const root = {
     document: { body: null },
