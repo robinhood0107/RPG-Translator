@@ -359,6 +359,13 @@ test('message wrapper treats multi-letter RPG Maker escapes as one zero-width to
   );
 });
 
+test('message wrapper preserves form-feed page breaks inside the rendered line', () => {
+  assert.deepEqual(
+    MessageWrapper.wrap('Alpha\fBeta', { capacity: 20 }),
+    ['Alpha\fBeta'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };

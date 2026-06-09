@@ -17,9 +17,7 @@
     let current = '';
     for (const token of tokens) {
       if (token.type === 'page') {
-        output.push(cleanupLine(current));
-        current = '';
-        output.push(token.raw);
+        current += token.raw;
         continue;
       }
       current += token.raw;
@@ -34,11 +32,9 @@
     let lastBreak = -1;
     for (const token of tokens) {
       if (token.type === 'page') {
-        output.push(cleanupLine(current));
-        current = '';
         width = 0;
         lastBreak = -1;
-        output.push(token.raw);
+        current += token.raw;
         continue;
       }
       const nextWidth = width + token.width;
