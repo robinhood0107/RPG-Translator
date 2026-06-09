@@ -5,6 +5,7 @@
   const CLEAR_TOKEN = 'rpg-translator-message-clear-v1';
   const PROCESS_TOKEN = 'rpg-translator-message-process-v1';
   const LIFECYCLE_TOKEN = 'rpg-translator-message-lifecycle-v1';
+  const FORESIGHT_ORIGIN_TOKEN = 'rpg-translator-message-origin-v1';
   const BREAK_SENTINEL_PREFIX = '\uE000RPGT_BR_';
   const BREAK_SENTINEL_SUFFIX = '_RPGT\uE001';
 
@@ -55,6 +56,7 @@
       installPendingRedrawHook(prototype, scope);
       prototype.__rpgTranslatorMessageInstalled = INSTALL_TOKEN;
       wrapGameMessageClear(scope, translator, trackedWindows);
+      installForesightOriginHooks(scope);
       return true;
     }
   }
@@ -359,6 +361,7 @@
       const original = prototype.clear;
       prototype.clear = function clearWithMessageRetire(...args) {
         retireWindowsForMessage(scope, translator, trackedWindows, this, 'game-message-clear');
+        clearMessageOrigin(this);
         return original.apply(this, args);
       };
       prototype.clear.__rpgTranslatorOriginal = original;
@@ -369,11 +372,148 @@
       const original = message.clear;
       message.clear = function clearSingletonWithMessageRetire(...args) {
         retireWindowsForMessage(scope, translator, trackedWindows, this, 'game-message-clear');
+        clearMessageOrigin(this);
         return original.apply(this, args);
       };
       message.clear.__rpgTranslatorOriginal = original;
       message.clear.__rpgTranslatorMessageClear = CLEAR_TOKEN;
     }
+  }
+
+  function installForesightOriginHooks(scope) {
+    const interpreterPrototype = scope && scope.Game_Interpreter && scope.Game_Interpreter.prototype;
+    if (interpreterPrototype
+      && typeof interpreterPrototype.command101 === 'function'
+      && interpreterPrototype.command101.__rpgTranslatorMessageOrigin !== FORESIGHT_ORIGIN_TOKEN) {
+      const original = interpreterPrototype.command101;
+      interpreterPrototype.command101 = function command101WithMessageOrigin(...args) {
+        const pendingOrigin = createPendingMessageOrigin(scope, this);
+        if (pendingOrigin) clearMessageOrigin(pendingOrigin.gameMessage);
+        const result = original.apply(this, args);
+        if (pendingOrigin) attachCompletedMessageOrigin(scope, pendingOrigin);
+        return result;
+      };
+      interpreterPrototype.command101.__rpgTranslatorOriginal = original;
+      interpreterPrototype.command101.__rpgTranslatorMessageOrigin = FORESIGHT_ORIGIN_TOKEN;
+    }
+
+    const messagePrototype = scope && scope.Game_Message && scope.Game_Message.prototype;
+    if (messagePrototype
+      && typeof messagePrototype.add === 'function'
+      && messagePrototype.add.__rpgTranslatorMessageOrigin !== FORESIGHT_ORIGIN_TOKEN) {
+      const original = messagePrototype.add;
+      messagePrototype.add = function addWithMessageOrigin(...args) {
+        const result = original.apply(this, args);
+        attachGameMessageAddOrigin(scope, this);
+        return result;
+      };
+      messagePrototype.add.__rpgTranslatorOriginal = original;
+      messagePrototype.add.__rpgTranslatorMessageOrigin = FORESIGHT_ORIGIN_TOKEN;
+    }
+  }
+
+  function createPendingMessageOrigin(scope, interpreter) {
+    const gameMessage = scope && scope.$gameMessage;
+    if (!gameMessage || !interpreter || !Array.isArray(interpreter._list)) return null;
+    if (typeof gameMessage.isBusy === 'function' && gameMessage.isBusy()) return null;
+    const startIndex = integerIndex(interpreter._index);
+    if (startIndex === null || startIndex < 0 || startIndex >= interpreter._list.length) return null;
+    const command = interpreter._list[startIndex];
+    if (!command || Number(command.code) !== 101) return null;
+    return {
+      gameMessage,
+      interpreter,
+      list: interpreter._list,
+      startIndex,
+      indent: Number(command.indent) || 0,
+    };
+  }
+
+  function attachCompletedMessageOrigin(scope, pendingOrigin) {
+    if (!pendingOrigin || !pendingOrigin.gameMessage || pendingOrigin.interpreter._list !== pendingOrigin.list) return false;
+    const command = pendingOrigin.list[pendingOrigin.startIndex];
+    if (!command || Number(command.code) !== 101 || (Number(command.indent) || 0) !== pendingOrigin.indent) return false;
+    const block = parseMessageOriginBlock(pendingOrigin.list, pendingOrigin.startIndex, pendingOrigin.indent);
+    if (!block || !String(block.rawText || '').trim()) return false;
+    pendingOrigin.gameMessage._trMessageOrigin = {
+      gameMessage: pendingOrigin.gameMessage,
+      interpreter: pendingOrigin.interpreter,
+      interpreterId: getInterpreterOriginId(scope, pendingOrigin.interpreter),
+      listId: getInterpreterOriginId(scope, pendingOrigin.interpreter),
+      commonEventId: null,
+      commonEventName: '',
+      list: pendingOrigin.list,
+      startIndex: pendingOrigin.startIndex,
+      nextIndex: block.nextIndex,
+      indent: pendingOrigin.indent,
+      rawText: block.rawText,
+      frames: [],
+      createdAt: Date.now(),
+    };
+    return true;
+  }
+
+  function attachGameMessageAddOrigin(scope, gameMessage) {
+    if (!gameMessage) return false;
+    const rawText = readMessageBlock(gameMessage);
+    if (!String(rawText || '').trim()) return false;
+    gameMessage._trMessageOrigin = {
+      gameMessage,
+      interpreter: null,
+      interpreterId: getInterpreterOriginId(scope, null),
+      listId: getInterpreterOriginId(scope, null),
+      commonEventId: null,
+      commonEventName: '',
+      list: [],
+      startIndex: 0,
+      nextIndex: 0,
+      indent: 0,
+      rawText,
+      originKind: 'game-message-add',
+      verified: true,
+      frames: [],
+      createdAt: Date.now(),
+    };
+    return true;
+  }
+
+  function parseMessageOriginBlock(list, startIndex, indent) {
+    if (!Array.isArray(list)) return null;
+    const numericStart = integerIndex(startIndex);
+    if (numericStart === null || numericStart < 0 || numericStart >= list.length) return null;
+    const command = list[numericStart];
+    if (!command || Number(command.code) !== 101 || (Number(command.indent) || 0) !== indent) return null;
+    const lines = [];
+    let nextIndex = numericStart + 1;
+    while (nextIndex < list.length) {
+      const next = list[nextIndex];
+      if (!next || Number(next.code) !== 401 || (Number(next.indent) || 0) !== indent) break;
+      const params = Array.isArray(next.parameters) ? next.parameters : [];
+      lines.push(String(params[0] ?? ''));
+      nextIndex += 1;
+    }
+    return { nextIndex, rawText: lines.join('\n') };
+  }
+
+  function clearMessageOrigin(gameMessage) {
+    if (gameMessage) gameMessage._trMessageOrigin = null;
+  }
+
+  function getInterpreterOriginId(scope, interpreter) {
+    if (scope && scope.$gameMap && scope.$gameMap._interpreter === interpreter) return 'map';
+    if (scope && scope.$gameTroop && scope.$gameTroop._interpreter === interpreter) return 'troop';
+    const commonEvents = scope && scope.$gameMap && scope.$gameMap._commonEvents;
+    if (Array.isArray(commonEvents)) {
+      for (let index = 0; index < commonEvents.length; index += 1) {
+        if (commonEvents[index] && commonEvents[index]._interpreter === interpreter) return `common:${index}`;
+      }
+    }
+    return 'attached';
+  }
+
+  function integerIndex(value) {
+    const number = Number(value);
+    return Number.isInteger(number) ? number : null;
   }
 
   function retireWindowsForMessage(scope, translator, trackedWindows, message, reason) {

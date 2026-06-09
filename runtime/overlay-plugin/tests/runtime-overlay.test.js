@@ -1372,6 +1372,63 @@ test('message adapter converts escapes while preserving origin-aware hard breaks
   assert.deepEqual(root.$gameMessage._texts, ['값 42', '두 번째 줄']);
 });
 
+test('message adapter attaches interpreter message origin for cache-only foresight', () => {
+  const list = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Current message'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Next message'] },
+    { code: 0, indent: 0, parameters: [] },
+  ];
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Next message') return '다음 메시지';
+      return null;
+    },
+  };
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    $gameMessage: {
+      _texts: ['Current message'],
+      isBusy() { return false; },
+    },
+    Game_Interpreter: function GameInterpreter() {
+      this._list = list;
+      this._index = 0;
+    },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Game_Interpreter.prototype.command101 = function command101() {
+    return true;
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const interpreter = new root.Game_Interpreter();
+  assert.equal(interpreter.command101(), true);
+
+  assert.equal(root.$gameMessage._trMessageOrigin.rawText, 'Current message');
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: root.$gameMessage._trMessageOrigin,
+  });
+
+  assert.deepEqual(blocks.map((block) => block.rawText), ['Next message']);
+  assert.deepEqual(requests, ['Next message']);
+  assert.equal(blocks[0].cacheStatus, 'hit');
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {
