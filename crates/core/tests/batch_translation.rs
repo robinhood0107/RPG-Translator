@@ -646,6 +646,20 @@ fn provider_503_is_retry_pending_until_retry_succeeds() {
             .iter()
             .any(|event| matches!(event, TranslateProgressEvent::ProviderBackoff(snapshot) if snapshot.provider_backoff_ms == Some(0)))
     );
+    let samples = db
+        .recent_translation_speed_samples(None, None, 10)
+        .expect("speed samples");
+    assert!(
+        samples.iter().any(|sample| sample.status == "recoverable_provider"
+            && sample.failure_type.as_deref() == Some("provider-503")),
+        "recoverable provider failures should seed adaptive failure-rate history"
+    );
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.status == "success_after_retry"),
+        "retry success should still seed adaptive throughput history"
+    );
 }
 
 #[test]

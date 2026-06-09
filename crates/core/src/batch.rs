@@ -1379,7 +1379,8 @@ impl BatchProcessor<'_> {
                         return Err(error);
                     }
                     if let Some(reason) = ProviderFailureReason::classify(&error) {
-                        self.retry_provider_failure(batch, reason, error)?;
+                        let request_elapsed_ms = elapsed_ms(request_started);
+                        self.retry_provider_failure(batch, reason, error, request_elapsed_ms)?;
                         return Ok(());
                     }
                     last_error = error;
@@ -1449,6 +1450,7 @@ impl BatchProcessor<'_> {
         batch: &[BatchJob],
         reason: ProviderFailureReason,
         first_error: Error,
+        first_request_elapsed_ms: u64,
     ) -> Result<()> {
         let source_count = count_batch_source_text_ids(batch);
         let mut last_message = first_error.to_string();
@@ -1459,6 +1461,13 @@ impl BatchProcessor<'_> {
             self.record_final_provider_failure(batch, reason, &last_message)?;
             return Ok(());
         }
+        self.record_speed_sample(
+            batch,
+            first_request_elapsed_ms,
+            0,
+            "recoverable_provider",
+            Some(reason.as_key()),
+        )?;
         for backoff_ms in schedule {
             self.note_recoverable_provider_failure(reason, source_count, Some(backoff_ms));
             if self.report.recoverable_provider_failures >= source_count.saturating_mul(2)
@@ -1532,11 +1541,19 @@ impl BatchProcessor<'_> {
                     }
                 },
                 Err(error) => {
+                    let request_elapsed_ms = elapsed_ms(request_started);
                     if is_pause_abort_error(&error) {
                         return Err(error);
                     }
                     if let Some(next_reason) = ProviderFailureReason::classify(&error) {
                         last_message = error.to_string();
+                        self.record_speed_sample(
+                            batch,
+                            request_elapsed_ms,
+                            0,
+                            "recoverable_provider",
+                            Some(next_reason.as_key()),
+                        )?;
                         if next_reason != reason {
                             self.note_recoverable_provider_failure(next_reason, source_count, None);
                         }
