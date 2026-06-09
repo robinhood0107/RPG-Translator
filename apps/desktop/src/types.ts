@@ -5,6 +5,27 @@ export type ProjectSummary = {
   engine: "mv" | "mz" | "unknown" | string;
 };
 
+export type ProjectWorkspaceSummary = {
+  project_file_path: string;
+  artifact_root: string;
+  db_path: string;
+  game_root: string;
+  display_name: string;
+  engine: "mv" | "mz" | "unknown" | string;
+  database_missing: boolean;
+  checkpoints_path: string;
+  exports_path: string;
+  installs_path: string;
+  logs_path: string;
+  temp_path: string;
+};
+
+export type DuplicateProjectCleanupReport = {
+  merged_project_count: number;
+  survivor_project_ids: number[];
+  removed_project_ids: number[];
+};
+
 export type DashboardSummary = {
   project_id: number;
   target_language: string;
@@ -46,6 +67,94 @@ export type ProviderRunStatus = {
   failure_detail?: string | null;
 };
 
+export type WorkbenchSettings = {
+  selected_project_id?: number | null;
+  source_language: string;
+  target_language: string;
+  provider_base_url: string;
+  provider_model: string;
+  system_prompt: string;
+  export_dir: string;
+  active_tab: string;
+  show_hover_help: boolean;
+  ui_font_size: "small" | "medium" | "large";
+};
+
+export type ReviewCounts = {
+  all: number;
+  missing: number;
+  pending: number;
+  accepted: number;
+  reviewed: number;
+  attention: number;
+  exportable: number;
+  open_issues?: number;
+  json_parse?: number;
+  validation?: number;
+  final_failed?: number;
+  clean_approvable?: number;
+};
+
+export type CheckpointSummary = {
+  path: string;
+  exists: boolean;
+  provider_run_id?: number | null;
+  target_language: string;
+  completed_count: number;
+  failed_count: number;
+  failure_type_counts?: Record<string, number>;
+};
+
+export type TranslationJobSummary = {
+  id: number;
+  provider_run_id?: number | null;
+  project_id?: number | null;
+  source_language: string;
+  target_language: string;
+  checkpoint_path: string;
+  status: string;
+  completed_items: number;
+  failed_items: number;
+  total_items: number;
+  processed_batches: number;
+  total_batches: number;
+  split_batches: number;
+  parse_failed_items: number;
+  validation_failed_items: number;
+  skipped_items: number;
+  censored_retry_count: number;
+  retry_pending_items?: number;
+  recoverable_provider_failures?: number;
+  final_failed_items?: number;
+	  provider_backoff_ms?: number | null;
+	  effective_batch_size?: number;
+	  speed_mode?: string;
+	  success_streak?: number;
+	  success_delay_floor_ms?: number;
+	  next_delay_ms?: number | null;
+	  failure_reason_counts_json?: string;
+	  legacy_checkpoint_only?: boolean;
+  item_eta_ms?: number | null;
+  batch_eta_ms?: number | null;
+  last_batch_elapsed_ms?: number | null;
+  avg_batch_elapsed_ms?: number | null;
+  current_batch_items: number;
+  elapsed_ms: number;
+  model?: string | null;
+};
+
+export type HydrateWorkbenchResponse = {
+  workspace?: ProjectWorkspaceSummary | null;
+  projects: ProjectSummary[];
+  selected_project_id?: number | null;
+  settings: WorkbenchSettings;
+  dashboard?: DashboardSummary | null;
+  review_counts?: ReviewCounts | null;
+  checkpoint?: CheckpointSummary | null;
+  latest_job?: TranslationJobSummary | null;
+  stale_runs_interrupted: number;
+};
+
 export type ReviewQueueRow = {
   source_text_id: number;
   source_language: string;
@@ -63,6 +172,26 @@ export type ReviewQueueRow = {
   review_state: string;
   qa_state: string;
   qa_finding_count: number;
+  qa_findings?: QaFinding[];
+  issue_badges?: string[];
+  translation_updated_at?: string | null;
+  draft_text?: string | null;
+  draft_updated_at?: string | null;
+  has_unapplied_draft?: boolean;
+};
+
+export type QaFinding = {
+  id: number;
+  source_text_id: number;
+  translation_id?: number | null;
+  target_language?: string | null;
+  provider_run_id?: number | null;
+  finding_type: string;
+  severity: string;
+  message: string;
+  status: string;
+  resolved_at?: string | null;
+  details_json: string;
 };
 
 export type ScanPersistenceReport = {
@@ -70,22 +199,97 @@ export type ScanPersistenceReport = {
   snapshot_id: number;
   source_text_count: number;
   occurrence_count: number;
+  added_source_text_count: number;
+  removed_occurrence_count: number;
+  unchanged_source_text_count: number;
   rejected_count: number;
   skipped_count: number;
 };
 
 export type TranslateResponse = {
+  status: "completed" | "completed_with_failures" | "paused" | string;
   provider_run_id: number;
   accepted_count: number;
   failed_count: number;
   split_batches: number;
   failures: Array<{ source_text_ids: number[]; message: string }>;
+  completed_items: number;
+  failed_items: number;
+  total_items: number;
+  processed_batches: number;
+  total_batches: number;
+  elapsed_ms: number;
+  eta_ms?: number | null;
+  item_eta_ms?: number | null;
+  batch_eta_ms?: number | null;
+  last_batch_elapsed_ms?: number | null;
+  avg_batch_elapsed_ms?: number | null;
+  current_batch_items?: number;
+  started_completed_items?: number;
+  parse_failed_items?: number;
+  validation_failed_items?: number;
+  skipped_items?: number;
+  censored_retry_count?: number;
+  retry_pending_items?: number;
+  recoverable_provider_failures?: number;
+  final_failed_items?: number;
+	  provider_backoff_ms?: number | null;
+	  effective_batch_size?: number;
+	  speed_mode?: string;
+	  success_streak?: number;
+	  success_delay_floor_ms?: number;
+	  next_delay_ms?: number | null;
+	  failure_reason_counts?: Record<string, number>;
+	  legacy_checkpoint_only?: boolean;
+	  model?: string | null;
+	};
+
+export type ProviderSpeedBenchmarkRun = {
+  run_index: number;
+  latency_ms: number;
+  item_count: number;
+  char_count: number;
+};
+
+export type ProviderSpeedBenchmarkReport = {
+  warmup_ms?: number | null;
+  runs: ProviderSpeedBenchmarkRun[];
+  average_ms?: number | null;
+  median_ms?: number | null;
+  p95_ms?: number | null;
+  items_per_minute?: number | null;
+  chars_per_second?: number | null;
+  estimated_paced_items_per_minute?: number | null;
+  resolved_model?: string | null;
 };
 
 export type DiagnosticsResponse = {
   dashboard: DashboardSummary;
   runtime_provider_surface: string;
   runtime_ui_surface: string;
+  integrity_check?: string;
+  foreign_key_violations?: number;
+  journal_mode?: string;
+  busy_timeout_ms?: number;
+  stale_running_provider_runs?: number;
+  checkpoint_completed_count?: number;
+  checkpoint_failed_count?: number;
+  exportable_count?: number;
+  unscanned_runtime_candidate_count?: number;
+  unscanned_unique_source_count?: number;
+  unscanned_occurrence_count?: number;
+  export_missing_count?: number;
+  unsupported_string_candidate_count?: number;
+  coverage_samples?: CoverageAuditSample[];
+  latest_job?: TranslationJobSummary | null;
+};
+
+export type CoverageAuditSample = {
+  category: string;
+  text: string;
+  file_path: string;
+  json_path: string;
+  reason?: string | null;
 };
 
 export type ExportBundleResponse = {

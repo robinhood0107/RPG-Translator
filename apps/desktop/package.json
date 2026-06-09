@@ -4,19 +4,26 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "dev": "npm run web:dev",
+    "build": "npm run web:build",
+    "web:dev": "vite",
+    "web:build": "tsc -p tsconfig.json --noEmit && vite build",
+    "web:preview": "vite preview --host 127.0.0.1",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "npm run web:preview"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "lucide-react": "1.17.0",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.11.0",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.2",
     "@types/react": "19.2.17",

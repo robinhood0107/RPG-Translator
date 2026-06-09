@@ -20,6 +20,15 @@
       this.manifest = bundle.manifest || {};
       this.records = Array.isArray(bundle.records) ? bundle.records : [];
       this.byKey = new Map();
+      this.cacheHits = 0;
+      this.cacheMisses = 0;
+      this.recentMisses = [];
+      this.missLogger = bundle.missLogger || null;
+      this.maxNegativeMisses = Number.isFinite(bundle.maxNegativeMisses)
+        ? Math.max(0, Math.floor(bundle.maxNegativeMisses))
+        : 1024;
+      this.negativeMissKeys = new Set();
+      this.negativeMissOrder = [];
       for (const record of this.records) {
         if (record && typeof record.cache_key === 'string') {
           this.byKey.set(record.cache_key, record);
@@ -38,7 +47,60 @@
         contextHash: request.contextHash || null,
       });
       const record = this.byKey.get(cacheKey);
-      return record ? record.translation : null;
+      if (record) {
+        this.cacheHits += 1;
+        return record.translation;
+      }
+      this.cacheMisses += 1;
+      if (this.rememberMiss(cacheKey)) {
+        this.recordMiss(request, analysis, cacheKey);
+      }
+      return null;
+    }
+
+    diagnostics() {
+      return {
+        cache_hits: this.cacheHits,
+        cache_misses: this.cacheMisses,
+        recent_misses: this.recentMisses.slice(),
+      };
+    }
+
+    recordMiss(request, analysis, cacheKey) {
+      const miss = {
+        text: String(request.text || ''),
+        normalized_text: analysis.normalizedText,
+        control_code_signature: analysis.controlCodeSignature,
+        cache_key: cacheKey,
+        engine: request.engine || 'unknown',
+        source_language: request.sourceLanguage || this.manifest.source_language || '',
+        target_language: request.targetLanguage || this.manifest.target_language || '',
+        context_hash: request.contextHash || null,
+      };
+      this.recentMisses.push({
+        text: miss.text,
+        normalized_text: miss.normalized_text,
+        control_code_signature: miss.control_code_signature,
+        cache_key: miss.cache_key,
+      });
+      if (this.recentMisses.length > 20) {
+        this.recentMisses.shift();
+      }
+      if (this.missLogger && typeof this.missLogger.recordMiss === 'function') {
+        this.missLogger.recordMiss(miss);
+      }
+    }
+
+    rememberMiss(cacheKey) {
+      if (this.maxNegativeMisses === 0) return true;
+      if (this.negativeMissKeys.has(cacheKey)) return false;
+      this.negativeMissKeys.add(cacheKey);
+      this.negativeMissOrder.push(cacheKey);
+      while (this.negativeMissOrder.length > this.maxNegativeMisses) {
+        const oldest = this.negativeMissOrder.shift();
+        this.negativeMissKeys.delete(oldest);
+      }
+      return true;
     }
   }
 

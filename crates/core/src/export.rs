@@ -107,13 +107,15 @@ impl ExportBuilder {
             .get_project(project_id)?
             .ok_or_else(|| Error::invalid_input(format!("project {project_id} not found")))?;
         let review_states = policy.review_state_refs();
-        let rows = db.exportable_translations(target_language, &review_states)?;
+        let rows = db.exportable_translations(project_id, target_language, &review_states)?;
         if rows.is_empty() {
             return Err(Error::invalid_input(format!(
                 "no exportable translations for target language {target_language}"
             )));
         }
-        let total_count = db.translation_count_for_target(target_language)? as usize;
+        let total_count = db
+            .workbench_dashboard_summary(project_id, target_language)?
+            .source_text_count as usize;
         let source_language = single_source_language(&rows)?;
 
         fs::create_dir_all(output_dir).map_err(|error| {

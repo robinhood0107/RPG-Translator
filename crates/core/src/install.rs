@@ -17,6 +17,7 @@ const INSTALL_MANIFEST_FILE: &str = "install-manifest.json";
 const PLUGINS_BACKUP_FILE: &str = "plugins.js.backup";
 const RUNTIME_SUPPORT_FILES: &[&str] = &[
     "text-codec.js",
+    "runtime-miss-logger.js",
     "lookup-index.js",
     "cache-loader.js",
     "message-adapter.js",
@@ -33,7 +34,6 @@ pub struct InstallOptions {
     pub runtime_dir: Option<PathBuf>,
     pub project_id: Option<i64>,
     pub export_id: Option<i64>,
-    pub allow_dontupload: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +48,6 @@ pub struct InstallReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackOptions {
     pub manifest_path: PathBuf,
-    pub allow_dontupload: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +95,6 @@ impl Installer {
         db: Option<&mut TranslationDb>,
         options: &InstallOptions,
     ) -> Result<InstallReport> {
-        reject_dontupload(&options.game_root, options.allow_dontupload)?;
         ExportBuilder::verify_bundle(&options.export_dir)?;
 
         let detected = RpgMakerDetector::detect(&options.game_root)?;
@@ -232,7 +230,6 @@ impl RollbackManager {
             )));
         }
         let game_root = PathBuf::from(&manifest.game_root);
-        reject_dontupload(&game_root, options.allow_dontupload)?;
 
         let plugins_file = PathBuf::from(&manifest.plugins_file);
         let plugins_backup_path = PathBuf::from(&manifest.plugins_backup_path);
@@ -459,24 +456,6 @@ fn normalize_components(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn reject_dontupload(game_root: &Path, allow_dontupload: bool) -> Result<()> {
-    if allow_dontupload {
-        return Ok(());
-    }
-    let has_dontupload = game_root.components().any(|component| {
-        component
-            .as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("dontupload")
-    });
-    if has_dontupload {
-        return Err(Error::invalid_input(
-            "refusing to mutate dontupload without explicit allow flag",
-        ));
-    }
-    Ok(())
-}
-
 fn layout_key(layout: &GameLayoutKind) -> &'static str {
     match layout {
         GameLayoutKind::Direct => "direct",
@@ -523,5 +502,5 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    path.to_string_lossy().into_owned()
 }

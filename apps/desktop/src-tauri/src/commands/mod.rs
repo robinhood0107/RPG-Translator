@@ -5,5 +5,6 @@ pub mod review;
 pub mod scan;
 mod shared;
 pub mod translate;
+pub mod workbench;
 
 pub use shared::{CommandError, CommandResult};

@@ -1,10 +1,9 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Error, NewOccurrence, NewProject, Result, ScanOptions, ScanPersistenceReport, TranslationDb,
+    Error, NewProject, Result, ScanOptions, ScanPersistenceReport, ScanProgressEvent, TranslationDb,
 };
 
 pub struct WorkbenchService;
@@ -15,10 +14,23 @@ impl WorkbenchService {
         game_root: impl AsRef<Path>,
         options: ScanOptions,
     ) -> Result<ScanPersistenceReport> {
+        Self::scan_game_with_progress(db, game_root, options, |_| {})
+    }
+
+    pub fn scan_game_with_progress<F>(
+        db: &mut TranslationDb,
+        game_root: impl AsRef<Path>,
+        options: ScanOptions,
+        on_progress: F,
+    ) -> Result<ScanPersistenceReport>
+    where
+        F: FnMut(&ScanProgressEvent),
+    {
         let game_root = game_root.as_ref();
-        let report = crate::GameScanner::scan(game_root, options)?;
+        let mut on_progress = on_progress;
+        let report = crate::GameScanner::scan_with_progress(game_root, options, &mut on_progress)?;
         let project_id = db.upsert_project(&NewProject {
-            game_root: report.detected_game.game_root.clone(),
+            game_root: game_root.to_string_lossy().into_owned(),
             display_name: display_name(game_root)?,
             engine: report.detected_game.engine.clone(),
         })?;
@@ -28,39 +40,35 @@ impl WorkbenchService {
             &data_root_hash(&report)?,
         )?;
 
-        let mut source_text_ids = BTreeSet::new();
-        let mut occurrence_count = 0i64;
-        for occurrence in &report.accepted {
-            let source_text_id = db.upsert_source_text(&occurrence.source_text)?;
-            source_text_ids.insert(source_text_id);
-            db.insert_project_occurrence(
-                project_id,
-                &NewOccurrence {
-                    project_id: Some(project_id),
-                    source_text_id,
-                    file_path: occurrence.context.file_path.clone(),
-                    json_path: occurrence.context.json_path.clone(),
-                    entity_type: occurrence.context.entity_type.clone(),
-                    event_id: occurrence.context.event_id,
-                    page_index: occurrence.context.page_index,
-                    command_index: occurrence.context.command_index,
-                    command_code: occurrence.context.command_code,
-                    parameter_index: occurrence.context.parameter_index,
-                    object_key: occurrence.context.object_key.clone(),
-                    extraction_rule_id: occurrence.context.extraction_rule_id.clone(),
-                },
-            )?;
-            occurrence_count += 1;
-        }
+        on_progress(&ScanProgressEvent::Persisting {
+            occurrence_count: report.accepted.len(),
+        });
+        let persistence_stats =
+            db.persist_project_scan_occurrences(project_id, snapshot_id, &report.accepted)?;
 
-        Ok(ScanPersistenceReport {
+        let persistence = ScanPersistenceReport {
             project_id,
             snapshot_id,
-            source_text_count: source_text_ids.len() as i64,
-            occurrence_count,
+            source_text_count: persistence_stats.source_text_count,
+            occurrence_count: persistence_stats.occurrence_count,
+            added_source_text_count: persistence_stats.added_source_text_count,
+            removed_occurrence_count: persistence_stats.removed_occurrence_count,
+            unchanged_source_text_count: persistence_stats.unchanged_source_text_count,
             rejected_count: report.rejected.len() as i64,
             skipped_count: report.skipped.len() as i64,
-        })
+        };
+        on_progress(&ScanProgressEvent::Persisted {
+            project_id: persistence.project_id,
+            snapshot_id: persistence.snapshot_id,
+            source_text_count: persistence.source_text_count,
+            occurrence_count: persistence.occurrence_count,
+            added_source_text_count: persistence.added_source_text_count,
+            removed_occurrence_count: persistence.removed_occurrence_count,
+            unchanged_source_text_count: persistence.unchanged_source_text_count,
+            rejected_count: persistence.rejected_count,
+            skipped_count: persistence.skipped_count,
+        });
+        Ok(persistence)
     }
 }
 

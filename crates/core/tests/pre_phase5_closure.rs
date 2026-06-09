@@ -1,8 +1,8 @@
 use std::fs;
 
 use rpg_translator_core::{
-    BatchTranslator, BatchTranslatorConfig, Engine, NewProject, NewSourceText, NewTranslation,
-    Result, TextCodec, TranslationDb,
+    BatchTranslator, BatchTranslatorConfig, Engine, NewOccurrence, NewProject, NewSourceText,
+    NewTranslation, Result, TextCodec, TranslationDb,
 };
 use serde::Deserialize;
 
@@ -63,19 +63,37 @@ fn db_exposes_project_snapshot_and_exportable_translation_rows() -> Result<()> {
         visible_text: "こんにちは".to_string(),
         control_code_signature: "\\C[1]".to_string(),
     })?;
+    db.insert_project_occurrence(
+        project_id,
+        &NewOccurrence {
+            project_id: Some(project_id),
+            source_text_id: source_id,
+            file_path: "data/Map001.json".to_string(),
+            json_path: "$.events[1].pages[0].list[0].parameters[0]".to_string(),
+            entity_type: "event_command".to_string(),
+            event_id: Some(1),
+            page_index: Some(0),
+            command_index: Some(0),
+            command_code: Some(401),
+            parameter_index: Some(0),
+            object_key: None,
+            extraction_rule_id: "event.message.line".to_string(),
+        },
+    )?;
     db.upsert_translation(&NewTranslation {
         source_text_id: source_id,
         target_language: "ko".to_string(),
         translated_text: "\\C[1]안녕".to_string(),
         provider: "fake".to_string(),
         model: Some("fixture".to_string()),
+        provider_run_id: None,
         review_state: "accepted".to_string(),
         qa_state: "passed".to_string(),
     })?;
 
     let project = db.get_project(project_id)?.expect("project exists");
     let snapshot = db.get_game_snapshot(snapshot_id)?.expect("snapshot exists");
-    let rows = db.exportable_translations("ko", &["accepted", "reviewed"])?;
+    let rows = db.exportable_translations(project_id, "ko", &["accepted", "reviewed"])?;
 
     assert_eq!(project.display_name, "Synthetic Game");
     assert_eq!(project.engine, Engine::Mz);
@@ -126,7 +144,7 @@ fn batch_report_preserves_validation_failure_detail() -> Result<()> {
     );
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].source_text_id, source_id);
-    assert_eq!(findings[0].finding_type, "batch-validation");
+    assert_eq!(findings[0].finding_type, "provider-json-parse");
     assert!(findings[0].message.contains("provider output"));
 
     Ok(())

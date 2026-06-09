@@ -2,9 +2,9 @@ use std::fs;
 use std::process::Command;
 
 use rpg_translator_core::{
-    CacheKeyBuilder, CacheKeyParts, Engine, ExportBuilder, ExportPolicy, NewProject, NewSourceText,
-    NewTranslation, OverlayConfig, Result, RuntimeCacheRecord, RuntimeExportManifest, TextCodec,
-    TranslationDb,
+    CacheKeyBuilder, CacheKeyParts, Engine, ExportBuilder, ExportPolicy, NewOccurrence, NewProject,
+    NewSourceText, NewTranslation, OverlayConfig, Result, RuntimeCacheRecord,
+    RuntimeExportManifest, TextCodec, TranslationDb,
 };
 use tempfile::tempdir;
 
@@ -16,14 +16,37 @@ fn seed_project(db: &mut TranslationDb) -> Result<i64> {
     })
 }
 
-fn seed_source(db: &mut TranslationDb, text: &str) -> Result<i64> {
+fn seed_source(
+    db: &mut TranslationDb,
+    project_id: i64,
+    text: &str,
+    command_index: i64,
+) -> Result<i64> {
     let analysis = TextCodec::analyze(text);
-    db.upsert_source_text(&NewSourceText {
+    let source_text_id = db.upsert_source_text(&NewSourceText {
         source_language: "ja".to_string(),
         normalized_text: analysis.normalized_text,
         visible_text: analysis.visible_text,
         control_code_signature: analysis.control_code_signature,
-    })
+    })?;
+    db.insert_project_occurrence(
+        project_id,
+        &NewOccurrence {
+            project_id: Some(project_id),
+            source_text_id,
+            file_path: "data/Map001.json".to_string(),
+            json_path: format!("$.events[1].pages[0].list[{command_index}].parameters[0]"),
+            entity_type: "event_command".to_string(),
+            event_id: Some(1),
+            page_index: Some(0),
+            command_index: Some(command_index),
+            command_code: Some(401),
+            parameter_index: Some(0),
+            object_key: None,
+            extraction_rule_id: "event.message.line".to_string(),
+        },
+    )?;
+    Ok(source_text_id)
 }
 
 fn seed_translation(
@@ -39,6 +62,7 @@ fn seed_translation(
         translated_text: text.to_string(),
         provider: "fake".to_string(),
         model: Some("fixture".to_string()),
+        provider_run_id: None,
         review_state: review_state.to_string(),
         qa_state: qa_state.to_string(),
     })?;
@@ -51,9 +75,9 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;
     let project_id = seed_project(&mut db)?;
-    let accepted = seed_source(&mut db, "\\C[1]こんにちは")?;
-    let reviewed = seed_source(&mut db, "世界")?;
-    let pending = seed_source(&mut db, "未確認")?;
+    let accepted = seed_source(&mut db, project_id, "\\C[1]こんにちは", 0)?;
+    let reviewed = seed_source(&mut db, project_id, "世界", 1)?;
+    let pending = seed_source(&mut db, project_id, "未確認", 2)?;
     seed_translation(&mut db, accepted, "\\C[1]안녕", "accepted", "passed")?;
     seed_translation(&mut db, reviewed, "세계", "reviewed", "passed")?;
     seed_translation(&mut db, pending, "미확인", "pending", "unchecked")?;
@@ -117,7 +141,7 @@ fn exported_cache_records_use_versioned_cache_key_schema() -> Result<()> {
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;
     let project_id = seed_project(&mut db)?;
-    let source_text_id = seed_source(&mut db, "\\C[2]名前")?;
+    let source_text_id = seed_source(&mut db, project_id, "\\C[2]名前", 0)?;
     seed_translation(&mut db, source_text_id, "\\C[2]이름", "accepted", "passed")?;
 
     ExportBuilder::export_project(

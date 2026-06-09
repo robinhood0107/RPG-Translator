@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -5,8 +6,8 @@ use serde_json::Value;
 
 use crate::{
     DataFileRecord, DetectedGame, Engine, Error, ExtractedOccurrence, GameLayoutKind,
-    NewSourceText, OccurrenceContext, RejectedCandidate, Result, ScanReport, SkippedDataFile,
-    TextCodec,
+    NewSourceText, OccurrenceContext, RejectedCandidate, Result, ScanProgressEvent, ScanReport,
+    SkippedDataFile, TextCodec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,27 +62,60 @@ pub struct GameScanner;
 
 impl GameScanner {
     pub fn scan(game_root: impl AsRef<Path>, options: ScanOptions) -> Result<ScanReport> {
+        Self::scan_with_progress(game_root, options, |_| {})
+    }
+
+    pub fn scan_with_progress<F>(
+        game_root: impl AsRef<Path>,
+        options: ScanOptions,
+        mut on_progress: F,
+    ) -> Result<ScanReport>
+    where
+        F: FnMut(&ScanProgressEvent),
+    {
         let game_root = game_root.as_ref();
+        on_progress(&ScanProgressEvent::Started {
+            game_root: normalize_path(game_root),
+            source_language: options.source_language.clone(),
+        });
         let detected_game = RpgMakerDetector::detect(game_root)?;
+        on_progress(&ScanProgressEvent::Detected {
+            engine: detected_game.engine.clone(),
+            layout: detected_game.layout.clone(),
+            data_path: detected_game.data_path.clone(),
+        });
         let data_path = PathBuf::from(&detected_game.data_path);
         let mut files = Vec::new();
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
         let mut skipped = Vec::new();
 
-        for file_path in list_json_files(&data_path)? {
+        for (index, file_path) in list_json_files(&data_path)?.into_iter().enumerate() {
             let relative_path = relative_path(game_root, &file_path);
+            on_progress(&ScanProgressEvent::FileStarted {
+                index,
+                file_path: relative_path.clone(),
+            });
             files.push(DataFileRecord {
                 file_path: relative_path.clone(),
             });
 
+            let accepted_before = accepted.len();
+            let rejected_before = rejected.len();
             let parsed = match read_json_value(&file_path) {
                 Ok(value) => value,
                 Err(error) => {
                     skipped.push(SkippedDataFile {
-                        file_path: relative_path,
+                        file_path: relative_path.clone(),
                         reason: "invalid-json".to_string(),
                         error,
+                    });
+                    on_progress(&ScanProgressEvent::FileFinished {
+                        index,
+                        file_path: relative_path,
+                        accepted_delta: 0,
+                        rejected_delta: 0,
+                        skipped: true,
                     });
                     continue;
                 }
@@ -95,7 +129,42 @@ impl GameScanner {
                 &mut accepted,
                 &mut rejected,
             );
+            let visited = accepted[accepted_before..]
+                .iter()
+                .map(|item| item.context.json_path.clone())
+                .chain(
+                    rejected[rejected_before..]
+                        .iter()
+                        .map(|item| item.context.json_path.clone()),
+                )
+                .collect::<HashSet<_>>();
+            extract_unvisited_strings(
+                GenericStringVisit {
+                    relative_path: &relative_path,
+                    json_path: "$",
+                    object_key: None,
+                    value: &parsed,
+                    visited: &visited,
+                },
+                &options,
+                &mut accepted,
+                &mut rejected,
+            );
+            on_progress(&ScanProgressEvent::FileFinished {
+                index,
+                file_path: relative_path,
+                accepted_delta: accepted.len() - accepted_before,
+                rejected_delta: rejected.len() - rejected_before,
+                skipped: false,
+            });
         }
+
+        on_progress(&ScanProgressEvent::Finished {
+            file_count: files.len(),
+            accepted_count: accepted.len(),
+            rejected_count: rejected.len(),
+            skipped_count: skipped.len(),
+        });
 
         Ok(ScanReport {
             detected_game,
@@ -125,6 +194,11 @@ impl ExtractionRuleSet {
 
         if is_map_file(file_name) {
             extract_map(relative_path, value, options, accepted, rejected);
+            return;
+        }
+
+        if is_common_events_file(file_name) {
+            extract_common_events(relative_path, value, options, accepted, rejected);
             return;
         }
 
@@ -224,57 +298,108 @@ fn extract_map(
                 continue;
             };
 
-            for (command_index, command) in commands.iter().enumerate() {
-                let code = command.get("code").and_then(Value::as_i64);
-                let parameters = command.get("parameters").and_then(Value::as_array);
-                let context = EventContext {
+            extract_event_commands(
+                EventCommandScope {
                     relative_path,
                     event_index,
                     event_id,
-                    page_index,
-                    command_index,
-                    command_code: code,
-                };
+                    page_index: Some(page_index),
+                    commands,
+                },
+                options,
+                accepted,
+                rejected,
+            );
+        }
+    }
+}
 
-                match code {
-                    Some(101) => accept_event_parameter(
-                        parameters,
-                        4,
-                        "event.message.speaker",
-                        &context,
-                        options,
-                        accepted,
-                        rejected,
-                    ),
-                    Some(401) => accept_event_parameter(
-                        parameters,
-                        0,
-                        "event.message.line",
-                        &context,
-                        options,
-                        accepted,
-                        rejected,
-                    ),
-                    Some(405) => accept_event_parameter(
-                        parameters,
-                        0,
-                        "event.scroll.line",
-                        &context,
-                        options,
-                        accepted,
-                        rejected,
-                    ),
-                    Some(102) => accept_choices(parameters, &context, options, accepted, rejected),
-                    Some(108 | 408) => {
-                        reject_event_strings(parameters, "comment", &context, rejected)
-                    }
-                    Some(355 | 655) => {
-                        reject_event_strings(parameters, "script", &context, rejected)
-                    }
-                    Some(118) => reject_event_strings(parameters, "label", &context, rejected),
-                    _ => {}
-                }
-            }
+fn extract_common_events(
+    relative_path: &str,
+    value: &Value,
+    options: &ScanOptions,
+    accepted: &mut Vec<ExtractedOccurrence>,
+    rejected: &mut Vec<RejectedCandidate>,
+) {
+    let Some(events) = value.as_array() else {
+        return;
+    };
+
+    for (event_index, event) in events.iter().enumerate() {
+        let Some(event) = event.as_object() else {
+            continue;
+        };
+        let event_id = event.get("id").and_then(Value::as_i64);
+        let Some(commands) = event.get("list").and_then(Value::as_array) else {
+            continue;
+        };
+
+        extract_event_commands(
+            EventCommandScope {
+                relative_path,
+                event_index,
+                event_id,
+                page_index: None,
+                commands,
+            },
+            options,
+            accepted,
+            rejected,
+        );
+    }
+}
+
+fn extract_event_commands(
+    scope: EventCommandScope<'_>,
+    options: &ScanOptions,
+    accepted: &mut Vec<ExtractedOccurrence>,
+    rejected: &mut Vec<RejectedCandidate>,
+) {
+    for (command_index, command) in scope.commands.iter().enumerate() {
+        let code = command.get("code").and_then(Value::as_i64);
+        let parameters = command.get("parameters").and_then(Value::as_array);
+        let context = EventContext {
+            relative_path: scope.relative_path,
+            event_index: scope.event_index,
+            event_id: scope.event_id,
+            page_index: scope.page_index,
+            command_index,
+            command_code: code,
+        };
+
+        match code {
+            Some(101) => accept_event_parameter(
+                parameters,
+                4,
+                "event.message.speaker",
+                &context,
+                options,
+                accepted,
+                rejected,
+            ),
+            Some(401) => accept_event_parameter(
+                parameters,
+                0,
+                "event.message.line",
+                &context,
+                options,
+                accepted,
+                rejected,
+            ),
+            Some(405) => accept_event_parameter(
+                parameters,
+                0,
+                "event.scroll.line",
+                &context,
+                options,
+                accepted,
+                rejected,
+            ),
+            Some(102) => accept_choices(parameters, &context, options, accepted, rejected),
+            Some(108 | 408) => reject_event_strings(parameters, "comment", &context, rejected),
+            Some(355 | 655) => reject_event_strings(parameters, "script", &context, rejected),
+            Some(118) => reject_event_strings(parameters, "label", &context, rejected),
+            _ => {}
         }
     }
 }
@@ -296,10 +421,7 @@ fn accept_event_parameter(
     };
 
     let occurrence = context.to_occurrence(
-        format!(
-            "$.events[{}].pages[{}].list[{}].parameters[{parameter_index}]",
-            context.event_index, context.page_index, context.command_index
-        ),
+        context.parameter_json_path(parameter_index),
         Some(parameter_index),
         None,
         rule_id,
@@ -326,10 +448,7 @@ fn accept_choices(
             continue;
         };
         let occurrence = context.to_occurrence(
-            format!(
-                "$.events[{}].pages[{}].list[{}].parameters[0][{choice_index}]",
-                context.event_index, context.page_index, context.command_index
-            ),
+            context.choice_json_path(choice_index),
             Some(0),
             Some(format!("choice[{choice_index}]")),
             "event.choice.option",
@@ -353,10 +472,7 @@ fn reject_event_strings(
                 raw_text: raw.to_string(),
                 reason: reason.to_string(),
                 context: context.to_occurrence(
-                    format!(
-                        "$.events[{}].pages[{}].list[{}].parameters[{parameter_index}]",
-                        context.event_index, context.page_index, context.command_index
-                    ),
+                    context.parameter_json_path(parameter_index),
                     Some(parameter_index),
                     None,
                     "event.rejected",
@@ -473,6 +589,11 @@ fn classify_and_push(
     accepted: &mut Vec<ExtractedOccurrence>,
     rejected: &mut Vec<RejectedCandidate>,
 ) {
+    if raw.contains("//") {
+        push_rejected(raw, "comment", context, rejected);
+        return;
+    }
+
     let analysis = TextCodec::analyze(raw);
     let visible = analysis.visible_text.replace('"', "").trim().to_string();
 
@@ -484,16 +605,92 @@ fn classify_and_push(
         accepted.push(new_accepted(raw, analysis, visible, context, options));
         return;
     }
-    if contains_korean(&visible) {
-        push_rejected(raw, "korean", context, rejected);
-        return;
-    }
-    if !contains_japanese_or_chinese(&visible) {
-        push_rejected(raw, "no-cjk", context, rejected);
+    if !matches_source_language(&visible, &options.source_language) {
+        push_rejected(raw, "wrong-source-language", context, rejected);
         return;
     }
 
     accepted.push(new_accepted(raw, analysis, visible, context, options));
+}
+
+fn extract_unvisited_strings(
+    visit: GenericStringVisit<'_>,
+    options: &ScanOptions,
+    accepted: &mut Vec<ExtractedOccurrence>,
+    rejected: &mut Vec<RejectedCandidate>,
+) {
+    match visit.value {
+        Value::String(raw) => {
+            if visit.visited.contains(visit.json_path) {
+                return;
+            }
+            let occurrence = OccurrenceContext {
+                file_path: visit.relative_path.to_string(),
+                json_path: visit.json_path.to_string(),
+                entity_type: "generic.string".to_string(),
+                event_id: None,
+                page_index: None,
+                command_index: None,
+                command_code: None,
+                parameter_index: None,
+                object_key: visit.object_key.map(ToString::to_string),
+                extraction_rule_id: "generic.string".to_string(),
+            };
+            classify_and_push(raw, occurrence, options, accepted, rejected);
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                extract_unvisited_strings(
+                    GenericStringVisit {
+                        relative_path: visit.relative_path,
+                        json_path: &format!("{}[{index}]", visit.json_path),
+                        object_key: None,
+                        value: item,
+                        visited: visit.visited,
+                    },
+                    options,
+                    accepted,
+                    rejected,
+                );
+            }
+        }
+        Value::Object(object) => {
+            for (key, item) in object {
+                let child_path = json_child_path(visit.json_path, key);
+                extract_unvisited_strings(
+                    GenericStringVisit {
+                        relative_path: visit.relative_path,
+                        json_path: &child_path,
+                        object_key: Some(key),
+                        value: item,
+                        visited: visit.visited,
+                    },
+                    options,
+                    accepted,
+                    rejected,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_child_path(parent: &str, key: &str) -> String {
+    if is_simple_json_path_key(key) {
+        format!("{parent}.{key}")
+    } else {
+        let key = serde_json::to_string(key).unwrap_or_else(|_| format!("\"{key}\""));
+        format!("{parent}[{key}]")
+    }
+}
+
+fn is_simple_json_path_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn new_accepted(
@@ -540,10 +737,10 @@ fn rejected_database_reason(key: &str, raw: &str, options: &ScanOptions) -> Stri
     let visible = analysis.visible_text.trim();
     if visible.is_empty() {
         "empty".to_string()
-    } else if !options.disable_cjk_filter && contains_korean(visible) {
-        "korean".to_string()
-    } else if !options.disable_cjk_filter && !contains_japanese_or_chinese(visible) {
-        "no-cjk".to_string()
+    } else if !options.disable_cjk_filter
+        && !matches_source_language(visible, &options.source_language)
+    {
+        "wrong-source-language".to_string()
     } else {
         "unknown-field".to_string()
     }
@@ -551,6 +748,10 @@ fn rejected_database_reason(key: &str, raw: &str, options: &ScanOptions) -> Stri
 
 fn is_map_file(file_name: &str) -> bool {
     file_name.starts_with("Map") && file_name.ends_with(".json")
+}
+
+fn is_common_events_file(file_name: &str) -> bool {
+    file_name.eq_ignore_ascii_case("CommonEvents.json")
 }
 
 fn is_database_allowlisted_key(key: &str) -> bool {
@@ -583,17 +784,58 @@ fn database_entity_type(relative_path: &str) -> String {
     format!("database.{}", file_name.to_ascii_lowercase())
 }
 
-fn contains_korean(input: &str) -> bool {
+fn matches_source_language(input: &str, source_language: &str) -> bool {
+    let has_latin = contains_latin_letter(input);
+    let has_korean = contains_korean(input);
+    let has_japanese_or_chinese = contains_japanese_or_chinese(input);
+
+    match source_language_profile(source_language) {
+        SourceLanguageProfile::English => has_latin && !has_korean && !has_japanese_or_chinese,
+        SourceLanguageProfile::JapaneseChinese => has_japanese_or_chinese && !has_korean,
+        SourceLanguageProfile::Korean => has_korean,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceLanguageProfile {
+    English,
+    JapaneseChinese,
+    Korean,
+}
+
+fn source_language_profile(source_language: &str) -> SourceLanguageProfile {
+    match source_language.trim().to_ascii_lowercase().as_str() {
+        "en" | "eng" | "english" => SourceLanguageProfile::English,
+        "ko" | "kor" | "kr" | "korean" => SourceLanguageProfile::Korean,
+        _ => SourceLanguageProfile::JapaneseChinese,
+    }
+}
+
+fn contains_latin_letter(input: &str) -> bool {
     input
         .chars()
-        .any(|ch| ('\u{ac00}'..='\u{d7af}').contains(&ch))
+        .any(|ch| ch.is_ascii_alphabetic() || ('\u{00c0}'..='\u{024f}').contains(&ch))
+}
+
+fn contains_korean(input: &str) -> bool {
+    input.chars().any(|ch| {
+        ('\u{1100}'..='\u{11ff}').contains(&ch)
+            || ('\u{3130}'..='\u{318f}').contains(&ch)
+            || ('\u{ac00}'..='\u{d7af}').contains(&ch)
+            || ('\u{a960}'..='\u{a97f}').contains(&ch)
+            || ('\u{d7b0}'..='\u{d7ff}').contains(&ch)
+    })
 }
 
 fn contains_japanese_or_chinese(input: &str) -> bool {
     input.chars().any(|ch| {
         ('\u{3040}'..='\u{309f}').contains(&ch)
             || ('\u{30a0}'..='\u{30ff}').contains(&ch)
+            || ('\u{31f0}'..='\u{31ff}').contains(&ch)
+            || ('\u{3400}'..='\u{4dbf}').contains(&ch)
             || ('\u{4e00}'..='\u{9fff}').contains(&ch)
+            || ('\u{f900}'..='\u{faff}').contains(&ch)
+            || ('\u{ff66}'..='\u{ff9f}').contains(&ch)
     })
 }
 
@@ -612,12 +854,46 @@ struct EventContext<'a> {
     relative_path: &'a str,
     event_index: usize,
     event_id: Option<i64>,
-    page_index: usize,
+    page_index: Option<usize>,
     command_index: usize,
     command_code: Option<i64>,
 }
 
+struct EventCommandScope<'a> {
+    relative_path: &'a str,
+    event_index: usize,
+    event_id: Option<i64>,
+    page_index: Option<usize>,
+    commands: &'a [Value],
+}
+
+struct GenericStringVisit<'a> {
+    relative_path: &'a str,
+    json_path: &'a str,
+    object_key: Option<&'a str>,
+    value: &'a Value,
+    visited: &'a HashSet<String>,
+}
+
 impl EventContext<'_> {
+    fn command_json_path(&self) -> String {
+        match self.page_index {
+            Some(page_index) => format!(
+                "$.events[{}].pages[{}].list[{}]",
+                self.event_index, page_index, self.command_index
+            ),
+            None => format!("$[{}].list[{}]", self.event_index, self.command_index),
+        }
+    }
+
+    fn parameter_json_path(&self, parameter_index: usize) -> String {
+        format!("{}.parameters[{parameter_index}]", self.command_json_path())
+    }
+
+    fn choice_json_path(&self, choice_index: usize) -> String {
+        format!("{}.parameters[0][{choice_index}]", self.command_json_path())
+    }
+
     fn to_occurrence(
         &self,
         json_path: String,
@@ -630,7 +906,7 @@ impl EventContext<'_> {
             json_path,
             entity_type: "event.command".to_string(),
             event_id: self.event_id,
-            page_index: Some(self.page_index as i64),
+            page_index: self.page_index.map(|index| index as i64),
             command_index: Some(self.command_index as i64),
             command_code: self.command_code,
             parameter_index: parameter_index.map(|index| index as i64),

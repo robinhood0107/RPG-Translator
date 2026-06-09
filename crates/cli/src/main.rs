@@ -39,12 +39,10 @@ fn install_overlay(args: &[String]) -> Result<()> {
         runtime_dir: None,
         project_id,
         export_id,
-        allow_dontupload: false,
     };
 
     let report = if let Some(db_path) = parsed.get("--db") {
-        let mut db = TranslationDb::open(db_path)?;
-        db.migrate()?;
+        let mut db = TranslationDb::open_with_schema_guard(db_path)?;
         Installer::install_with_db(&mut db, &options)?
     } else {
         Installer::install(&options)?
@@ -59,17 +57,13 @@ fn install_overlay(args: &[String]) -> Result<()> {
 fn rollback_overlay(args: &[String]) -> Result<()> {
     let parsed = parse_flags(args)?;
     let manifest_path = required_path(&parsed, "--manifest")?;
-    let options = RollbackOptions {
-        manifest_path,
-        allow_dontupload: false,
-    };
+    let options = RollbackOptions { manifest_path };
 
     let report = if let Some(db_path) = parsed.get("--db") {
         let install_id = optional_i64(&parsed, "--install-id")?.ok_or_else(|| {
             rpg_translator_core::Error::invalid_input("--install-id is required with --db")
         })?;
-        let mut db = TranslationDb::open(db_path)?;
-        db.migrate()?;
+        let mut db = TranslationDb::open_with_schema_guard(db_path)?;
         RollbackManager::rollback_with_db(&mut db, install_id, &options)?
     } else {
         RollbackManager::rollback(&options)?

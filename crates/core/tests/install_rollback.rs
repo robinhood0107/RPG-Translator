@@ -47,7 +47,6 @@ fn install_options(game_root: PathBuf, export_dir: PathBuf) -> InstallOptions {
         runtime_dir: None,
         project_id: None,
         export_id: Some(42),
-        allow_dontupload: false,
     }
 }
 
@@ -70,7 +69,7 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .is_file()
     );
     assert!(report.install_manifest_path.is_file());
-    assert_eq!(report.installed_files.len(), 12);
+    assert_eq!(report.installed_files.len(), 13);
 
     let plugins = fs::read_to_string(game.join("js/plugins.js")).expect("read plugins");
     assert_eq!(plugins.matches("\"name\": \"RPGTranslator\"").count(), 1);
@@ -114,7 +113,6 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
 
     let rollback = RollbackManager::rollback(&RollbackOptions {
         manifest_path: report.install_manifest_path,
-        allow_dontupload: false,
     })?;
 
     assert_eq!(
@@ -147,7 +145,6 @@ fn rollback_rejects_modified_backup_before_mutating_game() -> Result<()> {
 
     let error = RollbackManager::rollback(&RollbackOptions {
         manifest_path: report.install_manifest_path,
-        allow_dontupload: false,
     })
     .expect_err("tampered backup fails rollback");
 
@@ -177,7 +174,6 @@ fn rollback_rejects_modified_installed_files_before_mutating_game() -> Result<()
 
     let error = RollbackManager::rollback(&RollbackOptions {
         manifest_path: report.install_manifest_path,
-        allow_dontupload: false,
     })
     .expect_err("tampered install files fail rollback");
 
@@ -216,7 +212,6 @@ fn rollback_rejects_manifest_paths_outside_game_root_before_mutating_game() -> R
 
     let error = RollbackManager::rollback(&RollbackOptions {
         manifest_path: report.install_manifest_path,
-        allow_dontupload: false,
     })
     .expect_err("outside install path fails rollback");
 
@@ -272,14 +267,19 @@ fn installer_rejects_malformed_plugins_before_mutating_files() {
 }
 
 #[test]
-fn installer_rejects_dontupload_game_roots_by_default() {
+fn installer_applies_without_local_test_allowance_flag() -> Result<()> {
     let temp = tempdir().expect("create temp dir");
     let game = temp.path().join("dontupload").join("game");
     let export = temp.path().join("export");
     make_direct_game(&game, "var $plugins = [];");
     make_export_bundle(&export);
 
-    let error = Installer::install(&install_options(game, export)).expect_err("dontupload fails");
+    let report = Installer::install(&install_options(game.clone(), export))?;
+    assert!(game.join("js/plugins/RPGTranslator.js").is_file());
+    RollbackManager::rollback(&RollbackOptions {
+        manifest_path: report.install_manifest_path,
+    })?;
+    assert!(!game.join("js/plugins/RPGTranslator.js").exists());
 
-    assert!(error.to_string().contains("dontupload"));
+    Ok(())
 }

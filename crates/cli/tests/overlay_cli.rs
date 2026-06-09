@@ -90,6 +90,55 @@ fn cli_install_and_rollback_overlay_smoke() {
 }
 
 #[test]
+fn cli_install_and_rollback_apply_without_local_allowance_flag() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("dontupload").join("game");
+    let export = temp.path().join("export");
+    let original_plugins = "var $plugins = [];";
+    make_game(&game, original_plugins);
+    make_export_bundle(&export);
+
+    let install = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "install-overlay",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--export-dir",
+            export.to_str().expect("export path"),
+        ])
+        .output()
+        .expect("run install command");
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let manifest_path = game
+        .join("js")
+        .join("plugins")
+        .join("rpg-translator")
+        .join("install-manifest.json");
+    let rollback = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "rollback-overlay",
+            "--manifest",
+            manifest_path.to_str().expect("manifest path"),
+        ])
+        .output()
+        .expect("run rollback command");
+    assert!(
+        rollback.status.success(),
+        "rollback failed: {}",
+        String::from_utf8_lossy(&rollback.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read restored plugins"),
+        original_plugins
+    );
+}
+
+#[test]
 fn cli_rejects_missing_required_install_args() {
     let output = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
         .arg("install-overlay")

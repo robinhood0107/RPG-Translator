@@ -1,14 +1,19 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
 const { Boot } = require('../boot');
+const { BitmapTextAdapter } = require('../bitmap-text-adapter');
 const { CacheKeyBuilder, LookupIndex } = require('../lookup-index');
 const { CacheLoader } = require('../cache-loader');
 const { MessageAdapter } = require('../message-adapter');
+const { PixiTextAdapter } = require('../pixi-text-adapter');
 const { RenderGuard } = require('../render-guard');
 const { RuntimeEntry } = require('../RPGTranslator');
+const { RuntimeMissLogger } = require('../runtime-miss-logger');
+const { SpriteTextAdapter } = require('../sprite-text-adapter');
 const { StartupToast } = require('../startup-toast');
 const { TextCodec } = require('../text-codec');
 const { WindowTextAdapter } = require('../window-text-adapter');
@@ -83,6 +88,108 @@ test('lookup index returns cache hits and leaves misses untranslated', () => {
     }),
     null,
   );
+  assert.deepEqual(index.diagnostics(), {
+    cache_hits: 1,
+    cache_misses: 1,
+    recent_misses: [
+      {
+        text: '未翻訳',
+        normalized_text: '未翻訳',
+        control_code_signature: '',
+        cache_key: CacheKeyBuilder.build({
+          engine: 'mz',
+          sourceLanguage: 'ja',
+          targetLanguage: 'ko',
+          normalizedText: '未翻訳',
+          controlCodeSignature: '',
+          contextHash: null,
+        }),
+      },
+    ],
+  });
+});
+
+test('lookup index writes cache-only miss diagnostics when logger is enabled', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rpg-translator-misses-'));
+  const logger = new RuntimeMissLogger({
+    directory,
+    enabled: true,
+    now: () => '2026-06-09T00:00:00.000Z',
+  });
+  const index = new LookupIndex({
+    manifest: {
+      schema_version: 1,
+      key_schema_version: 'v1',
+      source_language: 'ja',
+      target_language: 'ko',
+    },
+    records: [],
+    missLogger: logger,
+  });
+
+  const translated = index.translate({
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    text: '未翻訳',
+    contextHash: 'map001-event001',
+  });
+  const logPath = path.join(directory, 'runtime-misses.jsonl');
+  const entries = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
+
+  assert.equal(translated, null);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], {
+    timestamp: '2026-06-09T00:00:00.000Z',
+    text: '未翻訳',
+    normalized_text: '未翻訳',
+    control_code_signature: '',
+    cache_key: CacheKeyBuilder.build({
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      normalizedText: '未翻訳',
+      controlCodeSignature: '',
+      contextHash: 'map001-event001',
+    }),
+    engine: 'mz',
+    source_language: 'ja',
+    target_language: 'ko',
+    context_hash: 'map001-event001',
+  });
+});
+
+test('lookup index suppresses duplicate miss log writes with bounded negative cache', () => {
+  const misses = [];
+  const index = new LookupIndex({
+    manifest: {
+      schema_version: 1,
+      key_schema_version: 'v1',
+      source_language: 'ja',
+      target_language: 'ko',
+    },
+    records: [],
+    missLogger: {
+      recordMiss(miss) {
+        misses.push(miss);
+      },
+    },
+  });
+  const request = {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    text: '未翻訳',
+    contextHash: 'same-slot',
+  };
+
+  assert.equal(index.translate(request), null);
+  assert.equal(index.translate(request), null);
+  assert.equal(index.translate(Object.assign({}, request, { contextHash: 'other-slot' })), null);
+
+  assert.equal(index.diagnostics().cache_misses, 3);
+  assert.equal(misses.length, 2);
+  assert.equal(index.diagnostics().recent_misses.length, 2);
 });
 
 test('cache loader parses static manifest config and jsonl records', async () => {
@@ -222,6 +329,74 @@ test('message and window adapters translate cache hits in synthetic RPG Maker ha
   assert.equal(drawTextExResult, 'missing'.length);
 });
 
+test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Bitmap JP') return 'Bitmap KO';
+      if (text === 'Sprite JP') return 'Sprite KO';
+      if (text === 'Pixi JP') return 'Pixi KO';
+      if (text === 'BitmapText JP') return 'BitmapText KO';
+      return null;
+    },
+  };
+  const calls = [];
+  const root = {
+    Bitmap: function Bitmap() {},
+    Sprite: function Sprite(bitmap) {
+      this.bitmap = bitmap || {};
+    },
+    PIXI: {},
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, width) {
+    calls.push(['bitmap', text, x, y, width]);
+  };
+  root.Sprite.prototype.update = function update() {
+    calls.push(['sprite-update', this.bitmap._rpgTranslatorGlyphText]);
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) {
+      this._text = value;
+      calls.push(['pixi-text', value]);
+    },
+    configurable: true,
+  });
+  root.PIXI.BitmapText = function PixiBitmapText(text) {
+    this._text = text;
+  };
+  Object.defineProperty(root.PIXI.BitmapText.prototype, 'text', {
+    get() { return this._text; },
+    set(value) {
+      this._text = value;
+      calls.push(['pixi-bitmap-text', value]);
+    },
+    configurable: true,
+  });
+
+  BitmapTextAdapter.install(root, index);
+  SpriteTextAdapter.install(root, index);
+  PixiTextAdapter.install(root, index);
+
+  const bitmap = new root.Bitmap();
+  bitmap.drawText('Bitmap JP', 1, 2, 3);
+  const spriteBitmap = { _rpgTranslatorGlyphText: 'Sprite JP' };
+  new root.Sprite(spriteBitmap).update();
+  const pixiText = new root.PIXI.Text('');
+  pixiText.text = 'Pixi JP';
+  const pixiBitmapText = new root.PIXI.BitmapText('');
+  pixiBitmapText.text = 'BitmapText JP';
+
+  assert.deepEqual(calls, [
+    ['bitmap', 'Bitmap KO', 1, 2, 3],
+    ['sprite-update', 'Sprite KO'],
+    ['pixi-text', 'Pixi KO'],
+    ['pixi-bitmap-text', 'BitmapText KO'],
+  ]);
+});
+
 test('boot installs cache-only overlay without provider surfaces', async () => {
   const root = {
     document: { body: null },
@@ -272,10 +447,14 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
 
   assert.deepEqual(loaded, [
     `${baseUrl}text-codec.js`,
+    `${baseUrl}runtime-miss-logger.js`,
     `${baseUrl}lookup-index.js`,
     `${baseUrl}cache-loader.js`,
     `${baseUrl}message-adapter.js`,
     `${baseUrl}window-text-adapter.js`,
+    `${baseUrl}bitmap-text-adapter.js`,
+    `${baseUrl}sprite-text-adapter.js`,
+    `${baseUrl}pixi-text-adapter.js`,
     `${baseUrl}startup-toast.js`,
     `${baseUrl}boot.js`,
     ['boot', baseUrl, 'mz'],
