@@ -402,6 +402,61 @@ test('orchestrator records canonical items and rejects stale render commands', (
   });
 });
 
+test('orchestrator routes render commands through record subscriptions', () => {
+  const surface = {};
+  const routed = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Subscribed') return '구독됨';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    onRenderQueued(command, route) {
+      routed.push(['queued', command.strategy, command.translatedText, route.eventType]);
+      return true;
+    },
+    onRenderAccepted(command, route) {
+      routed.push(['accepted', command.strategy, command.translatedText, route.eventType]);
+    },
+    onRenderRejected(command, route) {
+      routed.push(['rejected', command.strategy, command.translatedText, route.eventType]);
+    },
+  });
+
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'slot-a',
+    text: 'Subscribed',
+    renderStrategy: 'window-text',
+  });
+  assert.equal(orchestrator.acceptRender(command, surface, 'Subscribed'), true);
+  orchestrator.markSurfaceChanged(surface);
+  assert.equal(orchestrator.acceptRender(command, surface, 'Subscribed'), false);
+  unsubscribe();
+  orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'slot-b',
+    text: 'Subscribed',
+    renderStrategy: 'window-text',
+  });
+
+  assert.deepEqual(routed, [
+    ['queued', 'window-text', '구독됨', 'item.render_queued'],
+    ['accepted', 'window-text', '구독됨', 'item.render_accepted'],
+    ['rejected', 'window-text', '구독됨', 'item.render_rejected'],
+  ]);
+});
+
 test('orchestrator releases surface ownership explicitly', () => {
   const surface = {};
   const orchestrator = new TextOrchestrator({ translate: () => null });

@@ -49,6 +49,7 @@
         sourceText: text,
         contextHash: record.contextHash || null,
         generation: this.guard ? this.guard.generationFor(surface) : 0,
+        renderStrategy: record.renderStrategy || record.strategy || record.adapter || '',
         state: 'active',
       };
       this.activeItems.set(item.id, item);
@@ -221,6 +222,32 @@
       return () => this.listeners.delete(listener);
     }
 
+    subscribeRecords(options = {}) {
+      const source = options && typeof options === 'object' ? options : {};
+      const renderStrategy = String(source.renderStrategy || source.strategy || '');
+      return this.subscribe((event) => {
+        if (!event || typeof event !== 'object') return;
+        const command = event.payload || null;
+        if (!command || typeof command !== 'object') return;
+        if (renderStrategy && String(command.strategy || '') !== renderStrategy) return;
+        if (event.type === 'renderQueued' && typeof source.onRenderQueued === 'function') {
+          const route = this.renderRoute('item.render_queued', command);
+          const decision = source.onRenderQueued(command, route);
+          if (decision === false && typeof source.onRenderRejected === 'function') {
+            source.onRenderRejected(command, this.renderRoute('item.render_rejected', command, 'adapter-declined'));
+          }
+          return;
+        }
+        if (event.type === 'renderAccepted' && typeof source.onRenderAccepted === 'function') {
+          source.onRenderAccepted(command, this.renderRoute('item.render_accepted', command));
+          return;
+        }
+        if (event.type === 'renderRejected' && typeof source.onRenderRejected === 'function') {
+          source.onRenderRejected(command, this.renderRoute('item.render_rejected', command, 'render-rejected'));
+        }
+      });
+    }
+
     lookup(item) {
       if (!this.index || typeof this.index.translate !== 'function') return null;
       return this.index.translate({
@@ -241,6 +268,8 @@
         sourceText: item.sourceText,
         translatedText: String(translatedText ?? ''),
         status,
+        strategy: item.renderStrategy || '',
+        generation: item.generation,
         renderToken: this.guard ? this.guard.capture(item.surface, item.sourceText) : null,
       };
       this.renderQueue.push(command);
@@ -273,6 +302,16 @@
 
     defaultSlotId(adapter, surface, slotKey) {
       return `${adapter || 'unknown'}:${this.surfaceId(surface)}:${String(slotKey || 'default')}`;
+    }
+
+    renderRoute(eventType, command, reason) {
+      return {
+        eventType,
+        itemId: command && command.itemId ? command.itemId : '',
+        slotId: command && command.slotId ? command.slotId : '',
+        strategy: command && command.strategy ? command.strategy : '',
+        reason: reason || '',
+      };
     }
 
     emit(type, payload) {
