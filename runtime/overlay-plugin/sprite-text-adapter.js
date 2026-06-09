@@ -19,6 +19,7 @@
       prototype.update.__rpgTranslatorOriginal = originalUpdate;
       prototype.__rpgTranslatorSpriteTextInstalled = INSTALL_TOKEN;
       installLifecycleHooks(prototype, translator);
+      installSurfaceDrawSubscription(scope, translator);
       return true;
     }
   }
@@ -56,6 +57,69 @@
         ? translator.translate(request)
         : null;
     return translated || text;
+  }
+
+  function installSurfaceDrawSubscription(scope, translator) {
+    if (!translator || typeof translator.subscribeSurfaceDraws !== 'function') return false;
+    const overlayScope = overlay(scope);
+    if (overlayScope.__spriteTextSurfaceDrawUnsubscribe) return true;
+    const unsubscribe = translator.subscribeSurfaceDraws((event) => handleSurfaceDraw(event, scope, translator), {
+      adapterId: 'sprite-text',
+      token: 'sprite-text-surface-draws',
+    });
+    overlayScope.__spriteTextSurfaceDrawUnsubscribe = typeof unsubscribe === 'function' ? unsubscribe : null;
+    return true;
+  }
+
+  function handleSurfaceDraw(event, scope, translator) {
+    const payload = event && event.payload ? event.payload : null;
+    const text = payload && typeof payload.text === 'string' ? payload.text : '';
+    if (!text.trim() || !translator || typeof translator.observeRecord !== 'function') return null;
+    const slotKey = surfaceDrawSlotKey(payload);
+    const surface = payload.target || payload.bitmap || event.target || null;
+    const command = translator.observeRecord({
+      engine: overlay(scope).engine || 'unknown',
+      sourceLanguage: overlay(scope).sourceLanguage,
+      targetLanguage: overlay(scope).targetLanguage,
+      text,
+      currentText: text,
+      surface,
+      adapter: 'sprite-text',
+      kind: 'surface-draw',
+      slotKey,
+      renderStrategy: 'sprite-text',
+      metadata: {
+        sourceAdapter: event.sourceAdapter || payload.sourceAdapter || '',
+        methodName: payload.methodName || 'drawText',
+        ownershipStatus: payload.ownershipStatus || event.status || '',
+      },
+    });
+    if (!command || command.status !== 'hit') return null;
+    if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, surface, text)) {
+      return null;
+    }
+    return {
+      action: 'replace-native-draw',
+      text: command.translatedText,
+      x: payload.x,
+      y: payload.y,
+      maxWidth: payload.maxWidth,
+      lineHeight: payload.lineHeight,
+      align: payload.align,
+      reason: 'cache-hit',
+    };
+  }
+
+  function surfaceDrawSlotKey(payload) {
+    return [
+      'sprite-surface',
+      String(payload.methodName || 'drawText'),
+      Math.round(finiteNumber(payload.x, 0)),
+      Math.round(finiteNumber(payload.y, 0)),
+      Math.round(finiteNumber(payload.maxWidth, 0)),
+      Math.round(finiteNumber(payload.lineHeight, 0)),
+      String(payload.align || 'left'),
+    ].join(':');
   }
 
   function renderGlyphOverlay(sprite, scope, translator) {

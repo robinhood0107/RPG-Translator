@@ -2347,6 +2347,47 @@ test('bitmap text adapter publishes surface draws before native draw', () => {
   assert.equal(orchestrator.diagnostics().observed_items, 0);
 });
 
+test('sprite text adapter consumes deferred bitmap surface draws', () => {
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.fontSize = 24;
+    },
+    Sprite: function Sprite(bitmap) {
+      this.bitmap = bitmap || null;
+    },
+    SceneManager: {
+      updateScene() {},
+    },
+  };
+  root.Bitmap.prototype.measureTextWidth = (text) => String(text || '').length * 8;
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, width, height, align) {
+    calls.push([text, x, y, width, height, align]);
+  };
+  root.Sprite.prototype.update = function update() {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Surface JP') return 'Surface KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+
+  SpriteTextAdapter.install(root, orchestrator);
+  BitmapTextAdapter.install(root, orchestrator);
+  new root.Bitmap().drawText('Surface JP', 5, 6, 70, 24, 'right');
+
+  assert.deepEqual(calls, [
+    ['Surface KO', 5, 6, 70, 24, 'right'],
+  ]);
+  assert.equal(orchestrator.diagnostics().cache_hits, 1);
+  assert.equal(orchestrator.diagnostics().render_accepted, 1);
+});
+
 test('sprite text adapter renders cache hits through overlay lifecycle', () => {
   const index = {
     translate({ text }) {
