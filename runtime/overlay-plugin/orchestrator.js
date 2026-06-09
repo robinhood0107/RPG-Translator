@@ -446,13 +446,20 @@
       return true;
     }
 
-    archiveItem(itemId) {
+    archiveItem(itemId, reason = 'item archived') {
       const item = this.activeItems.get(itemId) || this.detachedItems.get(itemId);
       if (!item) return false;
+      const message = String(reason || 'item archived');
+      this.rejectOpenRenderCommands(item, message);
       this.activeItems.delete(itemId);
       this.detachedItems.delete(itemId);
       item.state = 'archived';
+      item.status = 'archived';
+      item.active = false;
+      item.deactivatedAt = this.now();
       this.archivedItems.set(itemId, item);
+      this.releaseSlotIndexesForItem(itemId);
+      this.emit('item.archived', Object.assign({ reason: message }, item));
       return true;
     }
 

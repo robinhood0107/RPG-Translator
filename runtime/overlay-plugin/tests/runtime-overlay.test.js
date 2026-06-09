@@ -612,6 +612,65 @@ test('orchestrator diagnostics snapshots detached and archived item lifecycle', 
   ]]);
 });
 
+test('orchestrator archiveItem rejects queued renders and releases slot identity', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Archive source') return '보관 번역';
+      if (request.text === 'Archive replacement') return '보관 교체';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const first = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'archive-slot',
+    text: 'Archive source',
+    renderStrategy: 'window-text',
+  });
+
+  assert.equal(orchestrator.archiveItem(first.itemId, 'bitmap mutated'), true);
+  const second = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'archive-slot',
+    text: 'Archive replacement',
+    renderStrategy: 'window-text',
+  });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.notEqual(second.itemId, first.itemId);
+  assert.equal(diagnostics.active_items, 1);
+  assert.equal(diagnostics.archived_items, 1);
+  assert.equal(diagnostics.archived[0].id, first.itemId);
+  assert.equal(diagnostics.archived[0].state, 'archived');
+  assert.equal(diagnostics.archived[0].status, 'archived');
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [
+    entry.itemId,
+    entry.sourceText,
+    entry.renderStatus,
+    entry.renderReason,
+  ]), [
+    [first.itemId, 'Archive source', 'rejected', 'bitmap mutated'],
+    [second.itemId, 'Archive replacement', 'queued', ''],
+  ]);
+  assert.deepEqual(diagnostics.recent_events.slice(-5).map((event) => [event.type, event.reason]), [
+    ['renderRejected', 'bitmap mutated'],
+    ['item.archived', 'bitmap mutated'],
+    ['observed', 'observed'],
+    ['cacheHit', 'cache-hit'],
+    ['renderQueued', 'hit'],
+  ]);
+});
+
 test('orchestrator updates items through cache-only request contract', async () => {
   const surface = {};
   const lookups = [];
