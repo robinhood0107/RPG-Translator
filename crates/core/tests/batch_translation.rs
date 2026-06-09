@@ -5,7 +5,8 @@ use rpg_translator_core::{
     BatchValidator, CheckpointWriter, Engine, Error, FakeProvider, NewProject, NewQaFinding,
     NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse, ProviderClient,
     ProviderRequestSpacingConfig, ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, TextCodec,
-    TranslateProgressEvent, TranslationDb,
+    TranslateProgressEvent, TranslationDb, TranslationSpeedSample,
+    adaptive_translation_tuning_from_samples,
 };
 use tempfile::tempdir;
 
@@ -101,6 +102,51 @@ fn stable_test_spacing() -> ProviderRequestSpacingConfig {
         provider_503_backoff_ms: vec![0, 0, 0],
         provider_connection_backoff_ms: vec![0, 0, 0],
     }
+}
+
+fn speed_sample(status: &str, batch_size: i64, total_elapsed_ms: i64) -> TranslationSpeedSample {
+    TranslationSpeedSample {
+        id: 0,
+        provider_run_id: 1,
+        batch_index: 1,
+        lane: "plain_block".to_string(),
+        item_count: batch_size,
+        char_count: batch_size * 40,
+        estimated_token_count: batch_size * 10,
+        request_elapsed_ms: total_elapsed_ms.saturating_sub(750),
+        success_delay_ms: 750,
+        total_elapsed_ms,
+        status: status.to_string(),
+        failure_type: None,
+        effective_batch_size: batch_size,
+        model: Some("gemma".to_string()),
+        prompt_hash: "prompt".to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn adaptive_tuning_uses_speed_history_for_initial_batch_and_delay() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let fast_samples = vec![
+        speed_sample("success", 16, 2_000),
+        speed_sample("success", 16, 2_500),
+        speed_sample("success", 16, 3_000),
+    ];
+    let fast = adaptive_translation_tuning_from_samples(&fast_samples, 8, 4096, spacing.clone());
+    assert_eq!(fast.max_items_per_batch, 32);
+    assert!(fast.input_token_budget >= 1024);
+    assert_eq!(fast.provider_spacing.base_success_spacing_ms, 1250);
+    assert!(fast.decision_reason.contains("accelerating"));
+
+    let slow_samples = vec![
+        speed_sample("success", 16, 22_000),
+        speed_sample("final_failed", 16, 25_000),
+    ];
+    let slow = adaptive_translation_tuning_from_samples(&slow_samples, 16, 4096, spacing);
+    assert_eq!(slow.max_items_per_batch, 8);
+    assert_eq!(slow.provider_spacing.base_success_spacing_ms, 1500);
+    assert!(slow.decision_reason.contains("conservative"));
 }
 
 #[test]

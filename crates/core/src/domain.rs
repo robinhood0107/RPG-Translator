@@ -269,6 +269,7 @@ pub struct TranslateProgressSnapshot {
     pub success_delay_floor_ms: u64,
     pub next_delay_ms: Option<u64>,
     pub failure_reason_counts: BTreeMap<String, usize>,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
 }
 
@@ -469,6 +470,7 @@ pub struct TranslationJobSummary {
     pub success_delay_floor_ms: i64,
     pub next_delay_ms: Option<i64>,
     pub failure_reason_counts_json: String,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
 }
 
@@ -507,6 +509,7 @@ pub struct TranslationJobProgressUpdate {
     pub success_delay_floor_ms: i64,
     pub next_delay_ms: Option<i64>,
     pub failure_reason_counts_json: String,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
 }
 

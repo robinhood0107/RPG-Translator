@@ -133,6 +133,7 @@ export type TranslationJobSummary = {
 	  success_delay_floor_ms?: number;
 	  next_delay_ms?: number | null;
 	  failure_reason_counts_json?: string;
+	  adaptive_decision_reason?: string;
 	  legacy_checkpoint_only?: boolean;
   item_eta_ms?: number | null;
   batch_eta_ms?: number | null;
@@ -240,6 +241,7 @@ export type TranslateResponse = {
 	  success_delay_floor_ms?: number;
 	  next_delay_ms?: number | null;
 	  failure_reason_counts?: Record<string, number>;
+	  adaptive_decision_reason?: string;
 	  legacy_checkpoint_only?: boolean;
 	  model?: string | null;
 	};

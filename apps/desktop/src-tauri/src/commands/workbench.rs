@@ -252,6 +252,7 @@ fn backfill_latest_job_from_checkpoint(
         success_delay_floor_ms: 1500,
         next_delay_ms: None,
         failure_reason_counts_json: "{}".to_string(),
+        adaptive_decision_reason: "adaptive: legacy checkpoint only".to_string(),
         legacy_checkpoint_only: true,
     })?;
     db.latest_translation_job_summary(Some(&checkpoint.target_language))

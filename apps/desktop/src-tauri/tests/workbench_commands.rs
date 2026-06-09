@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use rpg_translator_core::{
     BatchCheckpoint, CheckpointWriter, Engine, GameLayoutKind, NewOccurrence, NewProject,
-    NewSourceText, NewTranslation, ScanProgressEvent, TextCodec, TranslateProgressEvent,
-    TranslateProgressSnapshot, TranslationDb, WorkbenchSettingsUpdate,
+    NewSourceText, NewTranslation, NewTranslationSpeedSample, ScanProgressEvent, TextCodec,
+    TranslateProgressEvent, TranslateProgressSnapshot, TranslationDb, WorkbenchSettingsUpdate,
+    translation_prompt_hash,
 };
 use rpg_translator_desktop::commands::{
     diagnostics::{self, DiagnosticsRequest},
@@ -1059,12 +1060,13 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             success_delay_floor_ms: 1500,
             next_delay_ms: Some(5_000),
             failure_reason_counts: reason_counts,
+            adaptive_decision_reason: "adaptive: conservative from history".to_string(),
             legacy_checkpoint_only: false,
         },
     ));
     assert_eq!(
         line,
-        "[RPG-Translator][translate] batch_done run=9 batch=12/1299 text=192/20774 retry_pending=16 provider_failures=16 final_failed=0 parse_failed=3 validation_failed=5 skipped=7 censored_retry=1 split=0 speed_mode=backoff success_streak=0 success_floor=00:00:01 next_delay=00:00:05 effective_batch=8 backoff=00:00:05 reasons=provider-503:16 current_items=16 last_batch=00:00:01 avg_batch=00:00:15 elapsed=00:03:10 eta_text=05:21:44 eta_batch=05:39:37 model=gemma.gguf target=ko"
+        "[RPG-Translator][translate] batch_done run=9 batch=12/1299 text=192/20774 retry_pending=16 provider_failures=16 final_failed=0 parse_failed=3 validation_failed=5 skipped=7 censored_retry=1 split=0 speed_mode=backoff success_streak=0 success_floor=00:00:01 next_delay=00:00:05 effective_batch=8 backoff=00:00:05 reasons=provider-503:16 adaptive=\"adaptive: conservative from history\" current_items=16 last_batch=00:00:01 avg_batch=00:00:15 elapsed=00:03:10 eta_text=05:21:44 eta_batch=05:39:37 model=gemma.gguf target=ko"
     );
 
     let paused = translate::format_translate_progress_event(&TranslateProgressEvent::Paused(
@@ -1100,6 +1102,7 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             success_delay_floor_ms: 1500,
             next_delay_ms: None,
             failure_reason_counts: BTreeMap::new(),
+            adaptive_decision_reason: "adaptive: no speed history loaded".to_string(),
             legacy_checkpoint_only: false,
         },
     ));
@@ -1328,6 +1331,77 @@ fn provider_benchmark_uses_real_prompt_and_does_not_write_translation_state() {
 }
 
 #[test]
+fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
+    tauri::async_runtime::block_on(async {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("workbench.sqlite");
+        let prompt = "Custom RPG prompt";
+        {
+            let mut db = TranslationDb::open(&db_path).expect("open db");
+            db.migrate().expect("migrate db");
+            db.upsert_source_text(&source_text_fixture("en", "Alpha"))
+                .expect("insert alpha");
+            db.upsert_source_text(&source_text_fixture("en", "Beta"))
+                .expect("insert beta");
+            let provider_run_id = db
+                .start_provider_run(&rpg_translator_core::NewProviderRun {
+                    provider: "local-openai-compatible".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    request_settings_json: "{}".to_string(),
+                })
+                .expect("start provider run");
+            let prompt_hash = translation_prompt_hash("en", "ko", prompt);
+            for batch_index in 1..=3 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "plain_block".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 2_000,
+                    success_delay_ms: 750,
+                    total_elapsed_ms: 2_750,
+                    status: "success".to_string(),
+                    failure_type: None,
+                    effective_batch_size: 16,
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert speed sample");
+            }
+        }
+        let provider = spawn_local_provider_expect(
+            r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"알파\"}\n{\"id\":2,\"translation\":\"베타\"}"}}]}"#,
+            "from English to Korean",
+        );
+
+        let response = translate::translate_with_local_provider_for_test(TranslateRequest {
+            db_path: path_string(&db_path),
+            project_id: None,
+            source_language: "en".to_string(),
+            target_language: "ko".to_string(),
+            batch_size: Some(4),
+            base_url: provider.base_url.clone(),
+            model: "fixture-model".to_string(),
+            system_prompt: prompt.to_string(),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            source_text_ids: None,
+            issue_filter: None,
+            retranslate_mode: None,
+        })
+        .await
+        .expect("translate with adaptive speed samples");
+
+        assert_eq!(response.accepted_count, 2);
+        assert_eq!(response.effective_batch_size, 32);
+        assert!(response.adaptive_decision_reason.contains("accelerating"));
+    });
+}
+
+#[test]
 fn local_provider_test_command_resolves_auto_model() {
     tauri::async_runtime::block_on(async {
         let provider = spawn_local_provider_with_model_list(
@@ -1355,7 +1429,7 @@ fn local_provider_commands_allow_empty_and_custom_prompts() {
     tauri::async_runtime::block_on(async {
         let empty_prompt_provider = spawn_local_provider_expect(
             r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"안녕\"}"}}]}"#,
-            "Format: JSON Lines",
+            "Return JSON Lines only",
         );
         let empty = translate::test_local_provider(ProviderTestRequest {
             base_url: empty_prompt_provider.base_url.clone(),

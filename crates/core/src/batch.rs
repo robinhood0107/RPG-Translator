@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     Error, NewProviderRun, NewQaFinding, NewTranslation, NewTranslationSpeedSample,
     ProviderTextState, Result, SourceTextRecord, TextCodec, TranslateProgressEvent,
-    TranslateProgressSnapshot, TranslationDb, TranslationJobProgressUpdate,
+    TranslateProgressSnapshot, TranslationDb, TranslationJobProgressUpdate, TranslationSpeedSample,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +348,7 @@ pub struct BatchTranslatorConfig {
     pub source_text_ids: Option<Vec<i64>>,
     pub include_existing_translations: bool,
     pub prompt_hash: String,
+    pub adaptive_decision_reason: String,
 }
 
 #[must_use]
@@ -383,6 +384,7 @@ impl Default for BatchTranslatorConfig {
             source_text_ids: None,
             include_existing_translations: false,
             prompt_hash: String::default(),
+            adaptive_decision_reason: "adaptive: no speed history loaded".to_string(),
         }
     }
 }
@@ -399,6 +401,121 @@ impl BatchTranslatorConfig {
             include_existing_translations: self.include_existing_translations,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveTranslationTuning {
+    pub max_items_per_batch: usize,
+    pub input_token_budget: usize,
+    pub provider_spacing: ProviderRequestSpacingConfig,
+    pub decision_reason: String,
+}
+
+#[must_use]
+pub fn adaptive_translation_tuning_from_samples(
+    samples: &[TranslationSpeedSample],
+    requested_batch_size: usize,
+    default_token_budget: usize,
+    default_spacing: ProviderRequestSpacingConfig,
+) -> AdaptiveTranslationTuning {
+    let requested_batch_size = requested_batch_size.max(1);
+    let default_token_budget = default_token_budget.max(1);
+    let mut spacing = default_spacing;
+    let success_samples = samples
+        .iter()
+        .filter(|sample| sample.status.starts_with("success") && sample.total_elapsed_ms > 0)
+        .collect::<Vec<_>>();
+    if success_samples.is_empty() {
+        let success_floor_ms = spacing.base_success_spacing_ms;
+        return AdaptiveTranslationTuning {
+            max_items_per_batch: requested_batch_size,
+            input_token_budget: default_token_budget,
+            provider_spacing: spacing,
+            decision_reason: format!(
+                "adaptive: no prior speed samples; using requested batch={requested_batch_size}, token_budget={default_token_budget}, success_floor={}ms",
+                success_floor_ms
+            ),
+        };
+    }
+
+    let failure_count = samples
+        .iter()
+        .filter(|sample| !sample.status.starts_with("success"))
+        .count();
+    let failure_rate = failure_count as f64 / samples.len().max(1) as f64;
+    let p95_ms = percentile_i64(
+        &success_samples
+            .iter()
+            .map(|sample| sample.total_elapsed_ms)
+            .collect::<Vec<_>>(),
+        95,
+    )
+    .unwrap_or(0);
+    let median_effective_batch = median_i64(
+        &success_samples
+            .iter()
+            .map(|sample| sample.effective_batch_size.max(1))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or(requested_batch_size as i64)
+    .clamp(1, 64) as usize;
+    let mut suggested_batch = median_effective_batch.max(requested_batch_size);
+    let mode = if failure_rate >= 0.10 || p95_ms >= 15_000 {
+        suggested_batch = (suggested_batch / 2).max(1);
+        spacing.base_success_spacing_ms = spacing.base_success_spacing_ms.max(1_500);
+        "conservative"
+    } else if failure_rate == 0.0 && p95_ms <= 5_000 {
+        suggested_batch = suggested_batch.saturating_mul(2).clamp(1, 64);
+        spacing.base_success_spacing_ms = spacing
+            .base_success_spacing_ms
+            .saturating_sub(spacing.success_spacing_step_ms)
+            .max(spacing.min_success_spacing_ms);
+        "accelerating"
+    } else {
+        "steady"
+    };
+
+    let token_budget = suggested_token_budget(&success_samples, suggested_batch)
+        .unwrap_or(default_token_budget)
+        .max(default_token_budget.min(1024))
+        .clamp(1024, 8192);
+    AdaptiveTranslationTuning {
+        max_items_per_batch: suggested_batch,
+        input_token_budget: token_budget,
+        provider_spacing: spacing.clone(),
+        decision_reason: format!(
+            "adaptive: {mode} from {} samples; failure_rate={:.0}%; p95={}ms; batch={}; token_budget={}; success_floor={}ms",
+            samples.len(),
+            failure_rate * 100.0,
+            p95_ms,
+            suggested_batch,
+            token_budget,
+            spacing.base_success_spacing_ms
+        ),
+    }
+}
+
+fn suggested_token_budget(
+    samples: &[&TranslationSpeedSample],
+    suggested_batch: usize,
+) -> Option<usize> {
+    let total_items = samples
+        .iter()
+        .map(|sample| sample.item_count.max(0) as usize)
+        .sum::<usize>();
+    if total_items == 0 {
+        return None;
+    }
+    let total_tokens = samples
+        .iter()
+        .map(|sample| sample.estimated_token_count.max(0) as usize)
+        .sum::<usize>();
+    let tokens_per_item = total_tokens.div_ceil(total_items).max(1);
+    Some(
+        tokens_per_item
+            .saturating_mul(suggested_batch)
+            .saturating_mul(2),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +551,7 @@ pub struct BatchRunReport {
     pub success_delay_floor_ms: u64,
     pub next_delay_ms: Option<u64>,
     pub failure_reason_counts: BTreeMap<String, usize>,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
 }
 
@@ -700,6 +818,7 @@ impl BatchTranslator {
             success_delay_floor_ms: config.provider_spacing.base_success_spacing_ms,
             next_delay_ms: None,
             failure_reason_counts: BTreeMap::new(),
+            adaptive_decision_reason: config.adaptive_decision_reason.clone(),
             legacy_checkpoint_only: false,
         };
         persist_translation_job_progress(
@@ -934,6 +1053,7 @@ fn emit_batch_progress<F>(
         success_delay_floor_ms: report.success_delay_floor_ms,
         next_delay_ms: report.next_delay_ms,
         failure_reason_counts: report.failure_reason_counts.clone(),
+        adaptive_decision_reason: report.adaptive_decision_reason.clone(),
         legacy_checkpoint_only: report.legacy_checkpoint_only,
     };
     let event = progress_event_from_snapshot(kind, snapshot);
@@ -1003,6 +1123,7 @@ fn persist_translation_job_progress(
         next_delay_ms: report.next_delay_ms.map(u64_to_i64),
         failure_reason_counts_json: serde_json::to_string(&report.failure_reason_counts)
             .unwrap_or_else(|_| "{}".to_string()),
+        adaptive_decision_reason: report.adaptive_decision_reason.clone(),
         legacy_checkpoint_only: report.legacy_checkpoint_only,
     })?;
     Ok(())
@@ -1712,6 +1833,28 @@ impl ProviderFailureReason {
 
 fn count_batch_source_text_ids(batch: &[BatchJob]) -> usize {
     batch.iter().map(|job| job.source_text_ids.len()).sum()
+}
+
+fn median_i64(values: &[i64]) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+fn percentile_i64(values: &[i64], percentile: u64) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    let percentile = percentile.min(100);
+    let index = (values.len().saturating_sub(1) as u64)
+        .saturating_mul(percentile)
+        .div_ceil(100);
+    values.get(index as usize).copied()
 }
 
 fn success_delay_ms(

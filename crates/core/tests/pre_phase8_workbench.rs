@@ -339,6 +339,7 @@ fn translation_job_progress_survives_restart_and_reports_latest_summary() -> Res
             next_delay_ms: Some(5_000),
             failure_reason_counts_json: "{\"provider-503\":6367,\"provider-connection\":5462}"
                 .to_string(),
+            adaptive_decision_reason: "adaptive: test history".to_string(),
             legacy_checkpoint_only: false,
             item_eta_ms: Some(26_880_000),
             batch_eta_ms: Some(1_880_000),

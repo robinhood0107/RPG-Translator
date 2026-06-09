@@ -12,12 +12,13 @@ mod text_codec;
 mod workbench;
 
 pub use batch::{
-    BatchCheckpoint, BatchFailureDetail, BatchJob, BatchPlan, BatchPlanner, BatchPlannerConfig,
-    BatchRunReport, BatchRunStatus, BatchTranslator, BatchTranslatorConfig, BatchValidator,
-    CheckpointFailureDetail, CheckpointWriter, FakeProvider, ProviderBatchItem,
-    ProviderBatchRequest, ProviderBatchResponse, ProviderClient, ProviderRequestSpacingConfig,
-    ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport,
-    ProviderSpeedBenchmarkRun, ValidatedTranslation, translation_prompt_hash,
+    AdaptiveTranslationTuning, BatchCheckpoint, BatchFailureDetail, BatchJob, BatchPlan,
+    BatchPlanner, BatchPlannerConfig, BatchRunReport, BatchRunStatus, BatchTranslator,
+    BatchTranslatorConfig, BatchValidator, CheckpointFailureDetail, CheckpointWriter, FakeProvider,
+    ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse, ProviderClient,
+    ProviderRequestSpacingConfig, ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig,
+    ProviderSpeedBenchmarkReport, ProviderSpeedBenchmarkRun, ValidatedTranslation,
+    adaptive_translation_tuning_from_samples, translation_prompt_hash,
 };
 pub use cache_key::{CacheKeyBuilder, CacheKeyParts};
 pub use db::{SchemaMigrationReport, TranslationDb};

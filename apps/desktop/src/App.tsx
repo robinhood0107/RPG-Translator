@@ -159,6 +159,7 @@ type TranslateProgressSnapshot = {
   successDelayFloorMs: number;
   nextDelayMs?: number | null;
   failureReasonCounts: Record<string, number>;
+  adaptiveDecisionReason: string;
   legacyCheckpointOnly: boolean;
   phase: TranslateProgressPhase;
 };
@@ -194,6 +195,7 @@ type TranslateProgressEventData = {
   success_delay_floor_ms?: number;
   next_delay_ms?: number | null;
   failure_reason_counts?: Record<string, number>;
+  adaptive_decision_reason?: string;
   legacy_checkpoint_only?: boolean;
 };
 type TranslateProgressEventPayload =
@@ -363,6 +365,7 @@ export const text = {
     successDelayFloor: "Success wait floor",
     nextDelay: "Next wait",
     recentAverageSpeed: "Recent average speed",
+    adaptiveDecisionReason: "Speed tuning reason",
     failureReasons: "Recent failure reasons",
     batchHistoryUnavailable: "Batch history unavailable",
     legacyRetryNotice: "Previous run failures are retry targets. Resume will retry them.",
@@ -752,6 +755,7 @@ export const text = {
     successDelayFloor: "성공 후 최소 대기",
     nextDelay: "다음 대기",
     recentAverageSpeed: "최근 평균 속도",
+    adaptiveDecisionReason: "속도 조정 사유",
     failureReasons: "최근 실패 원인",
     batchHistoryUnavailable: "배치 기록 없음",
     legacyRetryNotice: "이전 실행 실패는 이어하기 대상입니다. 이어하기를 누르면 다시 시도합니다.",
@@ -3368,6 +3372,7 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
       successDelayFloorMs: job.success_delay_floor_ms ?? 1500,
       nextDelayMs: job.next_delay_ms ?? null,
       failureReasonCounts: parseFailureReasonCounts(job.failure_reason_counts_json),
+      adaptiveDecisionReason: job.adaptive_decision_reason ?? "",
       legacyCheckpointOnly,
       phase: job.status === "completed" || job.status === "completed_with_failures" ? "completed" : "paused",
     };
@@ -3409,6 +3414,7 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
     successDelayFloorMs: 1500,
     nextDelayMs: null,
     failureReasonCounts: {},
+    adaptiveDecisionReason: "adaptive: legacy checkpoint only",
     legacyCheckpointOnly: true,
     phase: "paused",
   };
@@ -3572,6 +3578,7 @@ function progressFromTranslateResponse(
     successDelayFloorMs: response.success_delay_floor_ms ?? 1500,
     nextDelayMs: response.next_delay_ms ?? null,
     failureReasonCounts: response.failure_reason_counts ?? {},
+    adaptiveDecisionReason: response.adaptive_decision_reason ?? "",
     legacyCheckpointOnly: response.legacy_checkpoint_only ?? false,
     phase: response.status === "paused" ? "paused" : "completed",
   };
@@ -3613,6 +3620,7 @@ function translateProgressFromEvent(
     successDelayFloorMs: event.success_delay_floor_ms ?? 1500,
     nextDelayMs: event.next_delay_ms ?? null,
     failureReasonCounts: event.failure_reason_counts ?? {},
+    adaptiveDecisionReason: event.adaptive_decision_reason ?? "",
     legacyCheckpointOnly: event.legacy_checkpoint_only ?? false,
     phase,
   };
@@ -4420,6 +4428,7 @@ function TranslateProgressView({
         <span>{t.successStreak}: {progress.successStreak.toLocaleString()}</span>
         <span>{t.successDelayFloor}: {formatMaybeDuration(progress.successDelayFloorMs)}</span>
         <span>{t.nextDelay}: {formatMaybeDuration(progress.nextDelayMs)}</span>
+        <span>{t.adaptiveDecisionReason}: {progress.adaptiveDecisionReason || "--"}</span>
         {hasBatchHistory ? (
           <>
             <span>{t.lastBatch} {progress.lastBatchElapsedMs === null || progress.lastBatchElapsedMs === undefined ? "--:--:--" : formatDuration(progress.lastBatchElapsedMs)}</span>

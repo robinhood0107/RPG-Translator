@@ -243,6 +243,7 @@ impl TranslationDb {
                 success_delay_floor_ms INTEGER NOT NULL DEFAULT 1500,
                 next_delay_ms INTEGER,
                 failure_reason_counts_json TEXT NOT NULL DEFAULT '{}',
+                adaptive_decision_reason TEXT NOT NULL DEFAULT '',
                 legacy_checkpoint_only INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -322,6 +323,7 @@ impl TranslationDb {
                 "success_delay_floor_ms",
                 "next_delay_ms",
                 "failure_reason_counts_json",
+                "adaptive_decision_reason",
                 "legacy_checkpoint_only",
             ] {
                 if !columns.contains(column) {
@@ -573,6 +575,7 @@ impl TranslationDb {
             ("success_delay_floor_ms", "INTEGER NOT NULL DEFAULT 1500"),
             ("next_delay_ms", "INTEGER"),
             ("failure_reason_counts_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("adaptive_decision_reason", "TEXT NOT NULL DEFAULT ''"),
             ("legacy_checkpoint_only", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !columns.contains(column) {
@@ -613,6 +616,7 @@ impl TranslationDb {
                     ELSE effective_batch_size
                 END,
                 failure_reason_counts_json = COALESCE(NULLIF(failure_reason_counts_json, ''), '{}'),
+                adaptive_decision_reason = COALESCE(adaptive_decision_reason, ''),
                 legacy_checkpoint_only = COALESCE(legacy_checkpoint_only, 0)
             ",
             [],
@@ -2495,7 +2499,8 @@ impl TranslationDb {
                     success_delay_floor_ms = ?30,
                     next_delay_ms = ?31,
                     failure_reason_counts_json = ?32,
-                    legacy_checkpoint_only = ?33,
+                    adaptive_decision_reason = ?33,
+                    legacy_checkpoint_only = ?34,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?1
                 ",
@@ -2532,6 +2537,7 @@ impl TranslationDb {
                     input.success_delay_floor_ms,
                     input.next_delay_ms,
                     input.failure_reason_counts_json,
+                    input.adaptive_decision_reason,
                     input.legacy_checkpoint_only
                 ],
             )?;
@@ -2572,9 +2578,10 @@ impl TranslationDb {
                     success_delay_floor_ms,
                     next_delay_ms,
                     failure_reason_counts_json,
+                    adaptive_decision_reason,
                     legacy_checkpoint_only
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)
                 ",
                 params![
                     input.provider_run_id,
@@ -2609,6 +2616,7 @@ impl TranslationDb {
                     input.success_delay_floor_ms,
                     input.next_delay_ms,
                     input.failure_reason_counts_json,
+                    input.adaptive_decision_reason,
                     input.legacy_checkpoint_only
                 ],
             )?;
@@ -2766,6 +2774,7 @@ impl TranslationDb {
                 translation_jobs.success_delay_floor_ms,
                 translation_jobs.next_delay_ms,
                 translation_jobs.failure_reason_counts_json,
+                translation_jobs.adaptive_decision_reason,
                 translation_jobs.legacy_checkpoint_only,
                 provider_runs.model
             FROM translation_jobs
@@ -2810,6 +2819,7 @@ impl TranslationDb {
                 translation_jobs.success_delay_floor_ms,
                 translation_jobs.next_delay_ms,
                 translation_jobs.failure_reason_counts_json,
+                translation_jobs.adaptive_decision_reason,
                 translation_jobs.legacy_checkpoint_only,
                 provider_runs.model
             FROM translation_jobs
@@ -2854,8 +2864,9 @@ impl TranslationDb {
                 success_delay_floor_ms: row.get(30)?,
                 next_delay_ms: row.get(31)?,
                 failure_reason_counts_json: row.get(32)?,
-                legacy_checkpoint_only: row.get(33)?,
-                model: row.get(34)?,
+                adaptive_decision_reason: row.get(33)?,
+                legacy_checkpoint_only: row.get(34)?,
+                model: row.get(35)?,
             })
         };
         if let Some(target_language) = target_language {

@@ -16,7 +16,8 @@ use rpg_translator_core::{
     LocalOpenAiProvider, LocalProviderTransport, ProviderBatchItem, ProviderBatchRequest,
     ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
     ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result, TextCodec,
-    TranslateProgressEvent, TranslateProgressSnapshot, translation_prompt_hash,
+    TranslateProgressEvent, TranslateProgressSnapshot, adaptive_translation_tuning_from_samples,
+    translation_prompt_hash,
 };
 
 use super::shared::{
@@ -253,6 +254,15 @@ async fn translate_with_local_provider_running(
             &request.target_language,
             &request.system_prompt,
         );
+        let requested_batch_size = request.batch_size.unwrap_or(16);
+        let prior_speed_samples =
+            db.recent_translation_speed_samples(provider.model_name(), Some(&prompt_hash), 96)?;
+        let adaptive_tuning = adaptive_translation_tuning_from_samples(
+            &prior_speed_samples,
+            requested_batch_size,
+            BatchTranslatorConfig::default().input_token_budget,
+            ProviderRequestSpacingConfig::stable(),
+        );
         let progress_state = state.clone();
         let report = BatchTranslator::run_with_checkpoint_and_progress(
             &mut db,
@@ -261,12 +271,14 @@ async fn translate_with_local_provider_running(
             BatchTranslatorConfig {
                 project_id: request.project_id,
                 source_language: request.source_language.clone(),
-                max_items_per_batch: request.batch_size.unwrap_or(16),
+                max_items_per_batch: adaptive_tuning.max_items_per_batch,
+                input_token_budget: adaptive_tuning.input_token_budget,
                 retry_attempts: 0,
+                provider_spacing: adaptive_tuning.provider_spacing,
                 source_text_ids,
                 include_existing_translations,
                 prompt_hash,
-                ..BatchTranslatorConfig::default()
+                adaptive_decision_reason: adaptive_tuning.decision_reason,
             },
             Some(&checkpoint_path),
             move |event| {
@@ -317,6 +329,7 @@ async fn translate_with_local_provider_running(
             success_delay_floor_ms: report.success_delay_floor_ms,
             next_delay_ms: report.next_delay_ms,
             failure_reason_counts: report.failure_reason_counts,
+            adaptive_decision_reason: report.adaptive_decision_reason,
             legacy_checkpoint_only: report.legacy_checkpoint_only,
             model: provider.model_name().map(str::to_string),
         })
@@ -514,6 +527,7 @@ pub struct TranslateResponse {
     pub success_delay_floor_ms: u64,
     pub next_delay_ms: Option<u64>,
     pub failure_reason_counts: BTreeMap<String, usize>,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
     pub model: Option<String>,
 }
@@ -672,7 +686,7 @@ fn translate_log_env_override(value: &str) -> Option<bool> {
 pub fn format_translate_progress_event(event: &TranslateProgressEvent) -> String {
     let (name, parts) = translate_progress_parts(event);
     format!(
-        "[RPG-Translator][translate] {name} run={run} batch={batch_done}/{batch_total} text={items_done}/{items_total} retry_pending={retry_pending} provider_failures={provider_failures} final_failed={final_failed} parse_failed={parse_failed} validation_failed={validation_failed} skipped={skipped} censored_retry={censored_retry} split={split} speed_mode={speed_mode} success_streak={success_streak} success_floor={success_floor} next_delay={next_delay} effective_batch={effective_batch} backoff={backoff} reasons={reasons} current_items={current_items} last_batch={last_batch} avg_batch={avg_batch} elapsed={elapsed} eta_text={eta_text} eta_batch={eta_batch} model={model} target={target}",
+        "[RPG-Translator][translate] {name} run={run} batch={batch_done}/{batch_total} text={items_done}/{items_total} retry_pending={retry_pending} provider_failures={provider_failures} final_failed={final_failed} parse_failed={parse_failed} validation_failed={validation_failed} skipped={skipped} censored_retry={censored_retry} split={split} speed_mode={speed_mode} success_streak={success_streak} success_floor={success_floor} next_delay={next_delay} effective_batch={effective_batch} backoff={backoff} reasons={reasons} adaptive=\"{adaptive}\" current_items={current_items} last_batch={last_batch} avg_batch={avg_batch} elapsed={elapsed} eta_text={eta_text} eta_batch={eta_batch} model={model} target={target}",
         name = name,
         run = parts.provider_run_id,
         batch_done = parts.processed_batches,
@@ -700,6 +714,7 @@ pub fn format_translate_progress_event(event: &TranslateProgressEvent) -> String
             .map(format_duration)
             .unwrap_or_else(|| "--:--:--".to_string()),
         reasons = format_failure_reasons(&parts.failure_reason_counts),
+        adaptive = parts.adaptive_decision_reason,
         current_items = parts.current_batch_items,
         last_batch = parts
             .last_batch_elapsed_ms

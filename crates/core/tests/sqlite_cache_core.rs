@@ -1156,6 +1156,7 @@ fn stale_running_translation_jobs_become_terminal_on_hydrate_repair() -> Result<
         success_delay_floor_ms: 1500,
         next_delay_ms: None,
         failure_reason_counts_json: "{}".to_string(),
+        adaptive_decision_reason: "adaptive: test".to_string(),
         legacy_checkpoint_only: false,
     })?;
 
