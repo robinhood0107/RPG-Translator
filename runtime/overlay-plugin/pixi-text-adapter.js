@@ -21,8 +21,13 @@
         'pixi-bitmap-text',
         watched,
       );
-      const lifecycleInstalled = installContainerLifecycle(pixi.Container, translator, watched)
-        || installContainerLifecycle(pixi.DisplayObjectContainer, translator, watched);
+      const containerLifecycleInstalled = installContainerLifecycle(pixi.Container, translator, watched);
+      const displayObjectContainerLifecycleInstalled = installContainerLifecycle(
+        pixi.DisplayObjectContainer,
+        translator,
+        watched,
+      );
+      const lifecycleInstalled = containerLifecycleInstalled || displayObjectContainerLifecycleInstalled;
       installFrameSweep(scope, translator, watched);
       return textInstalled || bitmapTextInstalled || lifecycleInstalled;
     }

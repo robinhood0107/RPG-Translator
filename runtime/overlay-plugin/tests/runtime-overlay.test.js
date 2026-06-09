@@ -6167,6 +6167,76 @@ test('pixi text adapter retires removeChildAt removeChildren and destroyed text 
   assert.equal(orchestrator.diagnostics().archived_items, 3);
 });
 
+test('pixi text adapter installs lifecycle hooks on both PIXI container classes', () => {
+  const index = {
+    translate({ text }) {
+      if (text.endsWith(' JP')) return text.replace(' JP', ' KO');
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+    },
+    PIXI: {},
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+  };
+  root.PIXI.Container.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.PIXI.DisplayObjectContainer = function DisplayObjectContainer() {
+    this.children = [];
+  };
+  root.PIXI.DisplayObjectContainer.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const modernContainer = new root.PIXI.Container();
+  const legacyContainer = new root.PIXI.DisplayObjectContainer();
+  const modernText = new root.PIXI.Text('');
+  const legacyText = new root.PIXI.Text('');
+  modernText.parent = modernContainer;
+  legacyText.parent = legacyContainer;
+  modernContainer.children.push(modernText);
+  legacyContainer.children.push(legacyText);
+
+  modernText.text = 'Modern JP';
+  legacyText.text = 'Legacy JP';
+  assert.equal(orchestrator.diagnostics().active_items, 2);
+
+  modernContainer.removeChild(modernText);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+
+  legacyContainer.removeChild(legacyText);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 2);
+});
+
 test('boot installs cache-only overlay without provider surfaces', async () => {
   const root = {
     document: { body: null },
