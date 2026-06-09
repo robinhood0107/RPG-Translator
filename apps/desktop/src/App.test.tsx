@@ -2428,6 +2428,51 @@ test("desktop window close still fires native close fallback after destroy resol
   expect(appWindowDestroyMock.mock.invocationCallOrder[0]).toBeLessThan(appWindowCloseMock.mock.invocationCallOrder[0]);
 });
 
+test("desktop repeated window close allows native close without restarting safe shutdown", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const firstEvent = { preventDefault: vi.fn() };
+    const firstClose = appWindowHandlers.closeRequested?.(firstEvent);
+    const secondEvent = { preventDefault: vi.fn() };
+    await act(async () => {
+      await appWindowHandlers.closeRequested?.(secondEvent);
+    });
+
+    expect(firstEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(secondEvent.preventDefault).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.filter(([name]) => name === "save_workbench_state")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([name]) => name === "prepare_safe_shutdown")).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await firstClose;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("desktop window close does not wait beyond the total safe close budget", async () => {
   (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
   localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
