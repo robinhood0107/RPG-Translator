@@ -11,27 +11,11 @@
     static install(scope, translator) {
       if (!scope || !scope.Bitmap || !scope.Bitmap.prototype) return false;
       const prototype = scope.Bitmap.prototype;
-      if (prototype.__rpgTranslatorBitmapTextInstalled === INSTALL_TOKEN) return true;
-      const originalDrawText = prototype.drawText;
-      if (typeof originalDrawText !== 'function') return false;
+      if (typeof prototype.drawText !== 'function') return false;
       overlay(scope).__bitmapTextTranslator = translator;
-      prototype.drawText = function translatedBitmapText(text, ...rest) {
-        if (isSmallTextDrawActive(scope, this) || isSmallTextScratchBitmap(scope, this)) {
-          return originalDrawText.call(this, text, ...rest);
-        }
-        if (this.__rpgTranslatorBitmapReplayDepth > 0 || !translator || typeof translator.observeRecord !== 'function') {
-          return originalDrawText.call(this, translateText(translator, scope, text, this), ...rest);
-        }
-        const fragment = createFragment(scope, this, text, rest);
-        const surfaceDraw = routeSurfaceDraw(translator, this, fragment, originalDrawText);
-        if (surfaceDraw.handled) return surfaceDraw.result;
-        const state = ensureState(this);
-        state.fragments.push(fragment);
-        if (state.fragments.length > 240) state.fragments.splice(0, state.fragments.length - 240);
-        scheduleFlush(scope, this);
-        return originalDrawText.call(this, text, ...rest);
-      };
-      prototype.drawText.__rpgTranslatorOriginal = originalDrawText;
+      installBitmapDrawWrapper(scope, prototype, translator, 'drawText');
+      installBitmapDrawWrapper(scope, prototype, translator, 'drawTextS');
+      installBitmapDrawWrapper(scope, prototype, translator, 'drawTextM');
       prototype.__rpgTranslatorBitmapTextInstalled = INSTALL_TOKEN;
       installMutationHooks(scope, prototype, translator);
       installSmallTextMarkers(scope);
@@ -41,13 +25,39 @@
     }
   }
 
-  function createFragment(scope, bitmap, text, rest) {
+  function installBitmapDrawWrapper(scope, prototype, translator, methodName) {
+    const originalDrawText = prototype && prototype[methodName];
+    if (typeof originalDrawText !== 'function') return false;
+    if (originalDrawText.__rpgTranslatorBitmapText === INSTALL_TOKEN) return true;
+    prototype[methodName] = function translatedBitmapText(text, ...rest) {
+      if (isSmallTextDrawActive(scope, this) || isSmallTextScratchBitmap(scope, this)) {
+        return originalDrawText.call(this, text, ...rest);
+      }
+      if (this.__rpgTranslatorBitmapReplayDepth > 0 || !translator || typeof translator.observeRecord !== 'function') {
+        return originalDrawText.call(this, translateText(translator, scope, text, this, methodName), ...rest);
+      }
+      const fragment = createFragment(scope, this, text, rest, methodName);
+      const surfaceDraw = routeSurfaceDraw(translator, this, fragment, originalDrawText);
+      if (surfaceDraw.handled) return surfaceDraw.result;
+      const state = ensureState(this);
+      state.fragments.push(fragment);
+      if (state.fragments.length > 240) state.fragments.splice(0, state.fragments.length - 240);
+      scheduleFlush(scope, this);
+      return originalDrawText.call(this, text, ...rest);
+    };
+    prototype[methodName].__rpgTranslatorOriginal = originalDrawText;
+    prototype[methodName].__rpgTranslatorBitmapText = INSTALL_TOKEN;
+    return true;
+  }
+
+  function createFragment(scope, bitmap, text, rest, methodName) {
     const x = numberAt(rest, 0, 0);
     const y = numberAt(rest, 1, 0);
     const maxWidth = numberAt(rest, 2, estimateTextWidth(bitmap, text));
     const lineHeight = numberAt(rest, 3, Number(bitmap && bitmap.fontSize) || 24);
     const align = rest && rest.length > 4 ? String(rest[4] || 'left') : 'left';
     return {
+      methodName: methodName || 'drawText',
       text: String(text ?? ''),
       x,
       y,
@@ -64,7 +74,7 @@
     const outcome = translator.recordSurfaceDraw({
       target: bitmap,
       adapterId: 'bitmap-text',
-      methodName: 'drawText',
+      methodName: fragment.methodName || 'drawText',
       text: fragment.text,
       x: fragment.x,
       y: fragment.y,
@@ -182,6 +192,7 @@
       metadata: {
         reason,
         fragments: group.length,
+        methodName: group[0].methodName || 'drawText',
       },
     });
     if (command && command.itemId) state.entries.set(slotKey, {
@@ -193,13 +204,23 @@
     });
     if (!command || command.status !== 'hit') return false;
     if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, bitmap, text)) return false;
-    replayDrawText(bitmap, command.translatedText, bounds.x, bounds.y, Math.max(bounds.width, group[0].maxWidth || 1), group[0].lineHeight, group[0].align);
+    replayDrawText(
+      bitmap,
+      command.translatedText,
+      bounds.x,
+      bounds.y,
+      Math.max(bounds.width, group[0].maxWidth || 1),
+      group[0].lineHeight,
+      group[0].align,
+      group[0].methodName || 'drawText',
+    );
     return true;
   }
 
-  function replayDrawText(bitmap, text, x, y, width, lineHeight, align) {
+  function replayDrawText(bitmap, text, x, y, width, lineHeight, align, methodName) {
+    const drawMethod = methodName || 'drawText';
     const original = bitmap && bitmap.constructor && bitmap.constructor.prototype
-      ? bitmap.constructor.prototype.drawText.__rpgTranslatorOriginal
+      ? bitmap.constructor.prototype[drawMethod] && bitmap.constructor.prototype[drawMethod].__rpgTranslatorOriginal
       : null;
     if (typeof original !== 'function') return false;
     bitmap.__rpgTranslatorBitmapReplayDepth = (bitmap.__rpgTranslatorBitmapReplayDepth || 0) + 1;
@@ -354,7 +375,7 @@
     return !!(bitmap && BitmapCtor && BitmapCtor.drawSmallTextBitmap && bitmap === BitmapCtor.drawSmallTextBitmap);
   }
 
-  function translateText(translator, scope, text, surface) {
+  function translateText(translator, scope, text, surface, methodName) {
     const request = {
       engine: overlay(scope).engine || 'unknown',
       sourceLanguage: overlay(scope).sourceLanguage,
@@ -362,8 +383,8 @@
       text,
       surface,
       adapter: 'bitmap-text',
-      kind: 'drawText',
-      slotKey: 'bitmap-drawText',
+      kind: methodName || 'drawText',
+      slotKey: `bitmap-${methodName || 'drawText'}`,
     };
     const translated = translator && typeof translator.translateText === 'function'
       ? translator.translateText(request)

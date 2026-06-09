@@ -6045,6 +6045,59 @@ test('bitmap text adapter preserves existing entries during marker-active mutati
   ]);
 });
 
+test('bitmap text adapter observes alternate drawText methods', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Styled') return '스타일';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 160;
+      this.height = 80;
+      this.fontSize = 20;
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['frame']);
+      },
+    },
+  };
+  root.Bitmap.prototype.textWidth = function textWidth(text) {
+    return String(text).length * 10;
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+  root.Bitmap.prototype.drawTextS = function drawTextS(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawTextS', text, x, y, maxWidth, lineHeight, align]);
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+
+  bitmap.drawTextS('Styled', 4, 8, 80, 24, 'center');
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(requests, ['Styled']);
+  assert.deepEqual(calls, [
+    ['drawTextS', 'Styled', 4, 8, 80, 24, 'center'],
+    ['frame'],
+    ['drawTextS', '스타일', 4, 8, 80, 24, 'center'],
+  ]);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+});
+
 test('pixi text adapter retires removed objects and restores translated text scale', () => {
   const index = {
     translate({ text }) {
