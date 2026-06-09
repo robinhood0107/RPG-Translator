@@ -3,6 +3,7 @@
   const DEFAULT_MAX_COMMANDS = 512;
   const DEFAULT_MAX_BRANCH_DEPTH = 8;
   const DEFAULT_MAX_NESTED_DEPTH = 8;
+  const DEFAULT_MAX_NESTED_LISTS_PER_COMMAND = 8;
   const DEFAULT_MESSAGE_BUDGET_COST = 1;
 
   class ForesightScanner {
@@ -12,10 +13,12 @@
       this.sourceLanguage = options.sourceLanguage || '';
       this.targetLanguage = options.targetLanguage || '';
       this.commonEvents = options.commonEvents || (root && root.$dataCommonEvents) || {};
+      this.commandCatalog = normalizeCommandCatalog(options.commandCatalog);
       this.maxBlocks = positiveInteger(options.maxBlocks, DEFAULT_MAX_BLOCKS);
       this.maxCommands = positiveInteger(options.maxCommands, DEFAULT_MAX_COMMANDS);
       this.maxBranchDepth = positiveInteger(options.maxBranchDepth, DEFAULT_MAX_BRANCH_DEPTH);
       this.maxNestedDepth = positiveInteger(options.maxNestedDepth, DEFAULT_MAX_NESTED_DEPTH);
+      this.maxNestedListsPerCommand = positiveInteger(options.maxNestedListsPerCommand, DEFAULT_MAX_NESTED_LISTS_PER_COMMAND);
       this.budgetLimit = positiveInteger(options.budget, this.maxBlocks);
       this.recentScans = [];
       this.cacheHits = 0;
@@ -40,6 +43,7 @@
         indent: Number.isFinite(Number(origin.indent)) ? Number(origin.indent) : null,
         listId: origin.listId || origin.interpreterId || 'event',
         commonStack: cloneCommonStack(origin.commonStack || []),
+        nestedDepth: 0,
         branchDepth: 0,
         branchPath: [],
       }];
@@ -115,6 +119,10 @@
       const key = String(code);
       this.commandCounts[key] = (this.commandCounts[key] || 0) + 1;
       diagnostics.command_counts[key] = (diagnostics.command_counts[key] || 0) + 1;
+    }
+
+    getEventCommandMetadata(code) {
+      return this.commandCatalog[String(Number(code))] || getEventCommandMetadata(code);
     }
 
     recordScan(diagnostics) {
@@ -242,12 +250,13 @@
         const commonEvent = resolveCommonEvent(scanner.commonEvents, commonEventId);
         const nestedList = createCommonEventNestedList(commonEventId, commonEvent, frame);
         const commonStack = cloneCommonStack(frame.commonStack);
+        const nestedDepth = getFrameNestedDepth(frame);
         if (
           commonEventId
           && commonEvent
           && Array.isArray(commonEvent.list)
           && !commonStack.includes(commonEventId)
-          && commonStack.length < scanner.maxNestedDepth
+          && nestedDepth < scanner.maxNestedDepth
         ) {
           stack.push({
             list,
@@ -255,6 +264,7 @@
             indent: frame.indent,
             listId: frame.listId,
             commonStack,
+            nestedDepth,
             ...inheritBranchContext(frame),
           });
           stack.push({
@@ -263,6 +273,7 @@
             indent: 0,
             listId: `common:${commonEventId}`,
             commonStack: commonStack.concat(commonEventId),
+            nestedDepth: nestedDepth + 1,
             ...inheritBranchContext(frame),
           });
           diagnostics.common_event_pushes += 1;
@@ -289,7 +300,38 @@
         });
         return;
       }
-      const metadata = getEventCommandMetadata(code);
+      const metadata = scanner.getEventCommandMetadata(code);
+      const nestedRead = readEmbeddedNestedListCommand(scanner, list, index, command, metadata, frame);
+      if (nestedRead) {
+        recordCommandAction(diagnostics, metadata);
+        if (nestedRead.transparent) {
+          stack.push({
+            list,
+            index: index + 1,
+            indent: frame.indent,
+            listId: frame.listId,
+            commonStack: cloneCommonStack(frame.commonStack),
+            nestedDepth: getFrameNestedDepth(frame),
+            ...inheritBranchContext(frame),
+          });
+          for (let nestedIndex = nestedRead.frames.length - 1; nestedIndex >= 0; nestedIndex -= 1) {
+            stack.push(nestedRead.frames[nestedIndex]);
+          }
+          return;
+        }
+        diagnostics.stop_reason = nestedRead.stop_reason;
+        stack.length = 0;
+        appendPathStop(diagnostics, {
+          index,
+          stop_reason: diagnostics.stop_reason,
+          branch_depth: frame.branchDepth || 0,
+          branch_path: cloneBranchPath(frame.branchPath),
+          code,
+          label: metadata.label,
+          nested_list: nestedRead.nested_list,
+        });
+        return;
+      }
       if (metadata.scanBehavior === 'advance') {
         recordCommandAction(diagnostics, metadata);
         index += 1;
@@ -369,6 +411,7 @@
         indent: target.bodyIndent,
         listId: `${frame.listId || 'event'}:branch:${target.ownerIndex}:${branchIndex}`,
         commonStack: cloneCommonStack(frame.commonStack),
+        nestedDepth: getFrameNestedDepth(frame),
         branchKind,
         branchDepth: parentDepth + 1,
         branchPath,
@@ -388,6 +431,140 @@
       });
     });
     return branchRead.joinIndex;
+  }
+
+  function readEmbeddedNestedListCommand(scanner, list, index, command, metadata, frame) {
+    const specs = Array.isArray(metadata && metadata.nestedLists) ? metadata.nestedLists : [];
+    if (!specs.length) return null;
+    if (specs.length > scanner.maxNestedListsPerCommand) {
+      return {
+        transparent: false,
+        stop_reason: 'nested-list-limit',
+        nested_list: createEmbeddedNestedListInfo({ name: 'limit', path: '' }, frame, index, metadata, 0),
+      };
+    }
+
+    const resolved = specs.map((spec) => resolveConfiguredNestedList(command, spec));
+    const unavailable = resolved.find((entry) => !entry.list && !entry.optional);
+    if (unavailable) {
+      return {
+        transparent: false,
+        stop_reason: 'nested-list-unavailable',
+        nested_list: createEmbeddedNestedListInfo(unavailable, frame, index, metadata, 0),
+      };
+    }
+
+    const available = resolved.filter((entry) => Array.isArray(entry.list));
+    if (!available.length) return null;
+    if (getFrameNestedDepth(frame) >= scanner.maxNestedDepth) {
+      return {
+        transparent: false,
+        stop_reason: 'nested-list-depth-limit',
+        nested_list: createEmbeddedNestedListInfo(available[0], frame, index, metadata, 0),
+      };
+    }
+
+    return {
+      transparent: true,
+      frames: available.map((entry, nestedIndex) => createEmbeddedNestedListFrame(entry, frame, index, metadata, nestedIndex)),
+    };
+  }
+
+  function resolveConfiguredNestedList(command, spec) {
+    const path = createDisplayNestedListPath(spec && spec.path);
+    const resolved = resolveNestedListPath(command, path);
+    return {
+      list: resolved.found && isEventCommandList(resolved.value) ? resolved.value : null,
+      path,
+      name: nonEmptyString(spec && spec.name) || nestedListNameFromPath(path),
+      optional: Boolean(spec && spec.optional),
+    };
+  }
+
+  function resolveNestedListPath(command, path) {
+    const segments = parseNestedListPath(path);
+    if (!segments.length) return { found: false, value: null };
+    let value = command;
+    for (const segment of segments) {
+      if (value === null || value === undefined) return { found: false, value: null };
+      if (!Object.prototype.hasOwnProperty.call(Object(value), segment)) return { found: false, value: null };
+      value = value[segment];
+    }
+    return { found: true, value };
+  }
+
+  function parseNestedListPath(path) {
+    const source = nonEmptyString(path);
+    if (!source) return [];
+    const relative = source.indexOf('command.') === 0 ? source.slice('command.'.length) : source;
+    const segments = [];
+    let cursor = 0;
+    while (cursor < relative.length) {
+      if (relative[cursor] === '.') {
+        cursor += 1;
+        continue;
+      }
+      if (relative[cursor] === '[') {
+        const end = relative.indexOf(']', cursor + 1);
+        if (end < 0) return [];
+        const indexText = relative.slice(cursor + 1, end);
+        if (!/^\d+$/u.test(indexText)) return [];
+        segments.push(Number(indexText));
+        cursor = end + 1;
+        continue;
+      }
+      if (!/[A-Za-z_$]/u.test(relative[cursor])) return [];
+      let end = cursor + 1;
+      while (end < relative.length && /[A-Za-z0-9_$]/u.test(relative[end])) end += 1;
+      segments.push(relative.slice(cursor, end));
+      cursor = end;
+    }
+    return segments;
+  }
+
+  function createEmbeddedNestedListFrame(entry, frame, parentCommandIndex, metadata, nestedIndex) {
+    return {
+      list: entry.list,
+      index: 0,
+      indent: 0,
+      listId: `${frame.listId || 'event'}:nested:${parentCommandIndex}:${nestedIndex}`,
+      commonStack: cloneCommonStack(frame.commonStack),
+      nestedDepth: getFrameNestedDepth(frame) + 1,
+      ...inheritBranchContext(frame),
+    };
+  }
+
+  function createEmbeddedNestedListInfo(entry, frame, parentCommandIndex, metadata, nestedIndex) {
+    return {
+      type: 'embedded-event-list',
+      id: null,
+      name: nonEmptyString(entry && entry.name),
+      path: nonEmptyString(entry && entry.path),
+      index: nestedIndex,
+      parentCode: Number(metadata && metadata.code),
+      depth: getFrameNestedDepth(frame) + 1,
+      length: Array.isArray(entry && entry.list) ? entry.list.length : 0,
+      parentCommandIndex,
+    };
+  }
+
+  function isEventCommandList(value) {
+    return Array.isArray(value) && value.every(isCommand);
+  }
+
+  function createDisplayNestedListPath(path) {
+    const source = nonEmptyString(path);
+    if (!source) return '';
+    return source.indexOf('command.') === 0 ? source : `command.${source}`;
+  }
+
+  function nestedListNameFromPath(path) {
+    const source = nonEmptyString(path);
+    if (!source) return '';
+    const dotIndex = source.lastIndexOf('.');
+    const bracketIndex = source.lastIndexOf('[');
+    const splitIndex = Math.max(dotIndex, bracketIndex);
+    return splitIndex >= 0 ? source.slice(splitIndex + 1).replace(/\]$/u, '') : source;
   }
 
   function readChoiceBranches(list, index, command) {
@@ -958,6 +1135,55 @@
 
   const EVENT_EXTERNAL_RISK_CODES = new Set([355, 356, 357, 655, 657]);
 
+  function normalizeCommandCatalog(catalog) {
+    const normalized = Object.create(null);
+    if (!catalog || typeof catalog !== 'object') return normalized;
+    Object.keys(catalog).forEach((key) => {
+      const numeric = Number(key);
+      if (!Number.isFinite(numeric)) return;
+      const entry = catalog[key];
+      if (!entry || typeof entry !== 'object') return;
+      const fallback = getEventCommandMetadata(numeric);
+      normalized[String(numeric)] = {
+        code: numeric,
+        label: nonEmptyString(entry.label) || fallback.label,
+        scanBehavior: normalizeScanBehavior(entry.scanBehavior) || fallback.scanBehavior,
+        stalenessRisk: normalizeStalenessRisk(entry.stalenessRisk) || fallback.stalenessRisk,
+        reason: nonEmptyString(entry.reason) || fallback.reason,
+        nestedLists: normalizeNestedListSpecs(entry.nestedLists),
+      };
+    });
+    return normalized;
+  }
+
+  function normalizeScanBehavior(value) {
+    const behavior = nonEmptyString(value);
+    return [
+      'advance',
+      'barrier',
+      'frame-end',
+      'message',
+      'message-line',
+      'movement-route',
+      'movement-route-line',
+      'nested-list',
+    ].includes(behavior) ? behavior : '';
+  }
+
+  function normalizeStalenessRisk(value) {
+    const risk = nonEmptyString(value);
+    return ['state', 'external'].includes(risk) ? risk : '';
+  }
+
+  function normalizeNestedListSpecs(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map((entry) => ({
+      path: nonEmptyString(entry && entry.path),
+      name: nonEmptyString(entry && entry.name),
+      optional: Boolean(entry && entry.optional),
+    })).filter((entry) => entry.path);
+  }
+
   function getEventCommandMetadata(code) {
     const numeric = Number(code);
     const label = getEventCommandLabel(numeric);
@@ -1089,6 +1315,13 @@
     return Array.isArray(stack) ? stack.slice() : [];
   }
 
+  function getFrameNestedDepth(frame) {
+    return Math.max(
+      cloneCommonStack(frame && frame.commonStack).length,
+      Math.max(0, Math.floor(Number(frame && frame.nestedDepth) || 0)),
+    );
+  }
+
   function inheritBranchContext(frame) {
     const context = {
       branchDepth: Math.max(0, Math.floor(Number(frame && frame.branchDepth) || 0)),
@@ -1217,26 +1450,30 @@
   }
 
   function createCommonEventNestedList(commonEventId, commonEvent, frame) {
-    const stack = cloneCommonStack(frame && frame.commonStack);
     const id = commonEventId ? Number(commonEventId) : null;
     return {
       type: 'common-event',
       id,
       name: nonEmptyString(commonEvent && commonEvent.name),
-      depth: Math.max(1, stack.length + 1),
+      depth: Math.max(1, getFrameNestedDepth(frame) + 1),
       length: commonEvent && Array.isArray(commonEvent.list) ? commonEvent.list.length : 0,
     };
   }
 
   function cloneNestedListInfo(info) {
     if (!info || typeof info !== 'object') return null;
-    return {
+    const cloned = {
       type: nonEmptyString(info.type),
       id: info.id === null || info.id === undefined ? null : nullableNumber(info.id),
       name: nonEmptyString(info.name),
       depth: Math.max(0, Math.floor(Number(info.depth) || 0)),
       length: Math.max(0, Math.floor(Number(info.length) || 0)),
     };
+    if (Object.prototype.hasOwnProperty.call(info, 'path')) cloned.path = nonEmptyString(info.path);
+    if (Object.prototype.hasOwnProperty.call(info, 'index')) cloned.index = nullableNumber(info.index);
+    if (Object.prototype.hasOwnProperty.call(info, 'parentCode')) cloned.parentCode = nullableNumber(info.parentCode);
+    if (Object.prototype.hasOwnProperty.call(info, 'parentCommandIndex')) cloned.parentCommandIndex = nullableNumber(info.parentCommandIndex);
+    return cloned;
   }
 
   function cloneControlFlowTarget(target) {

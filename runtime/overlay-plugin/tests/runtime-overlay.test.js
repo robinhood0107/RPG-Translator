@@ -941,6 +941,63 @@ test('foresight scanner reports common event depth limits as nested-list stops',
   });
 });
 
+test('foresight scanner follows command catalog embedded nested lists', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Embedded nested text') return '임베디드 중첩 텍스트';
+      if (text === 'After embedded text') return '임베디드 후 텍스트';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commandCatalog: {
+      900: {
+        label: 'Plugin Inline Event',
+        scanBehavior: 'advance',
+        nestedLists: [
+          { path: 'parameters[0].list', name: 'Inline actions' },
+        ],
+      },
+    },
+  });
+  const list = [
+    {
+      code: 900,
+      indent: 0,
+      parameters: [{
+        list: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Embedded nested text'] },
+        ],
+      }],
+    },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After embedded text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.kind, block.rawText, block.translation, block.listId]), [
+    ['message_block', 'Embedded nested text', '임베디드 중첩 텍스트', 'map:nested:0:0'],
+    ['message_block', 'After embedded text', '임베디드 후 텍스트', 'map'],
+  ]);
+  assert.deepEqual(requests, ['Embedded nested text', 'After embedded text']);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.stop_reason, 'end-of-list');
+  assert.equal(scan.command_counts['900'], 1);
+});
+
 test('foresight scanner stops at label jumps with target diagnostics', () => {
   const requests = [];
   const index = {
