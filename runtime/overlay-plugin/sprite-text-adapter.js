@@ -1,7 +1,9 @@
 (function attach(root) {
   const STATE_KEY = '__rpgTranslatorSpriteTextState';
+  const PARENT_RUN_KEY = '__rpgTranslatorSpriteTextParentRunState';
   const INSTALL_TOKEN = 'rpg-translator-sprite-text-v2';
   let nextSpriteId = 1;
+  let nextParentRunId = 1;
 
   class SpriteTextAdapter {
     static install(scope, translator) {
@@ -71,6 +73,8 @@
       state.sourceText = source.text;
       state.revision += 1;
     }
+    const parentRunResult = renderParentGlyphRun(sprite, scope, translator);
+    if (parentRunResult && parentRunResult.handled) return parentRunResult.rendered;
 
     const slotKey = `sprite:${state.id}:glyph`;
     const surfaceOwner = `sprite-text:${state.id}`;
@@ -117,6 +121,312 @@
     return true;
   }
 
+  function renderParentGlyphRun(sprite, scope, translator) {
+    const parent = sprite && sprite.parent;
+    if (!parent || parent._destroyed || !Array.isArray(parent.children)) return { handled: false, rendered: false };
+    const group = collectSiblingGlyphRun(parent, sprite, translator);
+    if (!group || group.items.length < 2) {
+      retireMissingParentRun(parent, translator, sprite);
+      return { handled: false, rendered: false };
+    }
+    const text = group.items.map((item) => item.text).join('');
+    const parentState = ensureParentRunState(parent);
+    let run = parentState.runs.get(group.key);
+    if (!run) {
+      run = {
+        id: `spr-run-${nextParentRunId++}`,
+        key: group.key,
+        itemId: null,
+        command: null,
+        text: '',
+        overlaySprite: null,
+        overlayBitmap: null,
+        bounds: null,
+        revision: 0,
+      };
+      parentState.runs.set(group.key, run);
+    }
+    parentState.lastActiveKeyByChild.set(sprite, group.key);
+    retireOtherParentRuns(parentState, group.key, translator);
+    if (run.text !== text) {
+      retireParentRun(run, translator, 'parent-run-text-changed');
+      run.text = text;
+      run.revision += 1;
+    }
+    run.parent = parent;
+    run.group = group.items;
+    run.bounds = group.bounds;
+    run.lineHeight = group.lineHeight;
+
+    const slotKey = `sprite-run:${parentState.id}:${group.key}`;
+    const surfaceOwner = `sprite-run:${parentState.id}`;
+    const textOwner = `${surfaceOwner}:${slotKey}`;
+    if (typeof translator.claimSurface === 'function' && !translator.claimSurface(parent, surfaceOwner)) {
+      removeParentRunOverlay(run, 'surface-claimed');
+      return { handled: true, rendered: false };
+    }
+    if (typeof translator.claimText === 'function' && !translator.claimText(slotKey, textOwner)) {
+      removeParentRunOverlay(run, 'text-claimed');
+      return { handled: true, rendered: false };
+    }
+    let command = run.command;
+    if (!command || command.sourceText !== text || command.status !== 'hit') {
+      command = translator.observeRecord({
+        engine: overlay(scope).engine || 'unknown',
+        sourceLanguage: overlay(scope).sourceLanguage,
+        targetLanguage: overlay(scope).targetLanguage,
+        text,
+        currentText: text,
+        surface: parent,
+        adapter: 'sprite-text',
+        kind: 'glyph-run',
+        slotKey,
+        generation: run.revision,
+        metadata: {
+          glyphs: group.items.length,
+        },
+      });
+      run.command = command;
+      run.itemId = command && command.itemId ? command.itemId : null;
+    }
+    if (!command || command.status !== 'hit') {
+      syncParentRunOverlayVisibility(run);
+      return { handled: true, rendered: false };
+    }
+    if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, parent, text)) {
+      removeParentRunOverlay(run, 'stale-render');
+      return { handled: true, rendered: false };
+    }
+    renderParentRunOverlay(scope, run, command.translatedText);
+    syncParentRunOverlayVisibility(run);
+    return { handled: true, rendered: true };
+  }
+
+  function collectSiblingGlyphRun(parent, anchorSprite, translator) {
+    const children = Array.isArray(parent && parent.children) ? parent.children : [];
+    const candidates = [];
+    children.forEach((child, index) => {
+      if (!child || child._destroyed || child._rpgTranslatorSpriteTextOverlay || child._rpgTranslatorSpriteTextParentRunOverlay) return;
+      const source = glyphSource(child);
+      if (!source || !isSingleGlyph(source.text)) return;
+      const state = ensureState(child);
+      syncStateSource(state, child, source);
+      if (state.sourceText !== source.text) {
+        removeOverlay(state, 'glyph-text-changed');
+        retireActiveItem(state, translator, 'glyph-text-changed');
+        state.sourceText = source.text;
+        state.revision += 1;
+      }
+      candidates.push(createGlyphCandidate(child, state, source, index));
+    });
+    if (candidates.length < 2) return null;
+    const groups = splitGlyphGroups(candidates);
+    return groups.find((group) => group.items.some((item) => item.sprite === anchorSprite)) || null;
+  }
+
+  function createGlyphCandidate(sprite, state, source, childIndex) {
+    const bitmap = sprite.bitmap || source.owner || {};
+    const width = Math.max(1, Math.ceil(Number(bitmap.width) || estimateGlyphWidth(source.text)));
+    const height = Math.max(1, Math.ceil(Number(bitmap.height) || 24));
+    const x = finiteNumber(sprite.x, 0);
+    const y = finiteNumber(sprite.y, 0);
+    const font = spriteFontSignature(bitmap);
+    return {
+      sprite,
+      state,
+      text: String(source.text ?? ''),
+      childIndex,
+      x,
+      y,
+      width,
+      height,
+      lineHeight: height,
+      font,
+    };
+  }
+
+  function splitGlyphGroups(candidates) {
+    const groups = [];
+    const sorted = candidates.slice().sort((left, right) => {
+      if (left.childIndex !== right.childIndex) return left.childIndex - right.childIndex;
+      if (left.y !== right.y) return left.y - right.y;
+      return left.x - right.x;
+    });
+    let current = [];
+    let previous = null;
+    const push = () => {
+      if (current.length >= 2) groups.push(createGlyphGroup(current));
+      current = [];
+    };
+    sorted.forEach((item) => {
+      if (!previous || canContinueGlyphRun(previous, item)) current.push(item);
+      else {
+        push();
+        current = [item];
+      }
+      previous = item;
+    });
+    push();
+    return groups;
+  }
+
+  function canContinueGlyphRun(left, right) {
+    if (!left || !right || left.font !== right.font) return false;
+    const lineHeight = Math.max(1, left.lineHeight || right.lineHeight || 24);
+    const gapLimit = Math.max(6, Math.ceil(lineHeight * 0.65));
+    const backtrackLimit = Math.max(2, Math.ceil(lineHeight * 0.35));
+    const gap = right.x - (left.x + left.width);
+    if (gap > gapLimit) return false;
+    if (right.x < left.x - backtrackLimit) return false;
+    return Math.abs(centerY(left) - centerY(right)) <= Math.max(4, Math.ceil(lineHeight * 1.75));
+  }
+
+  function createGlyphGroup(items) {
+    const bounds = items.reduce((acc, item) => ({
+      x: Math.min(acc.x, item.x),
+      y: Math.min(acc.y, item.y),
+      x2: Math.max(acc.x2, item.x + item.width),
+      y2: Math.max(acc.y2, item.y + item.height),
+    }), { x: Infinity, y: Infinity, x2: -Infinity, y2: -Infinity });
+    bounds.width = Math.max(1, bounds.x2 - bounds.x);
+    bounds.height = Math.max(1, bounds.y2 - bounds.y);
+    return {
+      key: items.map((item) => item.state.id).join('|'),
+      items,
+      bounds,
+      lineHeight: Math.max(...items.map((item) => item.lineHeight || 0), 1),
+    };
+  }
+
+  function renderParentRunOverlay(scope, run, translatedText) {
+    if (!run || !run.parent || !run.bounds || !translatedText) return false;
+    const overlayBitmap = ensureParentRunBitmap(scope, run, translatedText);
+    const overlaySprite = ensureParentRunSprite(scope, run, overlayBitmap);
+    if (!overlayBitmap || !overlaySprite) return false;
+    if (run.renderedText !== translatedText || run.renderedRevision !== run.revision) {
+      drawOverlayText(overlayBitmap, translatedText);
+      run.renderedText = translatedText;
+      run.renderedRevision = run.revision;
+    }
+    overlaySprite.x = Math.floor(run.bounds.x);
+    overlaySprite.y = Math.floor(run.bounds.y);
+    overlaySprite.bitmap = overlayBitmap;
+    attachParentRunOverlay(run.parent, overlaySprite);
+    return true;
+  }
+
+  function ensureParentRunBitmap(scope, run, translatedText) {
+    const measured = estimateGlyphWidth(translatedText);
+    const width = Math.max(1, Math.ceil(run.bounds.width), measured);
+    const height = Math.max(1, Math.ceil(run.bounds.height), Math.ceil(run.lineHeight || 24));
+    if (run.overlayBitmap && !run.overlayBitmap._destroyed && run.overlayBitmap.width >= width && run.overlayBitmap.height >= height) {
+      return run.overlayBitmap;
+    }
+    let bitmap = null;
+    try {
+      bitmap = scope && typeof scope.Bitmap === 'function'
+        ? new scope.Bitmap(width, height)
+        : { width, height };
+    } catch (_error) {
+      bitmap = { width, height };
+    }
+    bitmap._rpgTranslatorSpriteTextOverlayBitmap = true;
+    run.overlayBitmap = bitmap;
+    return bitmap;
+  }
+
+  function ensureParentRunSprite(scope, run, overlayBitmap) {
+    if (run.overlaySprite && !run.overlaySprite._destroyed) return run.overlaySprite;
+    let sprite = null;
+    try {
+      sprite = scope && typeof scope.Sprite === 'function'
+        ? new scope.Sprite(overlayBitmap)
+        : { bitmap: overlayBitmap, children: [] };
+    } catch (_error) {
+      sprite = { bitmap: overlayBitmap, children: [] };
+    }
+    sprite._rpgTranslatorSpriteTextParentRunOverlay = true;
+    sprite._rpgTranslatorSpriteTextParentRun = run;
+    run.overlaySprite = sprite;
+    return sprite;
+  }
+
+  function attachParentRunOverlay(parent, overlaySprite) {
+    if (!parent || !overlaySprite) return false;
+    if (overlaySprite.parent === parent) return true;
+    detachOverlayFromParent(overlaySprite);
+    if (typeof parent.addChild === 'function') {
+      parent.addChild(overlaySprite);
+      return overlaySprite.parent === parent || childList(parent).includes(overlaySprite);
+    }
+    const children = childList(parent);
+    if (!children.includes(overlaySprite)) children.push(overlaySprite);
+    overlaySprite.parent = parent;
+    return true;
+  }
+
+  function syncParentRunOverlayVisibility(run) {
+    if (!run || !run.overlaySprite) return false;
+    const visible = Array.isArray(run.group)
+      && run.group.length > 0
+      && run.group.every((item) => isOpen(item.sprite) && item.sprite.visible !== false && item.sprite.parent === run.parent);
+    run.overlaySprite.visible = visible;
+    run.overlaySprite.renderable = visible;
+    return true;
+  }
+
+  function retireMissingParentRun(parent, translator, sprite) {
+    const parentState = parent && parent[PARENT_RUN_KEY];
+    if (!parentState) return false;
+    const key = parentState.lastActiveKeyByChild.get(sprite);
+    if (!key) return false;
+    const run = parentState.runs.get(key);
+    if (!run) return false;
+    parentState.lastActiveKeyByChild.delete(sprite);
+    return retireParentRun(run, translator, 'parent-run-not-seen');
+  }
+
+  function retireOtherParentRuns(parentState, activeKey, translator) {
+    if (!parentState || !parentState.runs) return;
+    for (const [key, run] of Array.from(parentState.runs.entries())) {
+      if (key === activeKey) continue;
+      retireParentRun(run, translator, 'parent-run-superseded');
+      parentState.runs.delete(key);
+    }
+  }
+
+  function retireParentRun(run, translator, reason) {
+    if (!run) return false;
+    removeParentRunOverlay(run, reason);
+    if (run.itemId && translator && typeof translator.archiveItem === 'function') translator.archiveItem(run.itemId);
+    if (run.parent && translator && typeof translator.markSurfaceChanged === 'function') translator.markSurfaceChanged(run.parent);
+    run.itemId = null;
+    run.command = null;
+    run.retireReason = reason || 'parent-run-retired';
+    return true;
+  }
+
+  function removeParentRunOverlay(run, reason) {
+    if (!run || !run.overlaySprite) return false;
+    const overlaySprite = run.overlaySprite;
+    run.overlaySprite = null;
+    run.overlayBitmap = null;
+    detachOverlayFromParent(overlaySprite);
+    run.removeReason = reason || 'remove';
+    return true;
+  }
+
+  function ensureParentRunState(parent) {
+    if (!parent[PARENT_RUN_KEY]) {
+      parent[PARENT_RUN_KEY] = {
+        id: String(nextParentRunId++),
+        runs: new Map(),
+        lastActiveKeyByChild: new WeakMap(),
+      };
+    }
+    return parent[PARENT_RUN_KEY];
+  }
+
   function glyphSource(sprite) {
     if (sprite && typeof sprite._rpgTranslatorGlyphText === 'string') {
       return { kind: 'sprite', owner: sprite, text: sprite._rpgTranslatorGlyphText };
@@ -125,6 +435,32 @@
       return { kind: 'sprite-bitmap', owner: sprite.bitmap, text: sprite.bitmap._rpgTranslatorGlyphText };
     }
     return null;
+  }
+
+  function isSingleGlyph(text) {
+    return Array.from(String(text ?? '').trim()).length === 1;
+  }
+
+  function estimateGlyphWidth(text) {
+    return Math.max(1, Array.from(String(text ?? '')).length * 12);
+  }
+
+  function spriteFontSignature(bitmap) {
+    return [
+      bitmap && bitmap.fontFace || '',
+      bitmap && bitmap.fontSize || '',
+      bitmap && bitmap.fontBold ? 'b' : '',
+      bitmap && bitmap.fontItalic ? 'i' : '',
+    ].join(':');
+  }
+
+  function centerY(item) {
+    return (Number(item.y) || 0) + (Number(item.height) || 0) / 2;
+  }
+
+  function finiteNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
   }
 
   function ensureState(sprite) {
@@ -333,6 +669,10 @@
 
   function retireSprite(sprite, translator, reason) {
     const state = getState(sprite);
+    if (sprite && sprite[PARENT_RUN_KEY]) {
+      for (const run of Array.from(sprite[PARENT_RUN_KEY].runs.values())) retireParentRun(run, translator, reason || 'parent-retired');
+      sprite[PARENT_RUN_KEY].runs.clear();
+    }
     if (!state) return false;
     removeOverlay(state, reason);
     retireActiveItem(state, translator, reason || 'sprite-retired');
@@ -378,7 +718,11 @@
         if (child.__rpgTranslatorSpriteTextDetachBypass) return result;
         const source = child._rpgTranslatorSpriteTextSource;
         retireSprite(source, translator, `${methodName}:overlay`);
+      } else if (child && child._rpgTranslatorSpriteTextParentRunOverlay) {
+        if (child.__rpgTranslatorSpriteTextDetachBypass) return result;
+        retireParentRun(child._rpgTranslatorSpriteTextParentRun, translator, `${methodName}:parent-run-overlay`);
       } else {
+        retireMissingParentRun(this, translator, child);
         retireSprite(child, translator, methodName);
       }
       return result;
@@ -396,7 +740,10 @@
       before.forEach((child) => {
         if (child && child._rpgTranslatorSpriteTextOverlay) {
           retireSprite(child._rpgTranslatorSpriteTextSource, translator, 'removeChildren:overlay');
+        } else if (child && child._rpgTranslatorSpriteTextParentRunOverlay) {
+          retireParentRun(child._rpgTranslatorSpriteTextParentRun, translator, 'removeChildren:parent-run-overlay');
         } else {
+          retireMissingParentRun(this, translator, child);
           retireSprite(child, translator, 'removeChildren');
         }
       });
