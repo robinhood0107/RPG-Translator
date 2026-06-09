@@ -4,7 +4,9 @@
   const { BitmapTextAdapter } = loadDependency(root, './bitmap-text-adapter');
   const { MessageAdapter } = loadDependency(root, './message-adapter');
   const { PixiTextAdapter } = loadDependency(root, './pixi-text-adapter');
+  const { RenderGuard } = loadDependency(root, './render-guard');
   const { RuntimeMissLogger } = loadDependency(root, './runtime-miss-logger');
+  const { TextOrchestrator } = loadDependency(root, './orchestrator');
   const { SpriteTextAdapter } = loadDependency(root, './sprite-text-adapter');
   const { StartupToast } = loadDependency(root, './startup-toast');
   const { WindowTextAdapter } = loadDependency(root, './window-text-adapter');
@@ -19,20 +21,29 @@
         ? RuntimeMissLogger.fromConfig(bundle.config || {}, options.missLogger || {})
         : null;
       const index = new LookupIndex(Object.assign({}, bundle, { missLogger }));
+      const orchestrator = TextOrchestrator
+        ? new TextOrchestrator(index, {
+          engine: options.engine || 'unknown',
+          sourceLanguage: bundle.manifest.source_language,
+          targetLanguage: bundle.manifest.target_language,
+          renderGuard: RenderGuard ? new RenderGuard() : null,
+        })
+        : index;
       const nextOverlay = Object.assign(overlay, {
         installed: true,
         engine: options.engine || 'unknown',
         sourceLanguage: bundle.manifest.source_language,
         targetLanguage: bundle.manifest.target_language,
         index,
+        orchestrator,
       });
       scope.RPGTranslatorOverlay = nextOverlay;
 
-      MessageAdapter.install(scope, index);
-      WindowTextAdapter.install(scope, index);
-      BitmapTextAdapter.install(scope, index);
-      SpriteTextAdapter.install(scope, index);
-      PixiTextAdapter.install(scope, index);
+      MessageAdapter.install(scope, orchestrator);
+      WindowTextAdapter.install(scope, orchestrator);
+      BitmapTextAdapter.install(scope, orchestrator);
+      SpriteTextAdapter.install(scope, orchestrator);
+      PixiTextAdapter.install(scope, orchestrator);
       if (bundle.config && bundle.config.startup_toast_enabled !== false) {
         new StartupToast({ document: scope.document, setTimeout: scope.setTimeout }).show(bundle.config);
       }
@@ -48,7 +59,9 @@
       './bitmap-text-adapter': 'BitmapTextAdapter',
       './message-adapter': 'MessageAdapter',
       './pixi-text-adapter': 'PixiTextAdapter',
+      './render-guard': 'RenderGuard',
       './runtime-miss-logger': 'RuntimeMissLogger',
+      './orchestrator': 'TextOrchestrator',
       './sprite-text-adapter': 'SpriteTextAdapter',
       './startup-toast': 'StartupToast',
       './window-text-adapter': 'WindowTextAdapter',

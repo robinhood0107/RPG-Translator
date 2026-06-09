@@ -1,20 +1,21 @@
 (function attach(root) {
   class PixiTextAdapter {
-    static install(scope, index) {
+    static install(scope, translator) {
       const pixi = scope && scope.PIXI;
       if (!pixi) return false;
-      const textInstalled = wrapTextClass(pixi.Text, '__rpgTranslatorPixiTextInstalled', scope, index);
+      const textInstalled = wrapTextClass(pixi.Text, '__rpgTranslatorPixiTextInstalled', scope, translator, 'pixi-text');
       const bitmapTextInstalled = wrapTextClass(
         pixi.BitmapText,
         '__rpgTranslatorPixiBitmapTextInstalled',
         scope,
-        index,
+        translator,
+        'pixi-bitmap-text',
       );
       return textInstalled || bitmapTextInstalled;
     }
   }
 
-  function wrapTextClass(ctor, flagName, scope, index) {
+  function wrapTextClass(ctor, flagName, scope, translator, adapterName) {
     if (!ctor || !ctor.prototype || ctor.prototype[flagName]) return false;
     const descriptor = findPropertyDescriptor(ctor.prototype, 'text');
     if (descriptor && (descriptor.get || descriptor.set)) {
@@ -26,7 +27,7 @@
           return this.__rpgTranslatorPixiText;
         },
         set(value) {
-          const translated = translateText(index, scope, value);
+          const translated = translateText(translator, scope, value, this, adapterName);
           if (descriptor.set) {
             descriptor.set.call(this, translated);
           } else {
@@ -41,7 +42,7 @@
           return this.__rpgTranslatorPixiText;
         },
         set(value) {
-          this.__rpgTranslatorPixiText = translateText(index, scope, value);
+          this.__rpgTranslatorPixiText = translateText(translator, scope, value, this, adapterName);
         },
       });
     }
@@ -59,15 +60,22 @@
     return null;
   }
 
-  function translateText(index, scope, text) {
-    const translated = index && typeof index.translate === 'function'
-      ? index.translate({
+  function translateText(translator, scope, text, surface, adapterName) {
+    const request = {
         engine: overlay(scope).engine || 'unknown',
         sourceLanguage: overlay(scope).sourceLanguage,
         targetLanguage: overlay(scope).targetLanguage,
         text,
-      })
-      : null;
+        surface,
+        adapter: adapterName,
+        kind: 'text-setter',
+        slotKey: adapterName,
+      };
+    const translated = translator && typeof translator.translateText === 'function'
+      ? translator.translateText(request)
+      : translator && typeof translator.translate === 'function'
+        ? translator.translate(request)
+        : null;
     return translated || text;
   }
 

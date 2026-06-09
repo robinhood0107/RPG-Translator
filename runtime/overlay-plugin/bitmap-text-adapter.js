@@ -1,28 +1,35 @@
 (function attach(root) {
   class BitmapTextAdapter {
-    static install(scope, index) {
+    static install(scope, translator) {
       if (!scope || !scope.Bitmap || !scope.Bitmap.prototype) return false;
       const prototype = scope.Bitmap.prototype;
       if (prototype.__rpgTranslatorBitmapTextInstalled) return true;
       const originalDrawText = prototype.drawText;
       if (typeof originalDrawText !== 'function') return false;
       prototype.drawText = function translatedBitmapText(text, ...rest) {
-        return originalDrawText.call(this, translateText(index, scope, text), ...rest);
+        return originalDrawText.call(this, translateText(translator, scope, text, this), ...rest);
       };
       prototype.__rpgTranslatorBitmapTextInstalled = true;
       return true;
     }
   }
 
-  function translateText(index, scope, text) {
-    const translated = index && typeof index.translate === 'function'
-      ? index.translate({
+  function translateText(translator, scope, text, surface) {
+    const request = {
         engine: overlay(scope).engine || 'unknown',
         sourceLanguage: overlay(scope).sourceLanguage,
         targetLanguage: overlay(scope).targetLanguage,
         text,
-      })
-      : null;
+        surface,
+        adapter: 'bitmap-text',
+        kind: 'drawText',
+        slotKey: 'bitmap-drawText',
+      };
+    const translated = translator && typeof translator.translateText === 'function'
+      ? translator.translateText(request)
+      : translator && typeof translator.translate === 'function'
+        ? translator.translate(request)
+        : null;
     return translated || text;
   }
 

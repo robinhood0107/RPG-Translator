@@ -9,6 +9,7 @@ const { BitmapTextAdapter } = require('../bitmap-text-adapter');
 const { CacheKeyBuilder, LookupIndex } = require('../lookup-index');
 const { CacheLoader } = require('../cache-loader');
 const { MessageAdapter } = require('../message-adapter');
+const { TextOrchestrator } = require('../orchestrator');
 const { PixiTextAdapter } = require('../pixi-text-adapter');
 const { RenderGuard } = require('../render-guard');
 const { RuntimeEntry } = require('../RPGTranslator');
@@ -253,6 +254,45 @@ test('render guard rejects stale render operations after surface changes', () =>
   assert.equal(guard.canRender(token, surface, 'こんにちは'), false);
 });
 
+test('orchestrator records canonical items and rejects stale render commands', () => {
+  const surface = {};
+  const index = {
+    translate(request) {
+      if (request.text === 'Origin') return '번역';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'slot-a',
+    text: 'Origin',
+  });
+
+  assert.equal(command.status, 'hit');
+  assert.equal(command.translatedText, '번역');
+  assert.equal(orchestrator.acceptRender(command, surface, 'Origin'), true);
+  orchestrator.markSurfaceChanged(surface);
+  assert.equal(orchestrator.acceptRender(command, surface, 'Origin'), false);
+  assert.deepEqual(orchestrator.diagnostics(), {
+    observed_items: 1,
+    cache_hits: 1,
+    cache_misses: 0,
+    render_accepted: 1,
+    render_rejected: 1,
+    active_items: 1,
+    detached_items: 0,
+    archived_items: 0,
+    queued_render_commands: 1,
+  });
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
@@ -482,6 +522,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}runtime-miss-logger.js`,
     `${baseUrl}lookup-index.js`,
     `${baseUrl}render-guard.js`,
+    `${baseUrl}orchestrator.js`,
     `${baseUrl}cache-loader.js`,
     `${baseUrl}message-adapter.js`,
     `${baseUrl}window-text-adapter.js`,

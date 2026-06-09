@@ -1,6 +1,6 @@
 (function attach(root) {
   class MessageAdapter {
-    static install(scope, index) {
+    static install(scope, translator) {
       if (!scope || !scope.Window_Message || !scope.Window_Message.prototype) return false;
       const prototype = scope.Window_Message.prototype;
       if (prototype.__rpgTranslatorMessageInstalled) return true;
@@ -9,7 +9,7 @@
         const message = scope.$gameMessage;
         if (message && Array.isArray(message._texts)) {
           const originalText = readMessageBlock(message);
-          const translated = translateText(index, scope, originalText);
+          const translated = translateText(translator, scope, originalText, this);
           if (
             translated &&
             translated !== originalText &&
@@ -39,15 +39,22 @@
     return String(text || '').split('\n').length - 1;
   }
 
-  function translateText(index, scope, text) {
-    const translated = index && typeof index.translate === 'function'
-      ? index.translate({
+  function translateText(translator, scope, text, surface) {
+    const request = {
         engine: overlay(scope).engine || 'unknown',
         sourceLanguage: overlay(scope).sourceLanguage,
         targetLanguage: overlay(scope).targetLanguage,
         text,
-      })
-      : null;
+        surface,
+        adapter: 'message',
+        kind: 'message_block',
+        slotKey: 'game-message',
+      };
+    const translated = translator && typeof translator.translateText === 'function'
+      ? translator.translateText(request)
+      : translator && typeof translator.translate === 'function'
+        ? translator.translate(request)
+        : null;
     return translated || text;
   }
 
