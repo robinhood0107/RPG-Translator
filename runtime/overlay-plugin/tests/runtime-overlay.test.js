@@ -2025,6 +2025,58 @@ test('adapter contract deduplicates tokenized subscriptions', () => {
   assert.equal(counts.records, 1);
 });
 
+test('adapter contract maps mycode public methods onto gateway backing subscribe', () => {
+  const records = new Map();
+  const routed = [];
+  let subscribed = null;
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe(listener) {
+      subscribed = listener;
+      return () => {};
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = {};
+
+  const observed = contract.observeRecord(record, {
+    id: 'fallback-record',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'fallback-slot',
+    text: 'Fallback source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+
+  assert.equal(observed.itemId, 'fallback-record');
+  assert.equal(contract.hasRequiredMethods(), true);
+  assert.equal(contract.hasRequiredMethods(['subscribeRecords']), true);
+  assert.equal(contract.subscribeRecords({
+    token: 'fallback-records',
+    records,
+    onSkipped(target, event, route) {
+      routed.push([target === record, event.type, route.recordId]);
+    },
+  }), true);
+  assert.equal(typeof subscribed, 'function');
+
+  subscribed({ type: 'item.skipped', id: 'fallback-record', message: 'missing cache' });
+
+  assert.deepEqual(routed, [
+    [true, 'item.skipped', 'fallback-record'],
+  ]);
+  assert.equal(contract.getRecordStatus(record), 'skipped');
+});
+
 test('adapter contract remembers subscribed render skip and failure events', async () => {
   const records = new Map();
   const events = [];

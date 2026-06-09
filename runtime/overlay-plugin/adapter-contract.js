@@ -11,6 +11,36 @@
     skipped: true,
     failed: true,
   });
+  const DEFAULT_REQUIRED_METHODS = Object.freeze([
+    'observeRecord',
+    'requestItemTranslation',
+    'subscribe',
+  ]);
+  const BACKING_METHOD_BY_PUBLIC_METHOD = Object.freeze({
+    observeRecord: 'observeRecord',
+    updateItem: 'updateItem',
+    requestItemTranslation: 'requestItemTranslation',
+    cancelItemTranslation: 'cancelItemTranslation',
+    setItemTranslationPriority: 'setItemTranslationPriority',
+    setItemVisibility: 'setItemVisibility',
+    backgroundItem: 'backgroundItem',
+    retireItem: 'retireItem',
+    recordDecision: 'recordDecision',
+    recordDraw: 'recordDraw',
+    describeTextEligibility: 'describeTextEligibility',
+    claimSurface: 'claimSurface',
+    releaseSurface: 'releaseSurface',
+    claimText: 'claimText',
+    finalizeTextClaim: 'finalizeTextClaim',
+    releaseTextClaim: 'releaseTextClaim',
+    recordSurfaceDraw: 'recordSurfaceDraw',
+    recordRenderAccepted: 'recordRenderAccepted',
+    recordRenderDeferred: 'recordRenderDeferred',
+    recordRenderRejected: 'recordRenderRejected',
+    subscribeSurfaceDraws: 'subscribeSurfaceDraws',
+    subscribe: 'subscribe',
+    subscribeRecords: 'subscribe',
+  });
 
   function createAdapterContract(options = {}) {
     const adapterId = nonEmptyString(options.adapterId, options.sourceAdapter, 'text');
@@ -22,11 +52,16 @@
     const stateKey = `__rpgTranslatorAdapterRecordState_${safeIdPart(adapterId)}`;
     const statesById = new Map();
 
-    function hasMethod(name) {
+    function hasBackingMethod(name) {
       return !!(gateway && typeof gateway[name] === 'function');
     }
 
-    function hasRequiredMethods(required = ['observeRecord', 'requestItemTranslation', 'retireItem']) {
+    function hasMethod(name) {
+      const backingName = BACKING_METHOD_BY_PUBLIC_METHOD[String(name || '')] || '';
+      return !!(backingName && hasBackingMethod(backingName));
+    }
+
+    function hasRequiredMethods(required = DEFAULT_REQUIRED_METHODS) {
       return required.every(hasMethod);
     }
 
@@ -217,7 +252,12 @@
       if (!hasMethod('subscribeRecords')) return false;
       const source = options && typeof options === 'object' ? options : {};
       const token = nonEmptyString(source.token, source.subscriptionToken, source.renderStrategy, source.strategy, 'records');
-      return subscribeThrough('subscribeRecords', token, () => gateway.subscribeRecords(wrapRecordSubscription(source)));
+      if (hasBackingMethod('subscribeRecords')) {
+        return subscribeThrough('subscribeRecords', token, () => gateway.subscribeRecords(wrapRecordSubscription(source)));
+      }
+      return subscribeThrough('subscribeRecords', token, () => gateway.subscribe((event) => {
+        return routeSubscribedRecordEvent(source, event);
+      }));
     }
 
     function subscribeThrough(methodName, token, callback) {
@@ -261,6 +301,129 @@
         };
       }
       return wrapped;
+    }
+
+    function routeSubscribedRecordEvent(source, event) {
+      if (!event || typeof event !== 'object') return undefined;
+      const eventType = String(event.type || '');
+      if (source.adapterEventsOnly !== false
+        && event.adapterId
+        && String(event.adapterId) !== adapterId) {
+        return undefined;
+      }
+      if (eventType === 'item.render_queued') {
+        const command = normalizeRenderCommand(event.details);
+        const renderStrategy = nonEmptyString(source.renderStrategy, source.strategy);
+        if (renderStrategy && String(command.strategy || '') !== renderStrategy) return undefined;
+        return dispatchSubscribedRenderCommand(source, event, command);
+      }
+      if (eventType === 'item.skipped') {
+        return dispatchSubscribedRecordEvent(source, source.onSkipped, event, null, 'skipped');
+      }
+      if (eventType === 'item.failed'
+        || eventType === 'item.translation_noop'
+        || eventType === 'item.translation_noop_detached') {
+        return dispatchSubscribedRecordEvent(source, source.onFailed, event, null, 'failed');
+      }
+      if (typeof source.onEvent === 'function') {
+        return dispatchSubscribedRecordEvent(source, source.onEvent, event, null, eventType || 'event');
+      }
+      return undefined;
+    }
+
+    function dispatchSubscribedRenderCommand(source, event, command) {
+      const recordId = subscribedRecordId(event, command);
+      const route = createSubscribedRoute(event, command, recordId);
+      const record = resolveSubscribedRecord(source, recordId, event, command);
+      if (!record) {
+        dispatchSubscribedMissingRecord(source, route, event, command, 'render_queued');
+        if (typeof source.onRenderRejected === 'function') {
+          source.onRenderRejected(null, createRenderDecision('rejected', 'missing-adapter-record', command, route), route);
+        }
+        return false;
+      }
+      if (!canTouchRecord(record)) return false;
+      rememberRecordEvent(record, recordId, event);
+      if (typeof source.onRenderQueued !== 'function') return false;
+      return source.onRenderQueued(record, command, route);
+    }
+
+    function dispatchSubscribedRecordEvent(source, handler, event, command, operation) {
+      if (typeof handler !== 'function') return false;
+      const recordId = subscribedRecordId(event, command);
+      const route = createSubscribedRoute(event, command, recordId);
+      const record = resolveSubscribedRecord(source, recordId, event, command);
+      if (!record) return dispatchSubscribedMissingRecord(source, route, event, command, operation);
+      if (!canTouchRecord(record)) return false;
+      rememberRecordEvent(record, recordId, event);
+      if (command) return handler(record, command, event, route);
+      return handler(record, event, route);
+    }
+
+    function dispatchSubscribedMissingRecord(source, route, event, command, operation) {
+      if (typeof source.onMissingRecord !== 'function') return false;
+      source.onMissingRecord(route, event, command, operation);
+      return true;
+    }
+
+    function resolveSubscribedRecord(source, recordId, event, command) {
+      if (typeof source.resolveRecord === 'function') {
+        return source.resolveRecord(recordId, event, command) || null;
+      }
+      const records = getRecordRegistry(source);
+      if (!records || typeof records.get !== 'function' || !recordId) return null;
+      return records.get(recordId) || null;
+    }
+
+    function subscribedRecordId(event, command) {
+      return nonEmptyString(
+        command && command.itemId,
+        event && event.itemId,
+        event && event.recordId,
+        event && event.id,
+      );
+    }
+
+    function normalizeRenderCommand(details) {
+      const source = details && typeof details === 'object' ? details : {};
+      return Object.freeze({
+        id: nonEmptyString(source.id),
+        itemId: nonEmptyString(source.itemId),
+        surfaceId: nonEmptyString(source.surfaceId),
+        strategy: nonEmptyString(source.strategy),
+        text: typeof source.text === 'string' ? source.text : nonEmptyString(source.text),
+        generation: finiteNumber(source.generation),
+        bounds: plainObjectOrNull(source.bounds),
+        metadata: Object.freeze(Object.assign({}, plainObjectOrEmpty(source.metadata))),
+        queuedAt: finiteNumber(source.queuedAt),
+      });
+    }
+
+    function createSubscribedRoute(event, command, recordId) {
+      return Object.freeze({
+        recordId,
+        itemId: recordId,
+        eventType: event && event.type ? String(event.type) : '',
+        adapterId: event && event.adapterId ? String(event.adapterId) : '',
+        surfaceId: nonEmptyString(command && command.surfaceId, event && event.surfaceId),
+        status: event && event.status ? String(event.status) : '',
+        message: event && event.message ? String(event.message) : '',
+        commandId: nonEmptyString(command && command.id),
+        strategy: nonEmptyString(command && command.strategy),
+        commandGeneration: finiteNumber(command && command.generation),
+      });
+    }
+
+    function createRenderDecision(status, reason, command, route) {
+      return Object.freeze({
+        status: nonEmptyString(status, 'rejected'),
+        reason: nonEmptyString(reason, status, 'rejected'),
+        recordId: route && route.recordId ? route.recordId : '',
+        itemId: route && route.itemId ? route.itemId : '',
+        commandId: command && command.id ? command.id : '',
+        strategy: command && command.strategy ? command.strategy : '',
+        commandGeneration: finiteNumber(command && command.generation),
+      });
     }
 
     function normalizePayload(payload) {
@@ -665,6 +828,19 @@
       if (text) return text;
     }
     return '';
+  }
+
+  function finiteNumber(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  }
+
+  function plainObjectOrEmpty(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  function plainObjectOrNull(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? Object.assign({}, value) : null;
   }
 
   function safeIdPart(value) {
