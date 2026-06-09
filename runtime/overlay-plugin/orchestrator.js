@@ -26,6 +26,11 @@
         cache_misses: 0,
         render_accepted: 0,
         render_rejected: 0,
+        ownership_conflicts: 0,
+        surface_claims: 0,
+        text_claims: 0,
+        surface_releases: 0,
+        text_releases: 0,
       };
     }
 
@@ -127,7 +132,12 @@
     claimSurface(surface, owner) {
       if (!surface || (typeof surface !== 'object' && typeof surface !== 'function')) return false;
       const current = this.surfaceClaims.get(surface);
-      if (current && current !== owner) return false;
+      if (current && current !== owner) {
+        this.diagnosticState.ownership_conflicts += 1;
+        this.emit('ownershipConflict', { kind: 'surface', owner, current, surfaceId: this.surfaceId(surface) });
+        return false;
+      }
+      if (!current) this.diagnosticState.surface_claims += 1;
       this.surfaceClaims.set(surface, owner);
       return true;
     }
@@ -138,12 +148,18 @@
       if (!current) return false;
       if (owner && current !== owner) return false;
       this.surfaceClaims.delete(surface);
+      this.diagnosticState.surface_releases += 1;
       return true;
     }
 
     claimText(slotId, owner) {
       const current = this.textClaims.get(slotId);
-      if (current && current !== owner) return false;
+      if (current && current !== owner) {
+        this.diagnosticState.ownership_conflicts += 1;
+        this.emit('ownershipConflict', { kind: 'text', owner, current, slotId });
+        return false;
+      }
+      if (!current) this.diagnosticState.text_claims += 1;
       this.textClaims.set(slotId, owner);
       return true;
     }
@@ -153,6 +169,7 @@
       if (!current) return false;
       if (owner && current !== owner) return false;
       this.textClaims.delete(slotId);
+      this.diagnosticState.text_releases += 1;
       return true;
     }
 

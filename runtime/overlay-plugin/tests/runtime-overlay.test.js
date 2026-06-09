@@ -288,6 +288,11 @@ test('orchestrator records canonical items and rejects stale render commands', (
     cache_misses: 0,
     render_accepted: 1,
     render_rejected: 1,
+    ownership_conflicts: 0,
+    surface_claims: 0,
+    text_claims: 0,
+    surface_releases: 0,
+    text_releases: 0,
     active_items: 1,
     detached_items: 0,
     archived_items: 0,
@@ -304,6 +309,9 @@ test('orchestrator releases surface ownership explicitly', () => {
   assert.equal(orchestrator.releaseSurface(surface, 'other-owner'), false);
   assert.equal(orchestrator.releaseSurface(surface, 'window-text'), true);
   assert.equal(orchestrator.claimSurface(surface, 'bitmap-text'), true);
+  assert.equal(orchestrator.diagnostics().ownership_conflicts, 1);
+  assert.equal(orchestrator.diagnostics().surface_claims, 2);
+  assert.equal(orchestrator.diagnostics().surface_releases, 1);
 });
 
 test('message wrapper preserves escapes and wraps soft lines by capacity', () => {
