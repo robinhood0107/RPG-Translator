@@ -1008,37 +1008,74 @@
     const scalePercent = resolveMessageTextScale(scope);
     if (!windowInstance || !windowInstance.contents || !shouldScaleText(scalePercent)) return null;
 
-    const contents = windowInstance.contents;
-    const originalState = captureBitmapDrawState(contents);
+    const originalStates = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+    let trackedContents = windowInstance.contents;
+    rememberOriginalState(trackedContents);
     const originalResetFontSettings = windowInstance.resetFontSettings;
     const hadOwnReset = Object.prototype.hasOwnProperty.call(windowInstance, 'resetFontSettings');
+    const originalCreateContents = windowInstance.createContents;
+    const hadOwnCreateContents = Object.prototype.hasOwnProperty.call(windowInstance, 'createContents');
     const originalMakeFontBigger = windowInstance.makeFontBigger;
     const hadOwnBigger = Object.prototype.hasOwnProperty.call(windowInstance, 'makeFontBigger');
     const originalMakeFontSmaller = windowInstance.makeFontSmaller;
     const hadOwnSmaller = Object.prototype.hasOwnProperty.call(windowInstance, 'makeFontSmaller');
-    let logicalFontSize = positiveNumber(contents.fontSize, null);
+    let logicalFontSize = positiveNumber(trackedContents.fontSize, null);
 
-    const refreshLogicalFontSize = () => {
-      const current = positiveNumber(contents.fontSize, null);
+    function rememberOriginalState(contents) {
+      if (!contents || !originalStates || originalStates.has(contents)) return;
+      originalStates.set(contents, captureBitmapDrawState(contents));
+    }
+    function syncContents(contents) {
+      if (!contents) return null;
+      if (contents !== trackedContents) {
+        trackedContents = contents;
+        rememberOriginalState(contents);
+        if (logicalFontSize === null) {
+          const initial = positiveNumber(contents.fontSize, null);
+          if (initial !== null) logicalFontSize = initial;
+        }
+      }
+      return trackedContents;
+    }
+    function getActiveContents(context) {
+      return syncContents((context && context.contents) || windowInstance.contents || trackedContents);
+    }
+    const refreshLogicalFontSize = (contents = getActiveContents(windowInstance)) => {
+      const activeContents = syncContents(contents);
+      if (!activeContents) return;
+      const current = positiveNumber(activeContents.fontSize, null);
       if (current !== null) logicalFontSize = current;
     };
-    const applyScaledFontSize = () => {
-      if (logicalFontSize === null) return;
-      contents.fontSize = scaleFontSizeValue(logicalFontSize, scalePercent);
+    const applyScaledFontSize = (contents = getActiveContents(windowInstance)) => {
+      const activeContents = syncContents(contents);
+      if (!activeContents || logicalFontSize === null) return;
+      activeContents.fontSize = scaleFontSizeValue(logicalFontSize, scalePercent);
     };
     const invokeWithLogicalFontSize = (original, context, args) => {
-      if (logicalFontSize !== null) contents.fontSize = logicalFontSize;
+      const activeContents = getActiveContents(context);
+      if (activeContents && logicalFontSize !== null) activeContents.fontSize = logicalFontSize;
       const result = original.apply(context, args);
-      refreshLogicalFontSize();
-      applyScaledFontSize();
+      const updatedContents = getActiveContents(context);
+      refreshLogicalFontSize(updatedContents);
+      applyScaledFontSize(updatedContents);
       return result;
     };
 
     if (typeof originalResetFontSettings === 'function') {
       windowInstance.resetFontSettings = function resetFontSettingsWithMessageTextScale(...args) {
         const result = originalResetFontSettings.apply(this, args);
-        refreshLogicalFontSize();
-        applyScaledFontSize();
+        const activeContents = getActiveContents(this);
+        refreshLogicalFontSize(activeContents);
+        applyScaledFontSize(activeContents);
+        return result;
+      };
+    }
+    if (typeof originalCreateContents === 'function') {
+      windowInstance.createContents = function createContentsWithMessageTextScale(...args) {
+        const result = originalCreateContents.apply(this, args);
+        const activeContents = getActiveContents(this);
+        refreshLogicalFontSize(activeContents);
+        applyScaledFontSize(activeContents);
         return result;
       };
     }
@@ -1057,9 +1094,14 @@
     return {
       restore() {
         restoreWrappedMethod(windowInstance, 'resetFontSettings', originalResetFontSettings, hadOwnReset);
+        restoreWrappedMethod(windowInstance, 'createContents', originalCreateContents, hadOwnCreateContents);
         restoreWrappedMethod(windowInstance, 'makeFontBigger', originalMakeFontBigger, hadOwnBigger);
         restoreWrappedMethod(windowInstance, 'makeFontSmaller', originalMakeFontSmaller, hadOwnSmaller);
-        applyBitmapDrawState(contents, originalState);
+        const activeContents = getActiveContents(windowInstance);
+        const originalState = activeContents && originalStates && originalStates.has(activeContents)
+          ? originalStates.get(activeContents)
+          : captureBitmapDrawState(activeContents);
+        applyBitmapDrawState(activeContents, originalState);
       },
     };
   }

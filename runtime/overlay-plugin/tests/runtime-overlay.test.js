@@ -3618,6 +3618,76 @@ test('message adapter applies and restores fallback text scale', () => {
   assert.equal(messageWindow.contents.fontSize, 20);
 });
 
+test('message adapter reapplies text scale after native replay recreates contents', () => {
+  const calls = [];
+  const renderedFonts = [];
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      config: { gameMessage: { textScale: 50 } },
+    },
+    $gameMessage: { _texts: ['Recreate JP'] },
+    Window_Message: function WindowMessage() {
+      this.visible = true;
+      this.contents = { fontSize: 20 };
+      this.pause = false;
+      this._waitCount = 0;
+    },
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.isOpen = () => true;
+  root.Window_Message.prototype.createContents = function createContents() {
+    this.contents = { fontSize: 20 };
+    calls.push(['createContents', this.contents.fontSize]);
+  };
+  root.Window_Message.prototype.createTextState = function createTextState(text, x, y) {
+    return { text, index: 0, x, y, startX: x, startY: y };
+  };
+  root.Window_Message.prototype.newPage = function newPage(textState) {
+    this.createContents();
+    calls.push(['newPage', textState.text, this.contents.fontSize]);
+  };
+  root.Window_Message.prototype.processCharacter = function processCharacter(textState) {
+    renderedFonts.push(this.contents.fontSize);
+    textState.index += 1;
+  };
+  root.Window_Message.prototype.isEndOfText = function isEndOfText(textState) {
+    return textState.index >= textState.text.length;
+  };
+  root.Window_Message.prototype.onEndOfText = function onEndOfText() {
+    calls.push(['onEndOfText', this.contents.fontSize]);
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Recreate JP') return 'Recreate KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.processCompleteMessage({
+    visible: 'Recreate JP',
+    resolved: 'Recreate JP',
+    translationSource: 'Recreate JP',
+  }, 'session-recreate');
+
+  assert.deepEqual(calls, [
+    ['createContents', 20],
+    ['newPage', 'Recreate KO', 10],
+    ['onEndOfText', 10],
+  ]);
+  assert.deepEqual([...new Set(renderedFonts)], [10]);
+  assert.equal(messageWindow.contents.fontSize, 20);
+});
+
 test('message adapter prefers native message replay when engine hooks are available', () => {
   const calls = [];
   const rendered = [];
