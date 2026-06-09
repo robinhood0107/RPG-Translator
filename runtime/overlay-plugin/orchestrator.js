@@ -640,23 +640,46 @@
       if (typeof handler !== 'function') return false;
       const recordId = subscriptionEventRecordId(event, payload);
       const route = this.subscriptionEventRoute(event, payload, recordId);
-      const target = resolveSubscriptionEventRecord(source, recordId, event, payload, route);
+      let target = null;
+      try {
+        target = resolveSubscriptionEventRecord(source, recordId, event, payload, route);
+      } catch (error) {
+        this.recordAdapterCallbackError(`${String(operation || 'event')}.resolveRecord`, recordId, error);
+        return false;
+      }
       if (!target) {
         if (typeof source.onMissingRecord === 'function') {
-          source.onMissingRecord(Object.assign({}, route, { reason: 'missing-adapter-record' }), event, payload);
+          try {
+            source.onMissingRecord(Object.assign({}, route, { reason: 'missing-adapter-record' }), event, payload);
+          } catch (error) {
+            this.recordAdapterCallbackError(`${String(operation || 'event')}.missing`, recordId, error);
+          }
         }
         return false;
       }
       if (!canTouchSubscriptionLifecycleRecord(target)) return false;
       try {
         handler(target, event, route);
-      } catch (_error) {
-        this.emit('adapterCallbackError', {
-          reason: `subscribeRecords.${String(operation || 'event')}`,
-          itemId: recordId,
-        });
+      } catch (error) {
+        this.recordAdapterCallbackError(operation || 'event', recordId, error);
       }
       return true;
+    }
+
+    recordAdapterCallbackError(operation, itemId, error) {
+      const details = {};
+      if (error && typeof error === 'object') {
+        if (error.name) details.errorName = String(error.name);
+        if (error.message) details.errorMessage = String(error.message);
+        if (error.code) details.errorCode = String(error.code);
+      } else if (error !== undefined && error !== null) {
+        details.errorMessage = String(error);
+      }
+      this.emit('adapterCallbackError', {
+        reason: `subscribeRecords.${String(operation || 'event')}`,
+        itemId,
+        details: sanitizeDetails(details),
+      });
     }
 
     validateSubscriptionRenderCommand(source, target, lifecycleRecord, command, route) {

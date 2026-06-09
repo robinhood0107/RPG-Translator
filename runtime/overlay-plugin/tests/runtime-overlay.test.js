@@ -1123,6 +1123,80 @@ test('orchestrator routes record-backed skipped and failed lifecycle events', as
   ]);
 });
 
+test('orchestrator contains record-backed lifecycle callback errors', async () => {
+  const records = new Map();
+  const events = [];
+  const orchestrator = new TextOrchestrator({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const skippedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'resolve-error-target',
+    text: 'Resolve error target',
+    renderStrategy: 'window-text',
+  });
+  const failedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'failed-after-error-target',
+    text: 'Failed after error target',
+    renderStrategy: 'window-text',
+  });
+  records.set(failedCommand.itemId, { name: 'failed', status: 'detected' });
+
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    resolveRecord(recordId) {
+      if (recordId === skippedCommand.itemId) {
+        throw new Error('resolve exploded');
+      }
+      return records.get(recordId) || null;
+    },
+    onSkipped() {
+      events.push(['skipped']);
+    },
+    onFailed(record, event, route) {
+      events.push(['failed', record.name, event.type, route.reason]);
+    },
+    onMissingRecord() {
+      events.push(['missing']);
+    },
+  });
+
+  const handle = orchestrator.requestItemTranslation(skippedCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  assert.equal(handle.getStatus(), 'miss');
+  assert.equal(await handle.promise, 'Resolve error target');
+  orchestrator.retireItem(failedCommand.itemId, 'failed', {
+    eventType: 'item.failed',
+    message: 'adapter failed',
+  });
+  unsubscribe();
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.deepEqual(events, [
+    ['failed', 'failed', 'item.failed', 'adapter failed'],
+  ]);
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.skipped.resolveRecord'
+    && event.itemId === skippedCommand.itemId
+  )));
+});
+
 test('orchestrator defers surface draws to candidate adapter subscriptions', () => {
   const bitmap = {};
   const events = [];
