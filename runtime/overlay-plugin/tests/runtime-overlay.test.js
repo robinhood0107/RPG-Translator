@@ -998,6 +998,59 @@ test('foresight scanner follows command catalog embedded nested lists', () => {
   assert.equal(scan.command_counts['900'], 1);
 });
 
+test('foresight scanner does not follow barrier catalog nested lists', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commandCatalog: {
+      901: {
+        label: 'Unsafe Inline Event',
+        scanBehavior: 'barrier',
+        nestedLists: [
+          { path: 'parameters[0].list', name: 'Unsafe actions' },
+        ],
+      },
+    },
+  });
+  const list = [
+    {
+      code: 901,
+      indent: 0,
+      parameters: [{
+        list: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Unsafe nested text'] },
+        ],
+      }],
+    },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Stale after barrier text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'barrier-command');
+  assert.equal(scan.path_stops[0].code, 901);
+});
+
 test('foresight scanner stops at label jumps with target diagnostics', () => {
   const requests = [];
   const index = {

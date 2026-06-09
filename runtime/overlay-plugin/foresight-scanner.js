@@ -301,7 +301,10 @@
         return;
       }
       const metadata = scanner.getEventCommandMetadata(code);
-      const nestedRead = readEmbeddedNestedListCommand(scanner, list, index, command, metadata, frame);
+      const canReadEmbeddedNestedList = metadata.scanBehavior === 'advance' || metadata.scanBehavior === 'nested-list';
+      const nestedRead = canReadEmbeddedNestedList
+        ? readEmbeddedNestedListCommand(scanner, list, index, command, metadata, frame)
+        : null;
       if (nestedRead) {
         recordCommandAction(diagnostics, metadata);
         if (nestedRead.transparent) {
