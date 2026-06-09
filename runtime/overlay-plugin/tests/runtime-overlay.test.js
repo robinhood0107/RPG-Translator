@@ -1264,6 +1264,75 @@ test('message adapter applies and restores fallback text scale', () => {
   assert.equal(messageWindow.contents.fontSize, 20);
 });
 
+test('message adapter prefers native message replay when engine hooks are available', () => {
+  const calls = [];
+  const rendered = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['Native JP'] },
+    Window_Message: function WindowMessage() {
+      this.visible = true;
+      this.contents = {};
+      this.pause = false;
+      this._waitCount = 0;
+    },
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.isOpen = () => true;
+  root.Window_Message.prototype.createTextState = function createTextState(text, x, y) {
+    calls.push(['createTextState', text, x, y]);
+    return { text, index: 0, x, y, startX: x, startY: y };
+  };
+  root.Window_Message.prototype.newPage = function newPage(textState) {
+    calls.push(['newPage', textState.text]);
+  };
+  root.Window_Message.prototype.processCharacter = function processCharacter(textState) {
+    rendered.push(textState.text[textState.index]);
+    textState.index += 1;
+  };
+  root.Window_Message.prototype.isEndOfText = function isEndOfText(textState) {
+    return textState.index >= textState.text.length;
+  };
+  root.Window_Message.prototype.flushTextState = function flushTextState(textState) {
+    calls.push(['flushTextState', textState.index]);
+  };
+  root.Window_Message.prototype.onEndOfText = function onEndOfText() {
+    calls.push(['onEndOfText']);
+  };
+  root.Window_Message.prototype.drawTextEx = function drawTextEx() {
+    calls.push(['drawTextEx']);
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Native JP') return 'Native KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.processCompleteMessage({
+    visible: 'Native JP',
+    resolved: 'Native JP',
+    translationSource: 'Native JP',
+  }, 'session-native');
+
+  assert.deepEqual(calls, [
+    ['createTextState', 'Native KO', 0, 0],
+    ['newPage', 'Native KO'],
+    ['flushTextState', 9],
+    ['onEndOfText'],
+  ]);
+  assert.equal(rendered.join(''), 'Native KO');
+  assert.equal(messageWindow._showFast, true);
+  assert.equal(messageWindow._lineShowFast, true);
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {

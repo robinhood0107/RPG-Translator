@@ -338,6 +338,7 @@
       return false;
     }
     state.pendingRedraw = null;
+    if (drawNativeMessageReplay(scope, windowInstance, translated, originalText)) return true;
     return drawMessageTextExFallback(scope, windowInstance, translated, originalText);
   }
 
@@ -346,7 +347,93 @@
     const pending = state && state.pendingRedraw ? state.pendingRedraw : null;
     if (!pending || !isMessageWindowReady(windowInstance)) return false;
     state.pendingRedraw = null;
+    if (drawNativeMessageReplay(scope, windowInstance, pending.text, pending.originalText)) return true;
     return drawMessageTextExFallback(scope, windowInstance, pending.text, pending.originalText);
+  }
+
+  function drawNativeMessageReplay(scope, windowInstance, translated, originalText) {
+    if (!canUseNativeMessageReplay(windowInstance)) return false;
+    const text = redrawText(translated, originalText, windowInstance);
+    const scaleScope = createMessageTextScaleScope(scope, windowInstance);
+    const textState = createNativeTextState(windowInstance, text);
+    const previousPause = !!windowInstance.pause;
+    const previousWaitCount = finiteNumber(windowInstance._waitCount, 0);
+    windowInstance.__rpgTranslatorMessageRedrawDepth = (windowInstance.__rpgTranslatorMessageRedrawDepth || 0) + 1;
+    try {
+      windowInstance._textState = textState;
+      windowInstance.newPage(textState);
+      if (typeof windowInstance.updatePlacement === 'function') windowInstance.updatePlacement();
+      if (typeof windowInstance.updateBackground === 'function') windowInstance.updateBackground();
+      if (typeof windowInstance.open === 'function') windowInstance.open();
+      drawMessageFaceIfReady(windowInstance);
+      windowInstance._trMsgStartX = finiteNumber(textState.startX, finiteNumber(textState.left, finiteNumber(textState.x, 0)));
+      windowInstance._trMsgStartY = finiteNumber(textState.startY, finiteNumber(textState.y, 0));
+      windowInstance._trWrappedMessageText = String(textState.text || text || '');
+      return flushNativeMessageText(windowInstance, textState);
+    } catch (_error) {
+      windowInstance.pause = previousPause;
+      windowInstance._waitCount = previousWaitCount;
+      return false;
+    } finally {
+      if (scaleScope && typeof scaleScope.restore === 'function') scaleScope.restore();
+      windowInstance.__rpgTranslatorMessageRedrawDepth = Math.max(0, (windowInstance.__rpgTranslatorMessageRedrawDepth || 1) - 1);
+    }
+  }
+
+  function canUseNativeMessageReplay(windowInstance) {
+    if (!windowInstance || !windowInstance.contents) return false;
+    if (typeof windowInstance.newPage !== 'function'
+      || typeof windowInstance.processCharacter !== 'function'
+      || typeof windowInstance.isEndOfText !== 'function'
+      || typeof windowInstance.onEndOfText !== 'function') {
+      return false;
+    }
+    return !(typeof windowInstance.isAnySubWindowActive === 'function' && windowInstance.isAnySubWindowActive());
+  }
+
+  function createNativeTextState(windowInstance, text) {
+    const x = finiteNumber(windowInstance._trMsgStartX, 0);
+    const y = finiteNumber(windowInstance._trMsgStartY, 0);
+    if (typeof windowInstance.createTextState === 'function') {
+      const textState = windowInstance.createTextState(String(text || ''), 0, y, 0);
+      const startX = Number.isFinite(x)
+        ? x
+        : (typeof windowInstance.newLineX === 'function' ? finiteNumber(windowInstance.newLineX(textState), 0) : 0);
+      textState.x = startX;
+      textState.startX = startX;
+      textState.y = y;
+      if (typeof textState.startY === 'number') textState.startY = y;
+      if (typeof textState.index !== 'number') textState.index = 0;
+      if (typeof textState.text !== 'string') textState.text = String(text || '');
+      return textState;
+    }
+    return { index: 0, text: String(text || ''), x, y, startX: x, startY: y };
+  }
+
+  function flushNativeMessageText(windowInstance, textState) {
+    if (!windowInstance || !textState) return false;
+    windowInstance.pause = false;
+    windowInstance._waitCount = 0;
+    windowInstance._showFast = true;
+    while (windowInstance._textState && !windowInstance.isEndOfText(textState)) {
+      if (typeof windowInstance.needsNewPage === 'function' && windowInstance.needsNewPage(textState)) {
+        windowInstance.newPage(textState);
+        windowInstance._showFast = true;
+        drawMessageFaceIfReady(windowInstance);
+      }
+      windowInstance.processCharacter(textState);
+      if (windowInstance.pause || windowInstance._waitCount > 0) break;
+    }
+    if (typeof windowInstance.flushTextState === 'function') windowInstance.flushTextState(textState);
+    const isWaiting = typeof windowInstance.isWaiting === 'function'
+      ? windowInstance.isWaiting()
+      : (windowInstance.pause || windowInstance._waitCount > 0);
+    if (windowInstance._textState && windowInstance.isEndOfText(textState) && !isWaiting) {
+      windowInstance.onEndOfText();
+    }
+    windowInstance._showFast = true;
+    windowInstance._lineShowFast = true;
+    return true;
   }
 
   function drawMessageTextExFallback(scope, windowInstance, translated, originalText) {
@@ -369,6 +456,18 @@
       windowInstance.__rpgTranslatorMessageRedrawDepth = Math.max(0, (windowInstance.__rpgTranslatorMessageRedrawDepth || 1) - 1);
     }
     return true;
+  }
+
+  function drawMessageFaceIfReady(windowInstance) {
+    if (!windowInstance || !windowInstance._faceBitmap) return false;
+    try {
+      if (typeof windowInstance._faceBitmap.isReady === 'function' && windowInstance._faceBitmap.isReady()) {
+        const drawn = drawMessageFaceIfNeeded(windowInstance);
+        if (drawn) windowInstance._faceBitmap = null;
+        return drawn;
+      }
+    } catch (_) {}
+    return false;
   }
 
   function createMessageTextScaleScope(scope, windowInstance) {
