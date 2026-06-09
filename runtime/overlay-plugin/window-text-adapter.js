@@ -12,6 +12,8 @@
       wrapTextMethod(prototype, 'drawText', scope, translator);
       wrapTextMethod(prototype, 'drawTextEx', scope, translator);
       wrapWindowLifecycle(prototype, translator);
+      wrapPendingFlushMethod(prototype, 'open', translator);
+      wrapPendingFlushMethod(prototype, 'update', translator);
       prototype.__rpgTranslatorWindowTextInstalled = INSTALL_TOKEN;
       return true;
     }
@@ -87,6 +89,18 @@
           : null;
 
     if (command && command.status === 'hit' && translator && typeof translator.acceptRender === 'function') {
+      if (!isWindowVisible(surface)) {
+        queuePendingDraw(state, slotKey, {
+          command,
+          sourceText,
+          translatedText: command.translatedText,
+          methodName,
+          args: Array.isArray(rest) ? rest.slice() : [],
+          itemId,
+        });
+        return text;
+      }
+      dropPendingDraw(state, slotKey);
       if (!translator.acceptRender(command, surface, sourceText)) return text;
     }
     return translated || text;
@@ -111,6 +125,20 @@
     return true;
   }
 
+  function wrapPendingFlushMethod(prototype, methodName, translator) {
+    const original = prototype[methodName];
+    if (typeof original !== 'function') return false;
+    if (original.__rpgTranslatorWindowPendingFlush === LIFECYCLE_TOKEN) return true;
+    prototype[methodName] = function translatedWindowPendingFlush(...args) {
+      const result = original.apply(this, args);
+      flushPendingDraws(this, translator);
+      return result;
+    };
+    prototype[methodName].__rpgTranslatorOriginal = original;
+    prototype[methodName].__rpgTranslatorWindowPendingFlush = LIFECYCLE_TOKEN;
+    return true;
+  }
+
   function wrapContentsMutation(windowInstance, translator) {
     const contents = windowInstance && windowInstance.contents;
     if (!contents || contents.__rpgTranslatorWindowOwner === windowInstance) return;
@@ -130,6 +158,7 @@
 
   function retireReplacedSlot(translator, state, slotKey) {
     const existing = state.slots.get(slotKey);
+    dropPendingDraw(state, slotKey);
     if (!existing || !existing.itemId) return false;
     if (translator && typeof translator.archiveItem === 'function') translator.archiveItem(existing.itemId);
     if (translator && typeof translator.releaseTextClaim === 'function') {
@@ -141,6 +170,7 @@
 
   function clearSlot(translator, state, slotKey, invalidate) {
     retireReplacedSlot(translator, state, slotKey);
+    dropPendingDraw(state, slotKey);
     if (invalidate !== false && state.surface && translator && typeof translator.markSurfaceChanged === 'function') {
       translator.markSurfaceChanged(state.surface);
     }
@@ -158,6 +188,7 @@
         }
       }
       state.slots.clear();
+      if (state.pendingDraws) state.pendingDraws.clear();
     }
     if (state && translator && typeof translator.releaseSurface === 'function') {
       translator.releaseSurface(windowInstance, `window-text:${state.windowId}`);
@@ -176,6 +207,7 @@
         windowId: String(nextWindowId++),
         revision: 0,
         slots: new Map(),
+        pendingDraws: new Map(),
         surface,
       };
     }
@@ -192,6 +224,51 @@
     const width = rest && rest.length > 2 ? rest[2] : '';
     const align = rest && rest.length > 3 ? rest[3] : '';
     return `window:${state.windowId}:${methodName}:${String(x)}:${String(y)}:${String(width)}:${String(align)}`;
+  }
+
+  function queuePendingDraw(state, slotKey, entry) {
+    if (!state || !slotKey || !entry) return false;
+    if (!state.pendingDraws) state.pendingDraws = new Map();
+    state.pendingDraws.set(slotKey, entry);
+    return true;
+  }
+
+  function dropPendingDraw(state, slotKey) {
+    if (!state || !state.pendingDraws || !slotKey) return false;
+    return state.pendingDraws.delete(slotKey);
+  }
+
+  function flushPendingDraws(windowInstance, translator) {
+    const state = getState(windowInstance);
+    if (!state || !state.pendingDraws || !state.pendingDraws.size || !isWindowVisible(windowInstance)) return false;
+    const pending = Array.from(state.pendingDraws.entries());
+    let flushed = false;
+    pending.forEach(([slotKey, entry]) => {
+      if (!entry || !entry.command || !entry.methodName) {
+        state.pendingDraws.delete(slotKey);
+        return;
+      }
+      const current = state.slots.get(slotKey);
+      if (!current || current.itemId !== entry.itemId) {
+        state.pendingDraws.delete(slotKey);
+        return;
+      }
+      if (translator && typeof translator.acceptRender === 'function') {
+        if (!translator.acceptRender(entry.command, windowInstance, entry.sourceText)) {
+          state.pendingDraws.delete(slotKey);
+          return;
+        }
+      }
+      const draw = windowInstance && windowInstance[entry.methodName];
+      if (typeof draw !== 'function') {
+        state.pendingDraws.delete(slotKey);
+        return;
+      }
+      state.pendingDraws.delete(slotKey);
+      withTranslatedDraw(windowInstance, () => draw.call(windowInstance, entry.translatedText, ...(entry.args || [])));
+      flushed = true;
+    });
+    return flushed;
   }
 
   function withTranslatedDraw(windowInstance, callback) {

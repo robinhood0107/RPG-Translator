@@ -895,6 +895,59 @@ test('window text adapter respects ownership and stale render rejection', () => 
   assert.equal(ownedOrchestrator.diagnostics().active_items, 0);
 });
 
+test('window text adapter defers hidden window cache hits until ready', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Hidden JP') return 'Hidden KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.visible = false;
+      this.openness = 0;
+      this.contents = {};
+    },
+  };
+  root.Window_Base.prototype.drawText = function drawText(text, x, y, width, align) {
+    calls.push(['drawText', text, x, y, width, align]);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    calls.push(['drawTextEx', text]);
+    return text.length;
+  };
+  root.Window_Base.prototype.update = function update() {
+    calls.push(['update']);
+  };
+
+  WindowTextAdapter.install(root, orchestrator);
+  const hiddenWindow = new root.Window_Base();
+  hiddenWindow.drawText('Hidden JP', 1, 2, 80, 'center');
+
+  assert.deepEqual(calls, [
+    ['drawText', 'Hidden JP', 1, 2, 80, 'center'],
+  ]);
+  assert.equal(orchestrator.diagnostics().render_accepted, 0);
+
+  hiddenWindow.visible = true;
+  hiddenWindow.openness = 255;
+  hiddenWindow.update();
+
+  assert.deepEqual(calls, [
+    ['drawText', 'Hidden JP', 1, 2, 80, 'center'],
+    ['update'],
+    ['drawText', 'Hidden KO', 1, 2, 80, 'center'],
+  ]);
+  assert.equal(orchestrator.diagnostics().render_accepted, 1);
+});
+
 test('message adapter translates joined message blocks instead of individual 401 lines', () => {
   const requests = [];
   const index = {
