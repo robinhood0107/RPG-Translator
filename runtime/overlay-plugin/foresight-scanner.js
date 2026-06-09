@@ -232,12 +232,49 @@
           return;
         }
         diagnostics.stop_reason = commonEvent ? 'common-event-recursion' : 'common-event-missing';
-      }
-      if (isBarrierCommand(code)) {
-        diagnostics.stop_reason = `barrier-${code}`;
+        appendPathStop(diagnostics, {
+          index,
+          stop_reason: diagnostics.stop_reason,
+          branch_depth: frame.branchDepth || 0,
+          branch_path: cloneBranchPath(frame.branchPath),
+          code,
+          label: getEventCommandLabel(code),
+        });
         return;
       }
-      index += 1;
+      const metadata = getEventCommandMetadata(code);
+      if (metadata.scanBehavior === 'advance') {
+        recordCommandAction(diagnostics, metadata);
+        index += 1;
+        continue;
+      }
+      if (metadata.scanBehavior === 'frame-end') {
+        diagnostics.stop_reason = 'frame-end';
+        appendPathStop(diagnostics, {
+          index,
+          stop_reason: diagnostics.stop_reason,
+          branch_depth: frame.branchDepth || 0,
+          branch_path: cloneBranchPath(frame.branchPath),
+          code,
+          label: metadata.label,
+        });
+        return;
+      }
+      diagnostics.stop_reason = metadata.scanBehavior === 'message-line' || metadata.scanBehavior === 'movement-route-line'
+        ? 'orphan-continuation'
+        : 'barrier-command';
+      appendPathStop(diagnostics, {
+        index,
+        stop_reason: diagnostics.stop_reason,
+        branch_depth: frame.branchDepth || 0,
+        branch_path: cloneBranchPath(frame.branchPath),
+        code,
+        label: metadata.label,
+      });
+      if (metadata.scanBehavior === 'barrier') {
+        recordCommandAction(diagnostics, metadata);
+      }
+      return;
     }
   }
 
@@ -709,26 +746,227 @@
     };
   }
 
-  function getEventCommandLabel(code) {
-    const labels = {
-      101: 'Show Text',
-      102: 'Show Choices',
-      111: 'Conditional Branch',
-      112: 'Loop',
-      113: 'Break Loop',
-      117: 'Common Event',
-      118: 'Label',
-      119: 'Jump to Label',
-      205: 'Set Movement Route',
-      411: 'Else',
-      412: 'Branch End',
-      413: 'Repeat Above',
+  const EVENT_COMMAND_LABELS = Object.freeze({
+    0: 'End',
+    101: 'Show Text',
+    102: 'Show Choices',
+    103: 'Input Number',
+    104: 'Select Item',
+    105: 'Show Scrolling Text',
+    108: 'Comment',
+    111: 'Conditional Branch',
+    112: 'Loop',
+    113: 'Break Loop',
+    115: 'Exit Event Processing',
+    117: 'Common Event',
+    118: 'Label',
+    119: 'Jump to Label',
+    121: 'Control Switches',
+    122: 'Control Variables',
+    123: 'Control Self Switch',
+    124: 'Control Timer',
+    125: 'Change Gold',
+    126: 'Change Items',
+    127: 'Change Weapons',
+    128: 'Change Armor',
+    129: 'Change Party Members',
+    132: 'Change Battle BGM',
+    133: 'Change Victory ME',
+    134: 'Change Save Access',
+    135: 'Change Menu Access',
+    136: 'Enable/Disable Encounters',
+    137: 'Change Formation Access',
+    138: 'Change Window Color',
+    139: 'Change Defeat ME',
+    140: 'Change Vehicle BGM',
+    201: 'Transfer Player',
+    202: 'Set Vehicle Location',
+    203: 'Set Event Location',
+    204: 'Scroll Map',
+    205: 'Set Movement Route',
+    206: 'Get On/Off Vehicle',
+    211: 'Change Transparency',
+    212: 'Show Animation',
+    213: 'Show Balloon Icon',
+    214: 'Erase Event',
+    216: 'Change Player Followers',
+    217: 'Gather Followers',
+    221: 'Fadeout Screen',
+    222: 'Fadein Screen',
+    223: 'Tint Screen',
+    224: 'Flash Screen',
+    225: 'Shake Screen',
+    230: 'Wait',
+    231: 'Show Picture',
+    232: 'Move Picture',
+    233: 'Rotate Picture',
+    234: 'Tint Picture',
+    235: 'Erase Picture',
+    236: 'Set Weather Effect',
+    241: 'Play BGM (background music)',
+    242: 'Fadeout BGM (background music)',
+    243: 'Save BGM (background music)',
+    244: 'Replay BGM (background music)',
+    245: 'Play BGS (background sound)',
+    246: 'Fadeout BGS (background sound)',
+    247: 'Save BGS (background sound)',
+    248: 'Replay BGS (background sound)',
+    249: 'Play ME (music effect)',
+    250: 'Play SE (sound effect)',
+    251: 'Stop SE (sound effect)',
+    261: 'Play Movie',
+    281: 'Change Map Name Display',
+    282: 'Change Tileset',
+    283: 'Change Battle Background',
+    284: 'Change Parallax',
+    285: 'Get Location Info',
+    301: 'Battle Processing',
+    302: 'Shop Processing',
+    303: 'Name Input Processing',
+    311: 'Change HP (health points)',
+    312: 'Change MP (magic points)',
+    313: 'Change State',
+    314: 'Recover All',
+    315: 'Change EXP (experience)',
+    316: 'Change Level',
+    317: 'Change Parameter',
+    318: 'Change Skill',
+    319: 'Change Equipment',
+    320: 'Change Name',
+    321: 'Change Class',
+    322: 'Change Actor Images',
+    323: 'Change Vehicle Image',
+    324: 'Change Nickname',
+    325: 'Change Profile',
+    326: 'Change TP (tactical points)',
+    331: 'Change Enemy HP (health points)',
+    332: 'Change Enemy MP (magic points)',
+    333: 'Change Enemy State',
+    334: 'Enemy Recover All',
+    335: 'Enemy Appearance',
+    336: 'Enemy Transform',
+    337: 'Show Battle Animation',
+    339: 'Force Action',
+    340: 'Abort Battle',
+    342: 'Change Enemy TP (tactical points)',
+    351: 'Open Menu Screen',
+    352: 'Open Save Screen',
+    353: 'Game Over',
+    354: 'Return to Title Screen',
+    355: 'Script (runs JavaScript)',
+    356: 'Plugin Command (runs MV plugin code)',
+    357: 'Plugin Command (runs MZ plugin code)',
+    401: 'Show Text Line',
+    402: 'Choice Branch',
+    403: 'Choice Cancel Branch',
+    404: 'End Choices',
+    405: 'Show Scrolling Text Line',
+    408: 'Comment Line',
+    411: 'Else',
+    412: 'End Conditional Branch',
+    413: 'Repeat Above',
+    505: 'Movement Route Command (one route step)',
+    601: 'Battle Win Branch',
+    602: 'Battle Escape Branch',
+    603: 'Battle Lose Branch',
+    604: 'End Battle Processing',
+    605: 'Shop Item',
+    655: 'Script Line (continues JavaScript)',
+    657: 'Plugin Command Argument Line (continues plugin command)',
+  });
+
+  const EVENT_ADVANCE_CODES = new Set([
+    103, 104, 105, 108, 118,
+    121, 122, 123, 124, 125, 126, 127, 128, 129,
+    132, 133, 134, 135, 136, 137, 138, 139, 140,
+    202, 203, 204, 206, 211, 212, 213, 214, 216, 217,
+    221, 222, 223, 224, 225, 230, 231, 232, 233, 234, 235, 236,
+    241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 261,
+    281, 282, 283, 284, 285,
+    302, 303,
+    311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326,
+    331, 332, 333, 334, 335, 336, 337, 339, 342,
+    351, 352, 355, 356, 357, 405, 408, 605, 655, 657,
+  ]);
+
+  const EVENT_BARRIER_CODES = new Set([
+    102, 111, 112, 113, 115, 119, 201, 301, 340, 353, 354,
+    402, 403, 404, 411, 412, 413, 601, 602, 603, 604,
+  ]);
+
+  const EVENT_STATE_RISK_CODES = new Set([
+    103, 104,
+    121, 122, 123, 124, 125, 126, 127, 128, 129,
+    132, 133, 134, 135, 136, 137, 138, 139, 140,
+    201, 202, 203, 205, 206, 214,
+    281, 282, 283, 284, 285,
+    302, 303,
+    311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326,
+    331, 332, 333, 334, 335, 336, 337, 339, 342, 505, 605,
+  ]);
+
+  const EVENT_EXTERNAL_RISK_CODES = new Set([355, 356, 357, 655, 657]);
+
+  function getEventCommandMetadata(code) {
+    const numeric = Number(code);
+    const label = getEventCommandLabel(numeric);
+    if (!Number.isFinite(numeric)) {
+      return {
+        code: null,
+        label: 'Unknown event command',
+        scanBehavior: 'barrier',
+        stalenessRisk: 'external',
+        reason: 'unknown',
+      };
+    }
+    if (numeric === 0) {
+      return { code: numeric, label, scanBehavior: 'frame-end', stalenessRisk: '', reason: '' };
+    }
+    if (numeric === 101) {
+      return { code: numeric, label, scanBehavior: 'message', stalenessRisk: '', reason: '' };
+    }
+    if (numeric === 117) {
+      return { code: numeric, label, scanBehavior: 'nested-list', stalenessRisk: '', reason: '' };
+    }
+    if (numeric === 205) {
+      return { code: numeric, label, scanBehavior: 'movement-route', stalenessRisk: 'state', reason: '' };
+    }
+    if (numeric === 401) {
+      return { code: numeric, label, scanBehavior: 'message-line', stalenessRisk: '', reason: '' };
+    }
+    if (numeric === 505) {
+      return { code: numeric, label, scanBehavior: 'movement-route-line', stalenessRisk: 'state', reason: '' };
+    }
+    if (EVENT_ADVANCE_CODES.has(numeric)) {
+      return {
+        code: numeric,
+        label,
+        scanBehavior: 'advance',
+        stalenessRisk: EVENT_STATE_RISK_CODES.has(numeric) ? 'state' : (EVENT_EXTERNAL_RISK_CODES.has(numeric) ? 'external' : ''),
+        reason: '',
+      };
+    }
+    if (EVENT_BARRIER_CODES.has(numeric)) {
+      return {
+        code: numeric,
+        label,
+        scanBehavior: 'barrier',
+        stalenessRisk: EVENT_STATE_RISK_CODES.has(numeric) ? 'state' : '',
+        reason: '',
+      };
+    }
+    return {
+      code: numeric,
+      label,
+      scanBehavior: 'barrier',
+      stalenessRisk: 'external',
+      reason: 'unknown',
     };
-    return labels[Number(code)] || `Event Command ${Number(code)}`;
   }
 
-  function isBarrierCommand(code) {
-    return code === 201 || code === 205 || code === 301 || code === 351 || code === 352 || code === 353 || code === 354;
+  function getEventCommandLabel(code) {
+    const numeric = Number(code);
+    return EVENT_COMMAND_LABELS[numeric] || `Event Command ${numeric}`;
   }
 
   function resolveOrigin(origin) {
@@ -754,6 +992,8 @@
       route_barrier_reason: '',
       route_barrier_label: '',
       route_command_actions: [],
+      command_actions: [],
+      staleness_risks: 0,
       path_stops: [],
     };
   }
@@ -778,6 +1018,10 @@
       route_command_actions: Array.isArray(diagnostics.route_command_actions)
         ? diagnostics.route_command_actions.map((action) => Object.assign({}, action))
         : [],
+      command_actions: Array.isArray(diagnostics.command_actions)
+        ? diagnostics.command_actions.map((action) => Object.assign({}, action))
+        : [],
+      staleness_risks: diagnostics.staleness_risks || 0,
       path_stops: Array.isArray(diagnostics.path_stops)
         ? diagnostics.path_stops.map(sanitizePathStop)
         : [],
@@ -825,6 +1069,19 @@
       entry.route_barrier_label = stop.route_barrier_label ? String(stop.route_barrier_label) : '';
     }
     diagnostics.path_stops.push(entry);
+  }
+
+  function recordCommandAction(diagnostics, metadata) {
+    if (!diagnostics || !metadata) return;
+    if (!Array.isArray(diagnostics.command_actions)) diagnostics.command_actions = [];
+    diagnostics.command_actions.push({
+      code: metadata.code,
+      label: metadata.label,
+      scan_behavior: metadata.scanBehavior,
+      staleness_risk: metadata.stalenessRisk,
+      reason: metadata.reason,
+    });
+    if (metadata.stalenessRisk) diagnostics.staleness_risks += 1;
   }
 
   function sanitizePathStop(stop) {
