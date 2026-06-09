@@ -3583,6 +3583,19 @@ test('boot exposes runtime diagnostics and records adapter install timing', asyn
 
   const diagnostics = root.RPGTranslatorOverlay.runtimeDiagnostics;
   assert.ok(diagnostics);
+  root.RPGTranslatorOverlay.foresightScanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list: [
+        { code: 101, indent: 0, parameters: [] },
+        { code: 401, indent: 0, parameters: ['Current'] },
+        { code: 101, indent: 0, parameters: [] },
+        { code: 401, indent: 0, parameters: ['Next'] },
+      ],
+      nextIndex: 2,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
   const snapshot = diagnostics.snapshot({ detailView: true });
   assert.deepEqual(snapshot.adapterInstallStatus.map((entry) => entry.adapter), [
     'message',
@@ -3592,6 +3605,8 @@ test('boot exposes runtime diagnostics and records adapter install timing', asyn
     'pixi-text',
   ]);
   assert.equal(snapshot.performance.timings.some((entry) => entry.name === 'hook.install.message.ms'), true);
+  assert.equal(snapshot.foresight.cache_misses, 1);
+  assert.equal(snapshot.foresight.recent_scans[0].stop_reason, 'end-of-list');
 });
 
 test('boot passes exported foresight command catalog to scanner', async () => {

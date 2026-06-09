@@ -47,6 +47,11 @@
           commandCatalog: resolveCommandCatalog(options, bundle),
         })
         : null;
+      if (runtimeDiagnostics
+        && foresightScanner
+        && typeof runtimeDiagnostics.setForesightSnapshotProvider === 'function') {
+        runtimeDiagnostics.setForesightSnapshotProvider(() => foresightScanner.getSnapshot());
+      }
       const nextOverlay = Object.assign(overlay, {
         installed: true,
         engine: options.engine || 'unknown',
