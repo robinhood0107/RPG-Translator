@@ -5874,6 +5874,88 @@ test('pixi text adapter retires removed objects and restores translated text sca
   assert.equal(orchestrator.claimText(`pixi:${pixiText._rpgTranslatorPixiObjectId}:text`, 'window-text:slot'), true);
 });
 
+test('pixi text adapter reports frame visibility and priority changes', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Pixi JP') return 'Pixi KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const events = [];
+  orchestrator.subscribe((event) => {
+    if (['item.hidden', 'item.visible', 'item.priority_changed'].includes(event.type)) {
+      events.push([
+        event.type,
+        event.payload && event.payload.reason,
+        event.payload && event.payload.priority,
+        event.payload && event.payload.details && event.payload.details.screenState,
+      ]);
+    }
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+    },
+    PIXI: {},
+    SceneManager: {
+      updateScene() {},
+    },
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+    this.visible = true;
+    this.renderable = true;
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const container = new root.PIXI.Container();
+  const pixiText = new root.PIXI.Text('');
+  pixiText.parent = container;
+  container.children.push(pixiText);
+
+  pixiText.text = 'Pixi JP';
+  assert.equal(orchestrator.diagnostics().active[0].visible, true);
+
+  container.visible = false;
+  root.SceneManager.updateScene();
+
+  assert.equal(pixiText._rpgTranslatorPixiVisible, false);
+  assert.equal(orchestrator.diagnostics().active[0].visible, false);
+  assert.equal(orchestrator.diagnostics().active[0].priority, 100);
+  assert.equal(orchestrator.diagnostics().active[0].screenState, 'hidden');
+
+  container.visible = true;
+  root.SceneManager.updateScene();
+
+  assert.equal(pixiText._rpgTranslatorPixiVisible, true);
+  assert.equal(orchestrator.diagnostics().active[0].visible, true);
+  assert.equal(orchestrator.diagnostics().active[0].priority, 750);
+  assert.equal(orchestrator.diagnostics().active[0].screenState, 'visible');
+  assert.deepEqual(events, [
+    ['item.priority_changed', 'pixi-text-hidden', 100, 'hidden'],
+    ['item.hidden', 'pixi-text-hidden', 100, 'hidden'],
+    ['item.priority_changed', 'pixi-text-visible', 750, 'visible'],
+    ['item.visible', 'pixi-text-visible', 750, 'visible'],
+  ]);
+});
+
 test('pixi text adapter leaves native text when another owner claimed the surface', () => {
   const index = {
     translate({ text }) {

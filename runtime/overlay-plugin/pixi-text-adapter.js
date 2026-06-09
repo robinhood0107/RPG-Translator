@@ -2,6 +2,9 @@
   const STATE_KEY = '__rpgTranslatorPixiState';
   const SETTER_TOKEN = 'rpg-translator-pixi-setter-v2';
   const LIFECYCLE_TOKEN = 'rpg-translator-pixi-lifecycle-v2';
+  const PRIORITY_VISIBLE = 750;
+  const PRIORITY_DETACHED = 250;
+  const PRIORITY_HIDDEN = 100;
   let nextObjectId = 1;
 
   class PixiTextAdapter {
@@ -74,6 +77,7 @@
     state.renderedText = text;
     state.visible = isRenderable(surface);
     state.screenState = state.visible ? 'visible' : 'hidden';
+    state.priority = priorityFor(surface, state.visible);
     state.itemId = '';
     watched.add(surface);
 
@@ -106,6 +110,7 @@
       generation: state.revision,
       visible: state.visible,
       screenState: state.screenState,
+      priority: state.priority,
       metadata: {
         objectId: state.objectId,
         windowType: adapterName,
@@ -235,11 +240,31 @@
         return;
       }
       const visible = isRenderable(surface);
+      const priority = priorityFor(surface, visible);
+      const screenState = screenStateFor(surface, visible);
+      if (state.priority !== priority) {
+        state.priority = priority;
+        if (translator && typeof translator.setItemTranslationPriority === 'function') {
+          translator.setItemTranslationPriority(state.itemId, priority, priorityReason(screenState), {
+            screenState,
+            windowType: state.label,
+          });
+        }
+      }
       if (state.visible !== visible) {
         state.visible = visible;
-        state.screenState = visible ? 'visible' : 'hidden';
-        exposeState(surface, state);
+        state.screenState = screenState;
+        if (translator && typeof translator.setItemVisibility === 'function') {
+          translator.setItemVisibility(state.itemId, visible, {
+            reason: priorityReason(screenState),
+            screenState,
+            windowType: state.label,
+          });
+        }
+      } else if (state.screenState !== screenState) {
+        state.screenState = screenState;
       }
+      exposeState(surface, state);
     });
   }
 
@@ -291,6 +316,7 @@
       renderedText: '',
       visible: false,
       screenState: 'inactive',
+      priority: null,
       label,
     };
     if (!surface[STATE_KEY]) {
@@ -305,6 +331,7 @@
         renderedText: '',
         visible: false,
         screenState: 'inactive',
+        priority: null,
         label,
       };
     }
@@ -387,12 +414,45 @@
     if (!surface) return false;
     if (surface._destroyed || surface.destroyed) return false;
     if (surface.visible === false || surface.renderable === false) return false;
+    if (!hasPositiveOpacity(surface)) return false;
+    if (!surface.parent) return false;
+    let child = surface;
     let cursor = surface.parent;
     while (cursor) {
       if (cursor._destroyed || cursor.destroyed || cursor.visible === false || cursor.renderable === false) return false;
+      if (!hasPositiveOpacity(cursor)) return false;
+      if (Array.isArray(cursor.children) && cursor.children.indexOf(child) < 0) return false;
+      child = cursor;
       cursor = cursor.parent;
     }
     return true;
+  }
+
+  function hasPositiveOpacity(surface) {
+    const alpha = Number(surface && surface.alpha);
+    if (Number.isFinite(alpha) && alpha <= 0) return false;
+    const opacity = Number(surface && surface.opacity);
+    if (Number.isFinite(opacity) && opacity <= 0) return false;
+    return true;
+  }
+
+  function priorityFor(surface, visible) {
+    if (!surface || surface._destroyed || surface.destroyed) return PRIORITY_HIDDEN;
+    if (!surface.parent) return PRIORITY_DETACHED;
+    return visible ? PRIORITY_VISIBLE : PRIORITY_HIDDEN;
+  }
+
+  function screenStateFor(surface, visible) {
+    if (!surface || surface._destroyed || surface.destroyed) return 'destroyed';
+    if (visible) return 'visible';
+    if (!surface.parent) return 'detached';
+    return 'hidden';
+  }
+
+  function priorityReason(screenState) {
+    if (screenState === 'visible') return 'pixi-text-visible';
+    if (screenState === 'detached') return 'pixi-text-detached';
+    return 'pixi-text-hidden';
   }
 
   function snapshotRemovedChildren(container, beginIndex, endIndex) {
