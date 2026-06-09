@@ -382,6 +382,22 @@ test('message wrapper uses window textWidth for soft wrap decisions', () => {
   );
 });
 
+test('message wrapper applies font-size escapes before measuring following text', () => {
+  let scale = 1;
+  const messageWindow = {
+    contents: { width: 60, height: 96 },
+    lineHeight() { return 24; },
+    makeFontBigger() { scale = 2; },
+    makeFontSmaller() { scale = 1; },
+    textWidth(text) { return String(text).length * 10 * scale; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('\\{abc d', { window: messageWindow }),
+    ['\\{abc', 'd'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };

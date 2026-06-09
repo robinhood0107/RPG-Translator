@@ -60,6 +60,7 @@
       }
       current += token.raw;
       width += tokenWidth;
+      if (token.type === 'escape') applyMeasuredEscape(windowInstance, token);
       if (token.breakable) lastBreak = current.length;
     }
     output.push(cleanupLine(current));
@@ -140,7 +141,7 @@
     const raw = `${prefix}${match[0]}`;
     const command = match[1].toUpperCase();
     const width = command === 'I' ? 2 : 0;
-    return { type: 'escape', raw, width, breakable: false };
+    return { type: 'escape', raw, command, width, breakable: false };
   }
 
   function resolveCapacity(windowInstance, explicitCapacity) {
@@ -190,7 +191,7 @@
   function measureTokenWidth(windowInstance, token) {
     if (!token) return 0;
     if (token.type === 'escape') {
-      const command = String(token.command || token.raw.slice(1)).replace(/\[.*$/u, '').toUpperCase();
+      const command = escapeCommand(token);
       if (command === 'I') {
         const iconWidth = typeof globalThis.Window_Base !== 'undefined'
           && Number.isFinite(Number(globalThis.Window_Base._iconWidth))
@@ -211,6 +212,20 @@
       }
     } catch (_) {}
     return Math.max(0, token.width * Math.max(1, Math.round(resolveLineHeight(windowInstance) / 2)));
+  }
+
+  function applyMeasuredEscape(windowInstance, token) {
+    if (!windowInstance || !token) return;
+    const command = escapeCommand(token);
+    if (command === '{' && typeof windowInstance.makeFontBigger === 'function') {
+      windowInstance.makeFontBigger();
+    } else if (command === '}' && typeof windowInstance.makeFontSmaller === 'function') {
+      windowInstance.makeFontSmaller();
+    }
+  }
+
+  function escapeCommand(token) {
+    return String(token.command || token.raw.slice(1)).replace(/\[.*$/u, '').toUpperCase();
   }
 
   function measureMeasuredLine(windowInstance, line) {
