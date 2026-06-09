@@ -2,6 +2,9 @@
   const DEFAULT_TRACE_LIMIT = 320;
   const MAX_TRACE_LIMIT = 2000;
   const DEFAULT_TEXT_LIMIT = 160;
+  const DEFAULT_TARGET_FPS = 40;
+  const MAX_TARGET_FPS = 240;
+  const DEFAULT_ROLLING_FRAMES = 1200;
   const CJK_TEXT_PATTERN = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uff66-\uff9f]/u;
 
   class RuntimeDiagnostics {
@@ -14,6 +17,12 @@
       this.counters = new Map();
       this.domainTimings = new Map();
       this.adapterStatuses = [];
+      this.frames = [];
+      this.frameTotals = {
+        total: 0,
+        slow: 0,
+        dropped: 0,
+      };
     }
 
     recordDraw(stage, details = {}) {
@@ -99,6 +108,29 @@
       return entry;
     }
 
+    recordFrame(durationMs, details = {}) {
+      if (!this.isProfilerEnabled()) return null;
+      const duration = roundMs(durationMs);
+      if (!Number.isFinite(duration) || duration < 0) return null;
+      const profiler = this.settings.profiler;
+      const slow = duration >= profiler.slowFrameMs;
+      const dropped = duration >= profiler.targetFrameMs * profiler.droppedFrameMultiplier;
+      const frame = {
+        id: this.frameTotals.total + 1,
+        at: this.now(),
+        durationMs: duration,
+        slow: slow || dropped,
+        dropped,
+        stage: firstString(details && (details.stage || details.name || details.label), ''),
+      };
+      this.frameTotals.total += 1;
+      if (frame.slow) this.frameTotals.slow += 1;
+      if (frame.dropped) this.frameTotals.dropped += 1;
+      this.frames.push(frame);
+      while (this.frames.length > profiler.rollingFrames) this.frames.shift();
+      return frame;
+    }
+
     snapshot(options = {}) {
       const detailView = options.detailView !== false && options.includeDetails !== false;
       const drawEvents = detailView ? this.drawEvents.slice() : [];
@@ -109,6 +141,7 @@
           counters: toPlainCounterObject(this.counters),
           timings: timingRows(this.timings),
           domains: this.domainSnapshot(),
+          frames: this.frameSnapshot(),
         },
         hookTimingSummary: this.timingSummary(/^hook\./u),
         adapterInstallStatus: this.adapterStatuses.map((entry) => Object.assign({}, entry)),
@@ -134,6 +167,8 @@
       this.counters.clear();
       this.domainTimings.clear();
       this.adapterStatuses.length = 0;
+      this.frames.length = 0;
+      this.frameTotals = { total: 0, slow: 0, dropped: 0 };
     }
 
     isEnabled() {
@@ -142,6 +177,10 @@
 
     isDrawTraceEnabled() {
       return this.isEnabled() && this.settings.drawTrace.enabled;
+    }
+
+    isProfilerEnabled() {
+      return this.isEnabled() && this.settings.profiler.enabled;
     }
 
     shouldRecordDraw(rawText, visibleText, source) {
@@ -180,12 +219,30 @@
       }
       return output;
     }
+
+    frameSnapshot() {
+      const profiler = this.settings.profiler;
+      return {
+        enabled: this.isProfilerEnabled(),
+        summary: {
+          total: this.frameTotals.total,
+          slow: this.frameTotals.slow,
+          dropped: this.frameTotals.dropped,
+          targetFps: profiler.targetFps,
+          targetFrameMs: roundMs(profiler.targetFrameMs),
+          slowFrameMs: roundMs(profiler.slowFrameMs),
+          droppedFrameMs: roundMs(profiler.targetFrameMs * profiler.droppedFrameMultiplier),
+        },
+        recent: this.frames.map((frame) => Object.assign({}, frame)),
+      };
+    }
   }
 
   function normalizeSettings(settings) {
     const source = settings && typeof settings === 'object' ? settings : {};
     const diagnostics = source.diagnostics && typeof source.diagnostics === 'object' ? source.diagnostics : {};
     const drawTrace = source.draw_capture_trace || source.drawCaptureTrace || diagnostics.draw_capture_trace || diagnostics.drawCaptureTrace || {};
+    const profiler = source.performance_profiler || source.performanceProfiler || diagnostics.performance_profiler || diagnostics.performanceProfiler || {};
     return {
       enabled: source.diagnostics_enabled !== false && diagnostics.enabled !== false,
       drawTrace: {
@@ -195,7 +252,29 @@
         limit: positiveInteger(drawTrace.limit, DEFAULT_TRACE_LIMIT, 1, MAX_TRACE_LIMIT),
         targetTexts: normalizeTargetTexts(drawTrace.target_texts || drawTrace.targetTexts),
       },
+      profiler: normalizeProfilerSettings(profiler),
     };
+  }
+
+  function normalizeProfilerSettings(source) {
+    const raw = source && typeof source === 'object' ? source : {};
+    const targetFps = resolveTargetFps(raw.target_fps ?? raw.targetFps ?? raw.targetFPS);
+    const targetFrameMs = 1000 / targetFps;
+    const droppedFrameMultiplier = Math.max(1.1, Number(raw.dropped_frame_multiplier ?? raw.droppedFrameMultiplier) || 2);
+    return {
+      enabled: raw.enabled === true,
+      targetFps,
+      targetFrameMs,
+      slowFrameMs: targetFrameMs,
+      droppedFrameMultiplier,
+      rollingFrames: positiveInteger(raw.rolling_frames ?? raw.rollingFrames, DEFAULT_ROLLING_FRAMES, 1, 5000),
+    };
+  }
+
+  function resolveTargetFps(value) {
+    const fps = Number(value);
+    if (!Number.isFinite(fps) || fps <= 0) return DEFAULT_TARGET_FPS;
+    return Math.max(1, Math.min(MAX_TARGET_FPS, fps));
   }
 
   function normalizeTargetTexts(value) {

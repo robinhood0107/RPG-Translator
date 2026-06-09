@@ -323,6 +323,41 @@ test('runtime diagnostics records hook timing and bounded draw trace summaries',
   assert.equal(snapshot.performance.timings.some((entry) => entry.name === 'adapter.window.draw.ms'), true);
 });
 
+test('runtime diagnostics records slow and dropped frame policy summaries', () => {
+  const diagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      performance_profiler: {
+        enabled: true,
+        target_fps: 50,
+        dropped_frame_multiplier: 2,
+        rolling_frames: 3,
+      },
+    },
+  });
+
+  diagnostics.recordFrame(10, { stage: 'scene-update' });
+  diagnostics.recordFrame(21, { stage: 'scene-update' });
+  diagnostics.recordFrame(45, { stage: 'message-redraw' });
+  diagnostics.recordFrame(60, { stage: 'bitmap-replay' });
+
+  const snapshot = diagnostics.snapshot({ detailView: true });
+  assert.deepEqual(snapshot.performance.frames.summary, {
+    total: 4,
+    slow: 3,
+    dropped: 2,
+    targetFps: 50,
+    targetFrameMs: 20,
+    slowFrameMs: 20,
+    droppedFrameMs: 40,
+  });
+  assert.deepEqual(snapshot.performance.frames.recent.map((frame) => [frame.durationMs, frame.slow, frame.dropped, frame.stage]), [
+    [21, true, false, 'scene-update'],
+    [45, true, true, 'message-redraw'],
+    [60, true, true, 'bitmap-replay'],
+  ]);
+});
+
 test('orchestrator records canonical items and rejects stale render commands', () => {
   const surface = {};
   const index = {
