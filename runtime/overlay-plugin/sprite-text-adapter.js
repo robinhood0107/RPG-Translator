@@ -845,7 +845,8 @@
     prototype.removeChildren = function translatedSpriteRemoveChildren(...args) {
       const before = childList(this).slice();
       const result = original.apply(this, args);
-      before.forEach((child) => handleRemovedChild(this, child, translator, 'removeChildren'));
+      const removed = Array.isArray(result) ? result : before;
+      removed.forEach((child) => handleRemovedChild(this, child, translator, 'removeChildren'));
       return result;
     };
     prototype.removeChildren.__rpgTranslatorOriginal = original;

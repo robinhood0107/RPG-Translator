@@ -5868,6 +5868,83 @@ test('sprite text adapter retires parent run overlays when glyph child is remove
   assert.equal(parent.children.includes(runOverlay), false);
 });
 
+test('sprite text adapter retires only children actually returned by removeChildren', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Sprite JP') return 'Sprite KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Bitmap: function Bitmap(width, height) {
+      this.width = width || 120;
+      this.height = height || 32;
+    },
+    Sprite: function Sprite(bitmap) {
+      this.bitmap = bitmap || null;
+      this.children = [];
+      this.visible = true;
+      this.opacity = 255;
+      this.x = 0;
+      this.y = 0;
+    },
+  };
+  root.Bitmap.prototype.drawText = function drawText(text) {
+    this._lastDrawText = text;
+  };
+  root.Sprite.prototype.addChild = function addChild(child) {
+    this.children.push(child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.addChildAt = function addChildAt(child, index) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    this.children.splice(index, 0, child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.Sprite.prototype.removeChildren = function removeChildren(begin = 0, end = this.children.length) {
+    const removed = this.children.splice(begin, end - begin);
+    removed.forEach((child) => {
+      child.parent = null;
+    });
+    return removed;
+  };
+  root.Sprite.prototype.update = function update() {};
+
+  assert.equal(SpriteTextAdapter.install(root, orchestrator), true);
+  const parent = new root.Sprite(null);
+  const sprite = new root.Sprite({ width: 120, height: 32, _rpgTranslatorGlyphText: 'Sprite JP' });
+  const unrelated = new root.Sprite(null);
+  parent.addChild(sprite);
+  sprite.update();
+
+  assert.equal(parent.children.length, 2);
+  const overlay = parent.children[1];
+  assert.equal(overlay._rpgTranslatorSpriteTextOverlay, true);
+  assert.equal(overlay.bitmap._lastDrawText, 'Sprite KO');
+
+  parent.addChild(unrelated);
+  assert.deepEqual(parent.removeChildren(2, 3), [unrelated]);
+
+  assert.equal(parent.children[0], sprite);
+  assert.equal(parent.children[1], overlay);
+  assert.equal(overlay.parent, parent);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+  assert.equal(orchestrator.diagnostics().archived_items, 0);
+});
+
 test('bitmap text adapter aggregates same-line fragments and retires on mutation', () => {
   const requests = [];
   const index = {
