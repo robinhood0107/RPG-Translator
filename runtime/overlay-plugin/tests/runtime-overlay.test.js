@@ -2077,6 +2077,152 @@ test('adapter contract maps mycode public methods onto gateway backing subscribe
   assert.equal(contract.getRecordStatus(record), 'skipped');
 });
 
+test('adapter contract fallback subscribeRecords rejects stale render generations', () => {
+  const records = new Map();
+  const rendered = [];
+  const rejected = [];
+  const rejectedCallbacks = [];
+  let subscribed = null;
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe(listener) {
+      subscribed = listener;
+      return () => {};
+    },
+    recordRenderRejected(itemId, decision) {
+      rejected.push([itemId, decision.reason, decision.details.targetGeneration, decision.details.commandGeneration]);
+      return { status: 'rejected' };
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = { generation: 2, current: true };
+
+  contract.observeRecord(record, {
+    id: 'fallback-stale-record',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'fallback-stale-slot',
+    text: 'Fallback stale source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  assert.equal(contract.subscribeRecords({
+    token: 'fallback-stale-records',
+    records,
+    renderStrategy: 'window-text',
+    getRenderGeneration(target) {
+      return target.generation;
+    },
+    isRenderTargetCurrent(target) {
+      return target.current === true;
+    },
+    onRenderQueued(target, command) {
+      rendered.push([target === record, command.text]);
+      return true;
+    },
+    onRenderRejected(target, decision) {
+      rejectedCallbacks.push([target === record, decision.reason]);
+    },
+  }), true);
+
+  subscribed({
+    type: 'item.render_queued',
+    id: 'fallback-stale-record',
+    details: {
+      id: 'command-stale',
+      itemId: 'fallback-stale-record',
+      strategy: 'window-text',
+      text: 'Fallback stale source',
+      generation: 1,
+    },
+  });
+
+  assert.deepEqual(rendered, []);
+  assert.deepEqual(rejected, [
+    ['fallback-stale-record', 'generation-mismatch', 2, 1],
+  ]);
+  assert.deepEqual(rejectedCallbacks, [
+    [true, 'generation-mismatch'],
+  ]);
+  assert.equal(contract.getRecordStatus(record), 'detected');
+});
+
+test('adapter contract fallback subscribeRecords requires a current render validator', () => {
+  const records = new Map();
+  const rendered = [];
+  const rejected = [];
+  let subscribed = null;
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe(listener) {
+      subscribed = listener;
+      return () => {};
+    },
+    recordRenderRejected(itemId, decision) {
+      rejected.push([itemId, decision.reason]);
+      return { status: 'rejected' };
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = { generation: 1 };
+
+  contract.observeRecord(record, {
+    id: 'fallback-validator-record',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'fallback-validator-slot',
+    text: 'Fallback validator source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  assert.equal(contract.subscribeRecords({
+    token: 'fallback-validator-records',
+    records,
+    renderStrategy: 'window-text',
+    getRenderGeneration(target) {
+      return target.generation;
+    },
+    onRenderQueued(target, command) {
+      rendered.push([target === record, command.text]);
+      return true;
+    },
+  }), true);
+
+  subscribed({
+    type: 'item.render_queued',
+    id: 'fallback-validator-record',
+    details: {
+      id: 'command-validator',
+      itemId: 'fallback-validator-record',
+      strategy: 'window-text',
+      text: 'Fallback validator source',
+      generation: 1,
+    },
+  });
+
+  assert.deepEqual(rendered, []);
+  assert.deepEqual(rejected, [
+    ['fallback-validator-record', 'missing-current-validator'],
+  ]);
+  assert.equal(contract.getRecordStatus(record), 'detected');
+});
+
 test('adapter contract contains fallback subscribeRecords render callback errors', () => {
   const records = new Map();
   const rejected = [];
@@ -2116,6 +2262,12 @@ test('adapter contract contains fallback subscribeRecords render callback errors
     token: 'fallback-error-records',
     records,
     renderStrategy: 'window-text',
+    getRenderGeneration() {
+      return 1;
+    },
+    isRenderTargetCurrent() {
+      return true;
+    },
     onRenderQueued() {
       throw new Error('fallback render callback exploded');
     },

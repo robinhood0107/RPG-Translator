@@ -337,13 +337,16 @@
       const record = resolveSubscribedRecord(source, recordId, event, command);
       if (!record) {
         dispatchSubscribedMissingRecord(source, route, event, command, 'render_queued');
-        if (typeof source.onRenderRejected === 'function') {
-          source.onRenderRejected(null, createRenderDecision('rejected', 'missing-adapter-record', command, route), route);
-        }
+        notifySubscribedRenderRejected(source, null, createRenderDecision('rejected', 'missing-adapter-record', command, route), route);
         return false;
       }
-      if (!canTouchRecord(record)) return false;
-      rememberRecordEvent(record, recordId, event);
+      const lifecycleRecord = resolveSubscribedLifecycleRecord(source, record, command, route);
+      const rejectedDecision = validateSubscribedRenderCommand(source, record, lifecycleRecord, command, route);
+      if (rejectedDecision) {
+        notifySubscribedRenderRejected(source, record, rejectedDecision, route);
+        return false;
+      }
+      rememberRecordEvent(lifecycleRecord, recordId, event);
       if (typeof source.onRenderQueued !== 'function') return false;
       let callbackDecision = null;
       try {
@@ -366,6 +369,71 @@
         } catch (_error) {}
       }
       return true;
+    }
+
+    function resolveSubscribedLifecycleRecord(source, record, command, route) {
+      if (typeof source.getLifecycleRecord !== 'function') return record;
+      try {
+        return source.getLifecycleRecord(record, command, route) || null;
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function validateSubscribedRenderCommand(source, record, lifecycleRecord, command, route) {
+      if (!command || !command.itemId || !command.strategy) {
+        return createRenderDecision('rejected', 'invalid-command', command, route);
+      }
+      if (!isRecordObject(lifecycleRecord)) {
+        return createRenderDecision('rejected', 'missing-lifecycle-record', command, route);
+      }
+      if (!canTouchRecord(lifecycleRecord)) {
+        return createRenderDecision('rejected', 'inactive-record', command, route);
+      }
+      const generationDecision = validateSubscribedRenderGeneration(source, record, command, route);
+      if (generationDecision) return generationDecision;
+      if (typeof source.isRenderTargetCurrent !== 'function') {
+        return createRenderDecision('rejected', 'missing-current-validator', command, route);
+      }
+      let current = false;
+      try {
+        current = source.isRenderTargetCurrent(record, command, route);
+      } catch (error) {
+        return createRenderDecision('rejected', 'target-validator-error', command, route, describeCallbackError(error));
+      }
+      if (current === true) return null;
+      const details = current && typeof current === 'object' ? current : {};
+      const reason = nonEmptyString(details.reason, details.status, 'target-not-current');
+      return createRenderDecision('rejected', reason, command, route, details);
+    }
+
+    function validateSubscribedRenderGeneration(source, record, command, route) {
+      const commandGeneration = Number(command && command.generation);
+      if (!Number.isFinite(commandGeneration) || commandGeneration <= 0) return null;
+      const targetGeneration = resolveSubscribedRenderGeneration(source, record, command, route);
+      if (!Number.isFinite(targetGeneration)) {
+        return createRenderDecision('rejected', 'missing-generation', command, route, {
+          commandGeneration,
+        });
+      }
+      if (targetGeneration !== commandGeneration) {
+        return createRenderDecision('rejected', 'generation-mismatch', command, route, {
+          commandGeneration,
+          targetGeneration,
+        });
+      }
+      return null;
+    }
+
+    function resolveSubscribedRenderGeneration(source, record, command, route) {
+      if (typeof source.getRenderGeneration !== 'function') return NaN;
+      try {
+        const value = source.getRenderGeneration(record, command, route);
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : NaN;
+      } catch (_error) {
+        return NaN;
+      }
     }
 
     function dispatchSubscribedRecordEvent(source, handler, event, command, operation) {
