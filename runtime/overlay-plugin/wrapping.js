@@ -5,12 +5,13 @@
       const allowSoftWrap = canSoftWrap(options.window);
       const useMeasuredWrap = !Number.isFinite(options.capacity) && canMeasureWindow(options.window);
       const contentsWidth = useMeasuredWrap ? resolveContentsWidth(options.window) : NaN;
+      const measuredStartX = useMeasuredWrap ? resolveMessageStartX(options.window) : 0;
       const output = [];
       if (useMeasuredWrap) resetMessageFontSettings(options.window);
       try {
         for (const hardLine of String(text ?? '').replace(/\r\n?/gu, '\n').split('\n')) {
           if (!allowSoftWrap) pushUnwrappedLine(output, hardLine);
-          else if (useMeasuredWrap) pushMeasuredLine(output, hardLine, options.window, contentsWidth);
+          else if (useMeasuredWrap) pushMeasuredLine(output, hardLine, options.window, contentsWidth, measuredStartX);
           else pushWrappedLine(output, hardLine, capacity);
         }
       } finally {
@@ -33,14 +34,14 @@
     output.push(cleanupLine(current));
   }
 
-  function pushMeasuredLine(output, line, windowInstance, contentsWidth) {
+  function pushMeasuredLine(output, line, windowInstance, contentsWidth, startX = 0) {
     const tokens = tokenize(line);
     let current = '';
-    let width = 0;
+    let width = startX;
     let lastBreak = -1;
     for (const token of tokens) {
       if (token.type === 'page') {
-        width = 0;
+        width = startX;
         lastBreak = -1;
         current += token.raw;
         continue;
@@ -50,15 +51,15 @@
         if (token.breakable) {
           output.push(cleanupLine(current));
           current = '';
-          width = 0;
+          width = startX;
         } else if (lastBreak >= 0) {
           output.push(cleanupLine(current.slice(0, lastBreak)));
           current = current.slice(lastBreak).trimStart();
-          width = measureMeasuredLine(windowInstance, current);
+          width = startX + measureMeasuredLine(windowInstance, current);
         } else {
           output.push(cleanupLine(current));
           current = '';
-          width = 0;
+          width = startX;
         }
         lastBreak = -1;
         if (token.breakable) continue;
@@ -198,6 +199,16 @@
       try {
         windowInstance.resetFontSettings();
       } catch (_) {}
+    }
+  }
+
+  function resolveMessageStartX(windowInstance) {
+    if (!windowInstance || typeof windowInstance.newLineX !== 'function') return 0;
+    try {
+      const value = Number(windowInstance.newLineX());
+      return Number.isFinite(value) ? Math.max(0, value) : 0;
+    } catch (_) {
+      return 0;
     }
   }
 

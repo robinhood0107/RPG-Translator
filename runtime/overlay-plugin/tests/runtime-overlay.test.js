@@ -415,6 +415,20 @@ test('message wrapper restores font settings after measured wrapping', () => {
   assert.equal(scale, 1);
 });
 
+test('message wrapper accounts for message start x when measuring wrap width', () => {
+  const messageWindow = {
+    contents: { width: 100, height: 96 },
+    lineHeight() { return 24; },
+    newLineX() { return 40; },
+    textWidth(text) { return String(text).length * 10; },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('abcdefg', { window: messageWindow }),
+    ['abcdef', 'g'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
