@@ -345,7 +345,27 @@
       if (!canTouchRecord(record)) return false;
       rememberRecordEvent(record, recordId, event);
       if (typeof source.onRenderQueued !== 'function') return false;
-      return source.onRenderQueued(record, command, route);
+      let callbackDecision = null;
+      try {
+        callbackDecision = normalizeRenderCallbackDecision(source.onRenderQueued(record, command, route), command, route);
+      } catch (error) {
+        callbackDecision = createRenderDecision('rejected', 'adapter-render-error', command, route, describeCallbackError(error));
+      }
+      if (callbackDecision.status === 'deferred') {
+        notifySubscribedRenderDecision('recordRenderDeferred', callbackDecision, route);
+        return true;
+      }
+      if (callbackDecision.status !== 'accepted') {
+        notifySubscribedRenderRejected(source, record, callbackDecision, route);
+        return false;
+      }
+      notifySubscribedRenderDecision('recordRenderAccepted', callbackDecision, route);
+      if (typeof source.onRenderAccepted === 'function') {
+        try {
+          source.onRenderAccepted(record, callbackDecision, route);
+        } catch (_error) {}
+      }
+      return true;
     }
 
     function dispatchSubscribedRecordEvent(source, handler, event, command, operation) {
@@ -358,6 +378,22 @@
       rememberRecordEvent(record, recordId, event);
       if (command) return handler(record, command, event, route);
       return handler(record, event, route);
+    }
+
+    function notifySubscribedRenderRejected(source, record, decision, route) {
+      notifySubscribedRenderDecision('recordRenderRejected', decision, route);
+      if (typeof source.onRenderRejected !== 'function') return false;
+      try {
+        source.onRenderRejected(record, decision, route);
+      } catch (_error) {}
+      return true;
+    }
+
+    function notifySubscribedRenderDecision(methodName, decision, route) {
+      if (!hasBackingMethod(methodName)) return null;
+      const itemId = nonEmptyString(decision && decision.itemId, route && route.itemId, route && route.recordId);
+      if (!itemId) return null;
+      return callGateway(methodName, () => gateway[methodName](itemId, decision || {}));
     }
 
     function dispatchSubscribedMissingRecord(source, route, event, command, operation) {
@@ -414,16 +450,52 @@
       });
     }
 
-    function createRenderDecision(status, reason, command, route) {
+    function createRenderDecision(status, reason, command, route, details = {}) {
       return Object.freeze({
-        status: nonEmptyString(status, 'rejected'),
+        status: normalizeRenderDecisionStatus(status),
         reason: nonEmptyString(reason, status, 'rejected'),
         recordId: route && route.recordId ? route.recordId : '',
         itemId: route && route.itemId ? route.itemId : '',
         commandId: command && command.id ? command.id : '',
         strategy: command && command.strategy ? command.strategy : '',
         commandGeneration: finiteNumber(command && command.generation),
+        details: Object.freeze(Object.assign({}, plainObjectOrEmpty(details))),
       });
+    }
+
+    function normalizeRenderCallbackDecision(value, command, route) {
+      if (value === true) return createRenderDecision('accepted', 'accepted', command, route);
+      if (typeof value === 'string') {
+        const status = normalizeRenderDecisionStatus(value);
+        if (status === 'accepted') return createRenderDecision('accepted', value || 'accepted', command, route);
+        if (status === 'deferred') return createRenderDecision('deferred', value || 'deferred', command, route);
+        return createRenderDecision('rejected', value || 'adapter-declined', command, route);
+      }
+      if (value && typeof value === 'object') {
+        const status = normalizeRenderDecisionStatus(value.status || value.result || value.decision);
+        const reason = nonEmptyString(value.reason, status === 'accepted' ? 'accepted' : (status === 'deferred' ? 'deferred' : 'adapter-declined'));
+        return createRenderDecision(status, reason, command, route, value.details || {});
+      }
+      return createRenderDecision('rejected', 'adapter-declined', command, route);
+    }
+
+    function normalizeRenderDecisionStatus(value) {
+      const status = String(value || '').toLowerCase();
+      if (status === 'accepted' || status === 'rendered' || status === 'drawn') return 'accepted';
+      if (status === 'deferred' || status === 'queued' || status === 'pending') return 'deferred';
+      return 'rejected';
+    }
+
+    function describeCallbackError(error) {
+      const details = {};
+      if (error && typeof error === 'object') {
+        if (error.name) details.errorName = String(error.name);
+        if (error.message) details.errorMessage = String(error.message);
+        if (error.code) details.errorCode = String(error.code);
+      } else if (error !== undefined && error !== null) {
+        details.errorMessage = String(error);
+      }
+      return details;
     }
 
     function normalizePayload(payload) {

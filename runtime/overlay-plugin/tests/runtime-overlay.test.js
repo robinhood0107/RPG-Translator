@@ -2077,6 +2077,66 @@ test('adapter contract maps mycode public methods onto gateway backing subscribe
   assert.equal(contract.getRecordStatus(record), 'skipped');
 });
 
+test('adapter contract contains fallback subscribeRecords render callback errors', () => {
+  const records = new Map();
+  const rejected = [];
+  let subscribed = null;
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe(listener) {
+      subscribed = listener;
+      return () => {};
+    },
+    recordRenderRejected(itemId, decision) {
+      rejected.push([itemId, decision.reason, decision.strategy]);
+      return { status: 'rejected' };
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = {};
+
+  contract.observeRecord(record, {
+    id: 'fallback-error-record',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'fallback-error-slot',
+    text: 'Fallback error source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  assert.equal(contract.subscribeRecords({
+    token: 'fallback-error-records',
+    records,
+    renderStrategy: 'window-text',
+    onRenderQueued() {
+      throw new Error('fallback render callback exploded');
+    },
+  }), true);
+
+  assert.doesNotThrow(() => subscribed({
+    type: 'item.render_queued',
+    id: 'fallback-error-record',
+    details: {
+      id: 'command-1',
+      itemId: 'fallback-error-record',
+      strategy: 'window-text',
+      text: 'Fallback error source',
+      generation: 1,
+    },
+  }));
+  assert.deepEqual(rejected, [
+    ['fallback-error-record', 'adapter-render-error', 'window-text'],
+  ]);
+});
+
 test('adapter contract remembers subscribed render skip and failure events', async () => {
   const records = new Map();
   const events = [];
