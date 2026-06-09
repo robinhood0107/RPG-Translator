@@ -799,6 +799,8 @@
 
   function installLifecycleHooks(prototype, translator) {
     installDestroyHook(prototype, translator);
+    installAddChildHook(prototype, 'addChild', translator);
+    installAddChildHook(prototype, 'addChildAt', translator);
     installChildHook(prototype, 'removeChild', translator);
     installRemoveChildAtHook(prototype, translator);
     installRemoveChildrenHook(prototype, translator);
@@ -825,6 +827,25 @@
     };
     prototype[methodName].__rpgTranslatorOriginal = original;
     prototype[methodName].__rpgTranslatorSpriteChild = INSTALL_TOKEN;
+  }
+
+  function installAddChildHook(prototype, methodName, translator) {
+    const original = prototype[methodName];
+    if (typeof original !== 'function' || original.__rpgTranslatorSpriteAddChild === INSTALL_TOKEN) return;
+    prototype[methodName] = function translatedSpriteAddChild(child, ...args) {
+      const reparenting = !!(child && child.parent && child.parent !== this);
+      if (reparenting) child.__rpgTranslatorSpriteTextReparentBypass = true;
+      let result;
+      try {
+        result = original.call(this, child, ...args);
+      } finally {
+        if (reparenting && child) child.__rpgTranslatorSpriteTextReparentBypass = false;
+      }
+      handleAddedChild(this, child);
+      return result;
+    };
+    prototype[methodName].__rpgTranslatorOriginal = original;
+    prototype[methodName].__rpgTranslatorSpriteAddChild = INSTALL_TOKEN;
   }
 
   function installRemoveChildAtHook(prototype, translator) {
@@ -855,6 +876,7 @@
 
   function handleRemovedChild(parent, child, translator, reason) {
     if (!child) return false;
+    if (child.__rpgTranslatorSpriteTextReparentBypass) return false;
     if (child._rpgTranslatorSpriteTextOverlay) {
       if (child.__rpgTranslatorSpriteTextDetachBypass) return false;
       retireSprite(child._rpgTranslatorSpriteTextSource, translator, `${reason}:overlay`);
@@ -868,6 +890,38 @@
     retireMissingParentRun(parent, translator, child);
     retireSprite(child, translator, reason);
     return true;
+  }
+
+  function handleAddedChild(parent, child) {
+    if (!parent || !child) return false;
+    if (child.__rpgTranslatorSpriteTextDetachBypass || child._rpgTranslatorSpriteTextOverlay || child._rpgTranslatorSpriteTextParentRunOverlay) {
+      return false;
+    }
+    let handled = false;
+    visitSpriteTree(child, (node) => {
+      if (!node || node.__rpgTranslatorSpriteTextDetachBypass || node._rpgTranslatorSpriteTextOverlay || node._rpgTranslatorSpriteTextParentRunOverlay) return;
+      const state = getState(node);
+      if (state && state.overlaySprite) {
+        attachOverlay(node, state.overlaySprite);
+        syncOverlayVisibility(state);
+        handled = true;
+      }
+      const parentRunState = node[PARENT_RUN_KEY];
+      if (parentRunState && parentRunState.runs) {
+        for (const run of parentRunState.runs.values()) {
+          syncParentRunOverlayVisibility(run);
+          handled = true;
+        }
+      }
+    });
+    return handled;
+  }
+
+  function visitSpriteTree(sprite, visitor) {
+    if (!sprite || typeof visitor !== 'function') return;
+    visitor(sprite);
+    const children = Array.isArray(sprite.children) ? sprite.children.slice() : [];
+    children.forEach((child) => visitSpriteTree(child, visitor));
   }
 
   function childList(sprite) {
