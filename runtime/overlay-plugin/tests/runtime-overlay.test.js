@@ -879,6 +879,68 @@ test('foresight scanner reports common event cycles as nested-list stops', () =>
   });
 });
 
+test('foresight scanner reports common event depth limits as nested-list stops', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    maxNestedDepth: 1,
+    commonEvents: {
+      1: {
+        name: 'Entry Common',
+        list: [
+          { code: 117, indent: 0, parameters: [2] },
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Stale entry common text'] },
+        ],
+      },
+      2: {
+        name: 'Too Deep Common',
+        list: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Too deep common text'] },
+        ],
+      },
+    },
+  });
+  const list = [
+    { code: 117, indent: 0, parameters: [1] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After depth limit text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'common-event-depth-limit');
+  assert.equal(scan.common_event_pushes, 1);
+  assert.equal(scan.command_counts['117'], 2);
+  assert.equal(scan.path_stops[0].stop_reason, 'common-event-depth-limit');
+  assert.deepEqual(scan.path_stops[0].nested_list, {
+    type: 'common-event',
+    id: 2,
+    name: 'Too Deep Common',
+    depth: 2,
+    length: 2,
+  });
+});
+
 test('foresight scanner stops at label jumps with target diagnostics', () => {
   const requests = [];
   const index = {

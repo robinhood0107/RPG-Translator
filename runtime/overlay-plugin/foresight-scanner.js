@@ -2,6 +2,7 @@
   const DEFAULT_MAX_BLOCKS = 24;
   const DEFAULT_MAX_COMMANDS = 512;
   const DEFAULT_MAX_BRANCH_DEPTH = 8;
+  const DEFAULT_MAX_NESTED_DEPTH = 8;
   const DEFAULT_MESSAGE_BUDGET_COST = 1;
 
   class ForesightScanner {
@@ -14,6 +15,7 @@
       this.maxBlocks = positiveInteger(options.maxBlocks, DEFAULT_MAX_BLOCKS);
       this.maxCommands = positiveInteger(options.maxCommands, DEFAULT_MAX_COMMANDS);
       this.maxBranchDepth = positiveInteger(options.maxBranchDepth, DEFAULT_MAX_BRANCH_DEPTH);
+      this.maxNestedDepth = positiveInteger(options.maxNestedDepth, DEFAULT_MAX_NESTED_DEPTH);
       this.budgetLimit = positiveInteger(options.budget, this.maxBlocks);
       this.recentScans = [];
       this.cacheHits = 0;
@@ -239,13 +241,20 @@
         const commonEventId = readCommonEventId(command);
         const commonEvent = resolveCommonEvent(scanner.commonEvents, commonEventId);
         const nestedList = createCommonEventNestedList(commonEventId, commonEvent, frame);
-        if (commonEventId && commonEvent && Array.isArray(commonEvent.list) && !frame.commonStack.includes(commonEventId)) {
+        const commonStack = cloneCommonStack(frame.commonStack);
+        if (
+          commonEventId
+          && commonEvent
+          && Array.isArray(commonEvent.list)
+          && !commonStack.includes(commonEventId)
+          && commonStack.length < scanner.maxNestedDepth
+        ) {
           stack.push({
             list,
             index: index + 1,
             indent: frame.indent,
             listId: frame.listId,
-            commonStack: cloneCommonStack(frame.commonStack),
+            commonStack,
             ...inheritBranchContext(frame),
           });
           stack.push({
@@ -253,7 +262,7 @@
             index: 0,
             indent: 0,
             listId: `common:${commonEventId}`,
-            commonStack: cloneCommonStack(frame.commonStack).concat(commonEventId),
+            commonStack: commonStack.concat(commonEventId),
             ...inheritBranchContext(frame),
           });
           diagnostics.common_event_pushes += 1;
@@ -263,8 +272,10 @@
           diagnostics.stop_reason = 'common-event-missing-id';
         } else if (!commonEvent || !Array.isArray(commonEvent.list)) {
           diagnostics.stop_reason = 'common-event-missing-list';
-        } else {
+        } else if (commonStack.includes(commonEventId)) {
           diagnostics.stop_reason = 'common-event-cycle';
+        } else {
+          diagnostics.stop_reason = 'common-event-depth-limit';
         }
         stack.length = 0;
         appendPathStop(diagnostics, {
