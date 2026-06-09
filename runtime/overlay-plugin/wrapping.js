@@ -3,10 +3,13 @@
     static wrap(text, options = {}) {
       const capacity = resolveCapacity(options.window, options.capacity);
       const allowSoftWrap = canSoftWrap(options.window);
+      const useMeasuredWrap = !Number.isFinite(options.capacity) && canMeasureWindow(options.window);
+      const contentsWidth = useMeasuredWrap ? resolveContentsWidth(options.window) : NaN;
       const output = [];
       for (const hardLine of String(text ?? '').replace(/\r\n?/gu, '\n').split('\n')) {
-        if (allowSoftWrap) pushWrappedLine(output, hardLine, capacity);
-        else pushUnwrappedLine(output, hardLine);
+        if (!allowSoftWrap) pushUnwrappedLine(output, hardLine);
+        else if (useMeasuredWrap) pushMeasuredLine(output, hardLine, options.window, contentsWidth);
+        else pushWrappedLine(output, hardLine, capacity);
       }
       return output.length > 0 ? output : [''];
     }
@@ -21,6 +24,43 @@
         continue;
       }
       current += token.raw;
+    }
+    output.push(cleanupLine(current));
+  }
+
+  function pushMeasuredLine(output, line, windowInstance, contentsWidth) {
+    const tokens = tokenize(line);
+    let current = '';
+    let width = 0;
+    let lastBreak = -1;
+    for (const token of tokens) {
+      if (token.type === 'page') {
+        width = 0;
+        lastBreak = -1;
+        current += token.raw;
+        continue;
+      }
+      const tokenWidth = measureTokenWidth(windowInstance, token);
+      if (width > 0 && tokenWidth > 0 && width + tokenWidth > contentsWidth) {
+        if (token.breakable) {
+          output.push(cleanupLine(current));
+          current = '';
+          width = 0;
+        } else if (lastBreak >= 0) {
+          output.push(cleanupLine(current.slice(0, lastBreak)));
+          current = current.slice(lastBreak).trimStart();
+          width = measureMeasuredLine(windowInstance, current);
+        } else {
+          output.push(cleanupLine(current));
+          current = '';
+          width = 0;
+        }
+        lastBreak = -1;
+        if (token.breakable) continue;
+      }
+      current += token.raw;
+      width += tokenWidth;
+      if (token.breakable) lastBreak = current.length;
     }
     output.push(cleanupLine(current));
   }
@@ -135,6 +175,46 @@
       return Math.max(1, Number(windowInstance.contents.measureTextWidth('M')) || 12);
     }
     return 12;
+  }
+
+  function canMeasureWindow(windowInstance) {
+    const contentsWidth = resolveContentsWidth(windowInstance);
+    return Number.isFinite(contentsWidth)
+      && contentsWidth > 0
+      && (
+        (windowInstance && typeof windowInstance.textWidth === 'function')
+        || (windowInstance && windowInstance.contents && typeof windowInstance.contents.measureTextWidth === 'function')
+      );
+  }
+
+  function measureTokenWidth(windowInstance, token) {
+    if (!token) return 0;
+    if (token.type === 'escape') {
+      const command = String(token.command || token.raw.slice(1)).replace(/\[.*$/u, '').toUpperCase();
+      if (command === 'I') {
+        const iconWidth = typeof globalThis.Window_Base !== 'undefined'
+          && Number.isFinite(Number(globalThis.Window_Base._iconWidth))
+          ? Number(globalThis.Window_Base._iconWidth)
+          : 32;
+        return iconWidth + 4;
+      }
+      return 0;
+    }
+    const raw = String(token.raw || '');
+    if (!raw || token.type === 'page') return 0;
+    try {
+      if (windowInstance && typeof windowInstance.textWidth === 'function') {
+        return Math.max(0, Math.ceil(Number(windowInstance.textWidth(raw)) || 0));
+      }
+      if (windowInstance && windowInstance.contents && typeof windowInstance.contents.measureTextWidth === 'function') {
+        return Math.max(0, Math.ceil(Number(windowInstance.contents.measureTextWidth(raw)) || 0));
+      }
+    } catch (_) {}
+    return Math.max(0, token.width * Math.max(1, Math.round(resolveLineHeight(windowInstance) / 2)));
+  }
+
+  function measureMeasuredLine(windowInstance, line) {
+    return tokenize(line).reduce((total, token) => total + measureTokenWidth(windowInstance, token), 0);
   }
 
   function canSoftWrap(windowInstance) {

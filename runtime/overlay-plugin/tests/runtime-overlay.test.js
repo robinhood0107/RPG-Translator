@@ -366,6 +366,22 @@ test('message wrapper preserves form-feed page breaks inside the rendered line',
   );
 });
 
+test('message wrapper uses window textWidth for soft wrap decisions', () => {
+  const messageWindow = {
+    contents: { width: 60, height: 96 },
+    lineHeight() { return 24; },
+    textWidth(text) {
+      if (text === 'W') return 30;
+      return String(text).length * 10;
+    },
+  };
+
+  assert.deepEqual(
+    MessageWrapper.wrap('WWW x', { window: messageWindow }),
+    ['WW', 'W x'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
