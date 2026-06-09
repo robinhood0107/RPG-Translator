@@ -1161,11 +1161,12 @@
       const entry = catalog[key];
       if (!entry || typeof entry !== 'object') return;
       const fallback = getEventCommandMetadata(numeric);
+      const classification = normalizeClassification(entry.classification);
       normalized[String(numeric)] = {
         code: numeric,
         label: nonEmptyString(entry.label) || fallback.label,
-        scanBehavior: normalizeScanBehavior(entry.scanBehavior) || fallback.scanBehavior,
-        stalenessRisk: normalizeStalenessRisk(entry.stalenessRisk) || fallback.stalenessRisk,
+        scanBehavior: normalizeScanBehavior(entry.scanBehavior, classification) || fallback.scanBehavior,
+        stalenessRisk: normalizeStalenessRisk(entry.stalenessRisk, classification),
         reason: nonEmptyString(entry.reason),
         nestedLists: normalizeNestedListSpecs(entry.nestedLists),
       };
@@ -1173,9 +1174,21 @@
     return normalized;
   }
 
-  function normalizeScanBehavior(value) {
-    const behavior = nonEmptyString(value);
+  function normalizeClassification(value) {
+    const classification = nonEmptyString(value);
     return [
+      'linear',
+      'continuation',
+      'nesting',
+      'branching',
+      'terminal',
+      'external',
+    ].includes(classification) ? classification : 'external';
+  }
+
+  function normalizeScanBehavior(value, classification = '') {
+    const behavior = nonEmptyString(value);
+    if ([
       'advance',
       'barrier',
       'frame-end',
@@ -1184,12 +1197,18 @@
       'movement-route',
       'movement-route-line',
       'nested-list',
-    ].includes(behavior) ? behavior : '';
+    ].includes(behavior)) return behavior;
+    return isTransparentClassification(classification) ? 'advance' : 'barrier';
   }
 
-  function normalizeStalenessRisk(value) {
+  function normalizeStalenessRisk(value, classification = '') {
     const risk = nonEmptyString(value);
-    return ['state', 'external'].includes(risk) ? risk : '';
+    if (['state', 'context', 'external'].includes(risk)) return risk;
+    return classification === 'external' ? 'external' : '';
+  }
+
+  function isTransparentClassification(classification) {
+    return classification === 'linear' || classification === 'continuation' || classification === 'external';
   }
 
   function normalizeNestedListSpecs(value) {

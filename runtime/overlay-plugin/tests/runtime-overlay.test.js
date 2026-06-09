@@ -1056,6 +1056,56 @@ test('foresight scanner normalizes nested-list string specs and runtime order', 
   assert.deepEqual(requests, ['First runtime nested text', 'Second runtime nested text']);
 });
 
+test('foresight scanner derives catalog behavior from classification and context staleness', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return text === 'After linear context command' ? '컨텍스트 명령 뒤' : null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commandCatalog: {
+      904: {
+        label: 'Linear Context Command',
+        classification: 'linear',
+        stalenessRisk: 'context',
+      },
+    },
+  });
+  const list = [
+    { code: 904, indent: 0, parameters: [] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After linear context command'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.rawText, block.translation]), [
+    ['After linear context command', '컨텍스트 명령 뒤'],
+  ]);
+  assert.deepEqual(requests, ['After linear context command']);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.stop_reason, 'end-of-list');
+  assert.equal(scan.staleness_risks, 1);
+  assert.deepEqual(scan.command_actions.find((action) => action.code === 904), {
+    code: 904,
+    label: 'Linear Context Command',
+    scan_behavior: 'advance',
+    staleness_risk: 'context',
+    reason: '',
+  });
+});
+
 test('foresight scanner does not follow barrier catalog nested lists', () => {
   const requests = [];
   const scanner = new ForesightScanner({
