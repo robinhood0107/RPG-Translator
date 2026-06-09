@@ -438,7 +438,16 @@
 
   function readEmbeddedNestedListCommand(scanner, list, index, command, metadata, frame) {
     const specs = Array.isArray(metadata && metadata.nestedLists) ? metadata.nestedLists : [];
-    if (!specs.length) return null;
+    if (!specs.length) {
+      if (metadata && metadata.scanBehavior === 'nested-list') {
+        return {
+          transparent: false,
+          stop_reason: 'nested-list-unavailable',
+          nested_list: null,
+        };
+      }
+      return null;
+    }
     if (specs.length > scanner.maxNestedListsPerCommand) {
       return {
         transparent: false,

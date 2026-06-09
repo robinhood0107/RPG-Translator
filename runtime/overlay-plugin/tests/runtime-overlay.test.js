@@ -1051,6 +1051,49 @@ test('foresight scanner does not follow barrier catalog nested lists', () => {
   assert.equal(scan.path_stops[0].code, 901);
 });
 
+test('foresight scanner reports unavailable explicit nested-list catalog commands', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commandCatalog: {
+      902: {
+        label: 'Explicit Nested Event',
+        scanBehavior: 'nested-list',
+      },
+    },
+  });
+  const list = [
+    { code: 902, indent: 0, parameters: [] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Stale unavailable nested text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'nested-list-unavailable');
+  assert.equal(scan.path_stops[0].stop_reason, 'nested-list-unavailable');
+  assert.equal(scan.path_stops[0].code, 902);
+  assert.equal(scan.path_stops[0].label, 'Explicit Nested Event');
+});
+
 test('foresight scanner stops at label jumps with target diagnostics', () => {
   const requests = [];
   const index = {
