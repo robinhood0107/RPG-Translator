@@ -50,7 +50,8 @@
       };
     }
 
-    observeRecord(record = {}) {
+    observeRecord(record = {}, options = {}) {
+      if (!this.validateObservationOwnership(record, options)) return null;
       const text = String(record.text ?? '');
       const surface = record.surface || null;
       const slotId = record.slotId || this.defaultSlotId(record.adapter, surface, record.slotKey);
@@ -652,6 +653,22 @@
         }
       }
       return null;
+    }
+
+    validateObservationOwnership(source = {}, options = {}) {
+      const eventOptions = options && typeof options === 'object' ? options : {};
+      const required = eventOptions.ownershipRequired === true;
+      const token = eventOptions.ownershipToken || eventOptions.ownership || null;
+      if (!required && !token) return true;
+      const claim = this.ownershipClaims.get(token);
+      if (!claim || claim.kind !== 'text' || claim.active !== true) return false;
+      const owner = stringValue(source.sourceAdapter || source.adapter || source.hook || 'text');
+      if (claim.owner !== owner) return false;
+      if (claim.provisional === true) return false;
+      const bucket = claim.bucket || (claim.target ? this.getOwnershipBucket(claim.target, false) : null);
+      if (!bucket) return true;
+      const winner = this.getSurfaceWinner(bucket);
+      return !(winner && winner.owner !== claim.owner && winner.priority >= claim.priority);
     }
 
     registerOwnershipClaim(claim) {

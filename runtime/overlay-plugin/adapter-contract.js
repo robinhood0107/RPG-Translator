@@ -39,7 +39,9 @@
       const currentId = getRecordId(record);
       const nextPayload = normalizePayload(payload);
       if (!nextPayload.id && currentId) nextPayload.id = currentId;
-      const observed = callGateway('observeRecord', () => gateway.observeRecord(nextPayload, normalizeEventOptions(eventOptions)));
+      const observed = callGateway('observeRecord', () => {
+        return gateway.observeRecord(nextPayload, normalizeObserveEventOptions(eventOptions, observeOptions));
+      });
       const nextId = observedId(observed);
       if (!nextId) return observed || null;
       reconcileRecordId(record, currentId, nextId, observeOptions);
@@ -254,6 +256,16 @@
       next.sourceAdapter = adapterId;
       if (!next.adapter) next.adapter = adapterId;
       if (!next.hook) next.hook = defaultHook;
+      return next;
+    }
+
+    function normalizeObserveEventOptions(eventOptions, observeOptions = {}) {
+      const next = normalizeEventOptions(eventOptions);
+      const token = observeOptions && (observeOptions.ownershipToken || observeOptions.ownership);
+      if (token) next.ownershipToken = token;
+      if (observeOptions && observeOptions.ownershipRequired === true) {
+        next.ownershipRequired = true;
+      }
       return next;
     }
 

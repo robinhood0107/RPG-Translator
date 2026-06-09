@@ -1537,6 +1537,90 @@ test('adapter contract blocks bitmap fallback glyphs covered by message source o
   assert.equal(glyphFallback.ownerAdapter, 'message');
 });
 
+test('adapter contract gates observeRecord with finalized ownership tokens', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Owned source') return '소유된 원문';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const bitmapContract = createAdapterContract({
+    adapterId: 'bitmap-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+  const spriteContract = createAdapterContract({
+    adapterId: 'sprite-text',
+    defaultHook: 'glyph',
+    orchestratorGateway: orchestrator,
+  });
+
+  const provisional = bitmapContract.claimText({
+    target: surface,
+    slotKey: 'bitmap:owned',
+    text: 'Owned source',
+    provisional: true,
+    priority: 20,
+  });
+  const rejectedRecord = {};
+  assert.equal(bitmapContract.observeRecord(rejectedRecord, {
+    kind: 'drawText',
+    surface,
+    slotKey: 'bitmap:owned',
+    text: 'Owned source',
+    renderStrategy: 'bitmap-text',
+  }, {}, {
+    ownershipRequired: true,
+    ownershipToken: provisional.token,
+  }), null);
+  assert.equal(bitmapContract.isRecordObserved(rejectedRecord), false);
+
+  const finalized = bitmapContract.finalizeTextClaim(provisional.token, {
+    target: surface,
+    slotKey: 'bitmap:owned',
+    text: 'Owned source',
+  });
+  assert.equal(finalized.status, 'claimed');
+
+  const acceptedRecord = {};
+  const observed = bitmapContract.observeRecord(acceptedRecord, {
+    kind: 'drawText',
+    surface,
+    slotKey: 'bitmap:owned',
+    text: 'Owned source',
+    renderStrategy: 'bitmap-text',
+  }, {}, {
+    ownershipRequired: true,
+    ownershipToken: provisional.token,
+  });
+  assert.equal(observed.itemId.startsWith('item-'), true);
+  assert.equal(bitmapContract.isRecordObserved(acceptedRecord), true);
+
+  const surfaceClaim = spriteContract.claimSurface({
+    target: surface,
+    slotKey: 'sprite:preempt',
+    priority: 50,
+  });
+  assert.equal(surfaceClaim.status, 'claimed');
+
+  const preemptedRecord = {};
+  assert.equal(bitmapContract.observeRecord(preemptedRecord, {
+    kind: 'drawText',
+    surface,
+    slotKey: 'bitmap:owned-again',
+    text: 'Owned source',
+    renderStrategy: 'bitmap-text',
+  }, {}, {
+    ownershipRequired: true,
+    ownershipToken: provisional.token,
+  }), null);
+});
+
 test('adapter contract deduplicates tokenized subscriptions', () => {
   const counts = {
     subscribe: 0,
