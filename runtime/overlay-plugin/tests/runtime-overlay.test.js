@@ -850,6 +850,67 @@ test('message adapter wraps translated blocks when line counts differ', () => {
   assert.deepEqual(calls, [['A translated', 'sentence', 'that wraps']]);
 });
 
+test('message adapter retires active message item when Game_Message.clear runs', () => {
+  function GameMessage() {
+    this._texts = ['Message JP'];
+    this.cleared = false;
+  }
+  GameMessage.prototype.clear = function clear() {
+    this.cleared = true;
+    this._texts = [];
+  };
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: new GameMessage(),
+    Game_Message: GameMessage,
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  const index = new LookupIndex({
+    manifest: { schema_version: 1, key_schema_version: 'v1', source_language: 'ja', target_language: 'ko' },
+    records: [
+      {
+        cache_key: CacheKeyBuilder.build({
+          engine: 'mz',
+          sourceLanguage: 'ja',
+          targetLanguage: 'ko',
+          normalizedText: 'Message JP',
+          controlCodeSignature: '',
+          contextHash: null,
+        }),
+        source_text_id: 10,
+        source_hash: '1'.repeat(64),
+        source_language: 'ja',
+        target_language: 'ko',
+        normalized_text: 'Message JP',
+        visible_text: 'Message JP',
+        translation: 'Message KO',
+        control_code_signature: '',
+        context_hash: null,
+      },
+    ],
+  });
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.startMessage();
+  assert.deepEqual(root.$gameMessage._texts, ['Message KO']);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  root.$gameMessage.clear();
+  assert.equal(root.$gameMessage.cleared, true);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.diagnostics().surface_releases, 1);
+  assert.equal(orchestrator.diagnostics().text_releases, 1);
+});
+
 test('foresight scanner predicts message blocks choices and common events through cache only', () => {
   const requests = [];
   const index = {
