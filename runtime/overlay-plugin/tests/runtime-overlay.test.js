@@ -445,6 +445,116 @@ test('orchestrator records canonical items and rejects stale render commands', (
   ]);
 });
 
+test('orchestrator refreshes same-slot source without duplicating active items', () => {
+  const surface = {};
+  const lookups = [];
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      lookups.push(request.text);
+      if (request.text === 'Stable source') return '안정 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const first = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'stable-slot',
+    text: 'Stable source',
+    renderStrategy: 'window-text',
+  });
+  const second = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'stable-slot',
+    text: 'Stable source',
+    renderStrategy: 'window-text',
+  });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(second.itemId, first.itemId);
+  assert.equal(diagnostics.active_items, 1);
+  assert.equal(diagnostics.archived_items, 0);
+  assert.deepEqual(lookups, ['Stable source']);
+  assert.equal(diagnostics.cache_hits, 2);
+  assert.equal(diagnostics.source_cache_hits, 1);
+  assert.deepEqual(diagnostics.active[0].history.map((event) => [event.type, event.reason]), [
+    ['observed', 'observed'],
+    ['cacheHit', 'cache-hit'],
+    ['renderQueued', 'hit'],
+    ['observed', 'same slot refreshed'],
+    ['cacheHit', 'source-cache'],
+    ['renderQueued', 'hit'],
+  ]);
+});
+
+test('orchestrator replaces same-slot source and rejects stale queued renders', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Old source') return '옛 번역';
+      if (request.text === 'New source') return '새 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const first = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'replace-slot',
+    text: 'Old source',
+    renderStrategy: 'window-text',
+  });
+  const second = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'replace-slot',
+    text: 'New source',
+    renderStrategy: 'window-text',
+  });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.notEqual(second.itemId, first.itemId);
+  assert.equal(diagnostics.active_items, 1);
+  assert.equal(diagnostics.archived_items, 1);
+  assert.equal(diagnostics.active[0].id, second.itemId);
+  assert.equal(diagnostics.active[0].sourceText, 'New source');
+  assert.equal(diagnostics.archived[0].id, first.itemId);
+  assert.equal(diagnostics.archived[0].sourceText, 'Old source');
+  assert.equal(diagnostics.archived[0].state, 'archived');
+  assert.equal(diagnostics.archived[0].status, 'stale');
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [
+    entry.itemId,
+    entry.sourceText,
+    entry.translatedText,
+    entry.renderStatus,
+    entry.renderReason,
+  ]), [
+    [first.itemId, 'Old source', '옛 번역', 'rejected', 'same slot replaced'],
+    [second.itemId, 'New source', '새 번역', 'queued', ''],
+  ]);
+  assert.deepEqual(diagnostics.recent_events.slice(-5).map((event) => [event.type, event.reason]), [
+    ['renderRejected', 'same slot replaced'],
+    ['item.replaced', 'same slot replaced'],
+    ['observed', 'observed'],
+    ['cacheHit', 'cache-hit'],
+    ['renderQueued', 'hit'],
+  ]);
+});
+
 test('orchestrator diagnostics snapshots detached and archived item lifecycle', () => {
   const surface = {};
   const orchestrator = new TextOrchestrator({

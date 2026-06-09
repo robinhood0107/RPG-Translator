@@ -55,6 +55,24 @@
       const text = String(record.text ?? '');
       const surface = record.surface || null;
       const slotId = record.slotId || this.defaultSlotId(record.adapter, surface, record.slotKey);
+      const existingId = slotId ? this.slotIndex.get(slotId) : '';
+      const existing = existingId ? this.activeItems.get(existingId) : null;
+      if (existing && sameObservedSource(existing, text)) {
+        this.refreshObservedItem(existing, record, surface, slotId, 'same slot refreshed');
+        return this.lookupAndQueueObservedItem(existing);
+      }
+      if (existing) {
+        this.retireItem(existing.id, 'stale', {
+          eventType: 'item.replaced',
+          message: 'same slot replaced',
+          details: {
+            replacedBy: '',
+            slotId,
+            previousSourceText: existing.sourceText,
+            nextSourceText: text,
+          },
+        });
+      }
       const item = {
         id: `item-${this.nextItemId++}`,
         adapter: record.adapter || 'unknown',
@@ -86,7 +104,41 @@
         force: true,
       });
       this.emit('observed', Object.assign({ reason: 'observed' }, item));
+      return this.lookupAndQueueObservedItem(item);
+    }
 
+    refreshObservedItem(item, record, surface, slotId, reason) {
+      item.adapter = record.adapter || item.adapter || 'unknown';
+      item.kind = record.kind || item.kind || 'text';
+      item.surface = surface || item.surface || null;
+      item.surfaceId = this.surfaceId(item.surface);
+      item.slotId = slotId || item.slotId;
+      item.sourceText = String(record.text ?? item.sourceText ?? '');
+      item.contextHash = record.contextHash || null;
+      item.generation = this.guard ? this.guard.generationFor(item.surface) : item.generation;
+      item.renderStrategy = record.renderStrategy || record.strategy || item.renderStrategy || '';
+      item.state = 'active';
+      item.status = 'detected';
+      item.visible = true;
+      item.screenState = 'visible';
+      item.backgrounded = false;
+      this.activeItems.set(item.id, item);
+      this.slotIndex.set(item.slotId, item.id);
+      this.diagnosticState.observed_items += 1;
+      this.recordDrawTrace('observe', {
+        adapter: item.adapter,
+        methodName: item.kind,
+        rawText: item.sourceText,
+        visibleText: item.sourceText,
+        reason,
+        force: true,
+      });
+      this.emit('observed', Object.assign({ reason }, item));
+      return item;
+    }
+
+    lookupAndQueueObservedItem(item) {
+      const text = String((item && item.sourceText) ?? '');
       const translatedText = this.measure('cache.lookup.ms', () => this.lookup(item), { domain: 'runtime' });
       if (!translatedText || translatedText === text) {
         this.diagnosticState.cache_misses += 1;
@@ -1452,6 +1504,10 @@
         ? source.history.map((event) => Object.assign({}, event))
         : [],
     };
+  }
+
+  function sameObservedSource(item, nextText) {
+    return normalizeComparableText(item && item.sourceText) === normalizeComparableText(nextText);
   }
 
   function cloneRenderCommand(command) {
