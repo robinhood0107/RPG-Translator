@@ -275,14 +275,24 @@
       }, source || {});
       if (typeof source.onRenderQueued === 'function') {
         wrapped.onRenderQueued = (record, command, route) => {
-          rememberRecordEvent(record, subscriptionRecordId(record, command, route), {
+          const recordId = subscriptionRecordId(record, command, route);
+          const routeContext = route && typeof route === 'object' ? route : createSubscribedRoute(null, command, recordId);
+          const lifecycleRecord = resolveSubscribedLifecycleRecord(source, record, command, routeContext);
+          if (shouldValidateDirectRenderCommand(source)) {
+            const rejectedDecision = validateSubscribedRenderCommand(source, record, lifecycleRecord, command, routeContext);
+            if (rejectedDecision) {
+              notifySubscribedRenderRejected(source, record, rejectedDecision, routeContext);
+              return rejectedDecision;
+            }
+          }
+          rememberRecordEvent(lifecycleRecord, recordId, {
             type: 'item.render_queued',
-            reason: route && route.reason,
+            reason: routeContext && routeContext.reason,
           });
           try {
-            return source.onRenderQueued(record, command, route);
+            return source.onRenderQueued(record, command, routeContext);
           } catch (error) {
-            return createRenderDecision('rejected', 'adapter-render-error', command, route, describeCallbackError(error));
+            return createRenderDecision('rejected', 'adapter-render-error', command, routeContext, describeCallbackError(error));
           }
         };
       }
@@ -335,6 +345,14 @@
         };
       }
       return wrapped;
+    }
+
+    function shouldValidateDirectRenderCommand(source) {
+      return !!(source && (
+        typeof source.getLifecycleRecord === 'function'
+        || typeof source.getRenderGeneration === 'function'
+        || typeof source.isRenderTargetCurrent === 'function'
+      ));
     }
 
     function routeSubscribedRecordEvent(source, event) {

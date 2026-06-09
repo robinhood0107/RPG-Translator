@@ -2089,6 +2089,87 @@ test('adapter contract contains direct subscribeRecords render callback errors',
   assert.equal(decision.details.errorMessage, 'direct render callback exploded');
 });
 
+test('adapter contract direct subscribeRecords rejects stale render generations', () => {
+  let wrapped = null;
+  const rendered = [];
+  const rejected = [];
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe() {
+      return () => {};
+    },
+    subscribeRecords(subscription) {
+      wrapped = subscription;
+      return () => {};
+    },
+    recordRenderRejected(itemId, decision) {
+      rejected.push([itemId, decision.reason, decision.details.targetGeneration, decision.details.commandGeneration]);
+      return { status: 'rejected' };
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = { generation: 3, current: true };
+
+  contract.observeRecord(record, {
+    id: 'direct-stale-record',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'direct-stale-slot',
+    text: 'Direct stale source',
+    renderStrategy: 'window-text',
+  });
+  assert.equal(contract.subscribeRecords({
+    token: 'direct-stale-records',
+    renderStrategy: 'window-text',
+    getRenderGeneration(target) {
+      return target.generation;
+    },
+    isRenderTargetCurrent(target) {
+      return target.current === true;
+    },
+    onRenderQueued(target, command) {
+      rendered.push([target === record, command.text]);
+      return true;
+    },
+    onRenderRejected(target, decision) {
+      rejected.push(['callback', target === record, decision.reason]);
+    },
+  }), true);
+  assert.equal(typeof wrapped.onRenderQueued, 'function');
+
+  const decision = wrapped.onRenderQueued(record, {
+    id: 'direct-stale-command',
+    itemId: 'direct-stale-record',
+    strategy: 'window-text',
+    text: 'Direct stale source',
+    generation: 1,
+  }, {
+    recordId: 'direct-stale-record',
+    itemId: 'direct-stale-record',
+    commandId: 'direct-stale-command',
+    strategy: 'window-text',
+    commandGeneration: 1,
+  });
+
+  assert.deepEqual(rendered, []);
+  assert.equal(decision.status, 'rejected');
+  assert.equal(decision.reason, 'generation-mismatch');
+  assert.deepEqual(rejected, [
+    ['direct-stale-record', 'generation-mismatch', 3, 1],
+    ['callback', true, 'generation-mismatch'],
+  ]);
+  assert.equal(contract.getRecordStatus(record), 'detected');
+});
+
 test('adapter contract maps mycode public methods onto gateway backing subscribe', () => {
   const records = new Map();
   const routed = [];
