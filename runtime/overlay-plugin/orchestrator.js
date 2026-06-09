@@ -21,6 +21,7 @@
       this.renderQueue = [];
       this.events = [];
       this.listeners = new Set();
+      this.surfaceDrawListeners = new Set();
       this.diagnosticState = {
         observed_items: 0,
         cache_hits: 0,
@@ -248,6 +249,39 @@
       });
     }
 
+    subscribeSurfaceDraws(listener, options = {}) {
+      if (typeof listener !== 'function') return () => {};
+      const subscription = {
+        listener,
+        adapterId: String((options && options.adapterId) || ''),
+        token: String((options && (options.token || options.subscriptionToken)) || 'surface-draws'),
+      };
+      this.surfaceDrawListeners.add(subscription);
+      return () => this.surfaceDrawListeners.delete(subscription);
+    }
+
+    recordSurfaceDraw(input = {}) {
+      const descriptor = this.normalizeSurfaceDrawDescriptor(input);
+      if (!descriptor.target) {
+        return this.surfaceDrawResult('ignored', descriptor, 'missing-target');
+      }
+
+      let deferred = false;
+      let drawDecision = null;
+      for (const adapterId of descriptor.candidateAdapters) {
+        if (!adapterId || adapterId === descriptor.adapterId) continue;
+        const decision = this.emitSurfaceDraw(adapterId, descriptor, 'deferred');
+        if (decision && !drawDecision) drawDecision = decision;
+        if (this.hasSurfaceDrawListener(adapterId)) deferred = true;
+      }
+      return this.surfaceDrawResult(
+        deferred ? 'deferred' : 'fallback',
+        descriptor,
+        deferred ? 'deferred-to-owner-candidate' : 'fallback-owned',
+        drawDecision,
+      );
+    }
+
     lookup(item) {
       if (!this.index || typeof this.index.translate !== 'function') return null;
       return this.index.translate({
@@ -314,6 +348,90 @@
       };
     }
 
+    normalizeSurfaceDrawDescriptor(input) {
+      const source = input && typeof input === 'object' ? input : {};
+      const candidates = Array.isArray(source.candidateAdapters)
+        ? source.candidateAdapters.map((value) => String(value || '')).filter(Boolean)
+        : [];
+      return {
+        target: source.target || source.bitmap || null,
+        adapterId: String(source.adapterId || source.sourceAdapter || 'bitmap-text'),
+        methodName: String(source.methodName || 'drawText'),
+        text: String(source.text ?? source.rawText ?? ''),
+        x: numberOrDefault(source.x, 0),
+        y: numberOrDefault(source.y, 0),
+        maxWidth: numberOrDefault(source.maxWidth, 0),
+        lineHeight: numberOrDefault(source.lineHeight, 0),
+        align: String(source.align || 'left'),
+        drawState: source.drawState && typeof source.drawState === 'object' ? Object.assign({}, source.drawState) : null,
+        measuredWidth: numberOrDefault(source.measuredWidth ?? source.width, 0),
+        ownerType: String(source.ownerType || ''),
+        standaloneGlyph: source.standaloneGlyph === true,
+        candidateAdapters: candidates,
+      };
+    }
+
+    hasSurfaceDrawListener(adapterId) {
+      for (const subscription of this.surfaceDrawListeners) {
+        if (subscription && subscription.adapterId === adapterId) return true;
+      }
+      return false;
+    }
+
+    emitSurfaceDraw(adapterId, descriptor, status) {
+      const event = {
+        type: 'surface.draw',
+        adapterId,
+        sourceAdapter: descriptor.adapterId,
+        status,
+        ownerAdapter: adapterId,
+        reason: status,
+        target: descriptor.target,
+        payload: {
+          target: descriptor.target,
+          bitmap: descriptor.target,
+          methodName: descriptor.methodName,
+          text: descriptor.text,
+          rawText: descriptor.text,
+          x: descriptor.x,
+          y: descriptor.y,
+          maxWidth: descriptor.maxWidth,
+          lineHeight: descriptor.lineHeight,
+          align: descriptor.align,
+          drawState: descriptor.drawState,
+          measuredWidth: descriptor.measuredWidth,
+          ownerType: descriptor.ownerType,
+          ownershipStatus: status,
+          sourceAdapter: descriptor.adapterId,
+        },
+      };
+      let drawDecision = null;
+      for (const subscription of this.surfaceDrawListeners) {
+        if (!subscription || subscription.adapterId !== adapterId) continue;
+        try {
+          const decision = normalizeSurfaceDrawDecision(subscription.listener(event));
+          if (decision && !drawDecision) drawDecision = decision;
+        } catch (_error) {
+          // Listener failures must not break native drawing.
+        }
+      }
+      return drawDecision;
+    }
+
+    surfaceDrawResult(status, descriptor, reason, drawDecision) {
+      const result = {
+        status,
+        ownerAdapter: status === 'ignored' ? '' : descriptor.adapterId,
+        ownerClaimId: '',
+        reason: reason || '',
+        token: null,
+        ownershipToken: null,
+        claimId: '',
+      };
+      if (drawDecision) result.drawDecision = drawDecision;
+      return result;
+    }
+
     emit(type, payload) {
       const event = { type, payload };
       this.events.push(event);
@@ -335,6 +453,42 @@
       return require(modulePath);
     }
     return overlay;
+  }
+
+  function numberOrDefault(value, fallback) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function normalizeSurfaceDrawDecision(input) {
+    if (!input || typeof input !== 'object') return null;
+    const action = normalizeSurfaceDrawAction(input.action || input.nativeDrawAction);
+    const text = String(input.text ?? input.replacementText ?? input.translatedText ?? '');
+    if (!action || (action === 'replace-native-draw' && !text)) return null;
+    return {
+      action,
+      text,
+      x: numberOrDefault(input.x, NaN),
+      y: numberOrDefault(input.y, NaN),
+      maxWidth: numberOrDefault(input.maxWidth, NaN),
+      lineHeight: numberOrDefault(input.lineHeight, NaN),
+      align: String(input.align || ''),
+      reason: String(input.reason || ''),
+    };
+  }
+
+  function normalizeSurfaceDrawAction(action) {
+    const value = String(action || '').replace(/_/g, '-').toLowerCase();
+    if (value === 'replace-native-draw' || value === 'replace-native' || value === 'replace') {
+      return 'replace-native-draw';
+    }
+    if (value === 'suppress-native-draw' || value === 'skip-native' || value === 'suppress') {
+      return 'suppress-native-draw';
+    }
+    if (value === 'draw-original' || value === 'native' || value === 'original') {
+      return 'draw-original';
+    }
+    return '';
   }
 
   publish(root, { TextOrchestrator });

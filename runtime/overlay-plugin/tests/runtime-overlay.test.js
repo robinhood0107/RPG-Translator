@@ -457,6 +457,53 @@ test('orchestrator routes render commands through record subscriptions', () => {
   ]);
 });
 
+test('orchestrator defers surface draws to candidate adapter subscriptions', () => {
+  const bitmap = {};
+  const events = [];
+  const orchestrator = new TextOrchestrator({ translate: () => null });
+  const unsubscribe = orchestrator.subscribeSurfaceDraws((event) => {
+    events.push([
+      event.type,
+      event.adapterId,
+      event.sourceAdapter,
+      event.status,
+      event.payload.text,
+      event.payload.x,
+    ]);
+    return { action: 'replace', text: 'Glyph KO', reason: 'cache-hit' };
+  }, { adapterId: 'sprite-text' });
+
+  const result = orchestrator.recordSurfaceDraw({
+    target: bitmap,
+    adapterId: 'bitmap-text',
+    text: 'Glyph JP',
+    x: 12,
+    y: 4,
+    maxWidth: 80,
+    lineHeight: 24,
+    align: 'center',
+    candidateAdapters: ['sprite-text'],
+  });
+  unsubscribe();
+
+  assert.equal(result.status, 'deferred');
+  assert.equal(result.ownerAdapter, 'bitmap-text');
+  assert.equal(result.reason, 'deferred-to-owner-candidate');
+  assert.deepEqual(result.drawDecision, {
+    action: 'replace-native-draw',
+    text: 'Glyph KO',
+    x: NaN,
+    y: NaN,
+    maxWidth: NaN,
+    lineHeight: NaN,
+    align: '',
+    reason: 'cache-hit',
+  });
+  assert.deepEqual(events, [
+    ['surface.draw', 'sprite-text', 'bitmap-text', 'deferred', 'Glyph JP', 12],
+  ]);
+});
+
 test('orchestrator releases surface ownership explicitly', () => {
   const surface = {};
   const orchestrator = new TextOrchestrator({ translate: () => null });
