@@ -591,7 +591,7 @@ test('orchestrator diagnostics snapshots detached and archived item lifecycle', 
     'detached',
     'menu-status',
     'hit',
-    ['observed', 'cacheHit', 'renderQueued'],
+    ['observed', 'cacheHit', 'renderQueued', 'renderRejected', 'item.detached'],
   ]]);
 
   assert.equal(orchestrator.archiveItem(command.itemId), true);
@@ -610,6 +610,52 @@ test('orchestrator diagnostics snapshots detached and archived item lifecycle', 
     'Lifecycle source',
     'hit',
   ]]);
+});
+
+test('orchestrator detachItem rejects queued renders before parking inactive items', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Detach source') return '분리 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'detach-slot',
+    text: 'Detach source',
+    renderStrategy: 'window-text',
+  });
+
+  assert.equal(orchestrator.detachItem(command.itemId, 'window hidden'), true);
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.active_items, 0);
+  assert.equal(diagnostics.detached_items, 1);
+  assert.equal(diagnostics.archived_items, 0);
+  assert.equal(diagnostics.detached[0].id, command.itemId);
+  assert.equal(diagnostics.detached[0].state, 'detached');
+  assert.equal(diagnostics.detached[0].status, 'detached');
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [
+    entry.itemId,
+    entry.sourceText,
+    entry.renderStatus,
+    entry.renderReason,
+  ]), [
+    [command.itemId, 'Detach source', 'rejected', 'window hidden'],
+  ]);
+  assert.deepEqual(diagnostics.recent_events.slice(-2).map((event) => [event.type, event.reason]), [
+    ['renderRejected', 'window hidden'],
+    ['item.detached', 'window hidden'],
+  ]);
 });
 
 test('orchestrator archiveItem rejects queued renders and releases slot identity', () => {

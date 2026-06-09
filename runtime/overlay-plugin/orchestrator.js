@@ -437,12 +437,19 @@
       return true;
     }
 
-    detachItem(itemId) {
+    detachItem(itemId, reason = 'item detached') {
       const item = this.activeItems.get(itemId);
       if (!item) return false;
+      const message = String(reason || 'item detached');
+      this.rejectOpenRenderCommands(item, message);
       this.activeItems.delete(itemId);
       item.state = 'detached';
+      item.status = 'detached';
+      item.active = false;
+      item.deactivatedAt = this.now();
       this.detachedItems.set(itemId, item);
+      this.releaseSlotIndexesForItem(itemId);
+      this.emit('item.detached', Object.assign({ reason: message }, item));
       return true;
     }
 
