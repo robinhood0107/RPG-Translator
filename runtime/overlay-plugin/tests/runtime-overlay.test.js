@@ -761,6 +761,124 @@ test('foresight scanner preserves branch path through common event frames', () =
   });
 });
 
+test('foresight scanner reports common event nested-list missing id and list stops', () => {
+  const scanner = new ForesightScanner({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commonEvents: {},
+  });
+  const missingIdList = [
+    { code: 117, indent: 0, parameters: [] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Stale missing id text'] },
+  ];
+
+  let blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list: missingIdList,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  let scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'common-event-missing-id');
+  assert.equal(scan.path_stops[0].stop_reason, 'common-event-missing-id');
+  assert.deepEqual(scan.path_stops[0].nested_list, {
+    type: 'common-event',
+    id: null,
+    name: '',
+    depth: 1,
+    length: 0,
+  });
+
+  const missingList = [
+    { code: 117, indent: 0, parameters: [9] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Stale missing list text'] },
+  ];
+
+  blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list: missingList,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'common-event-missing-list');
+  assert.equal(scan.path_stops[0].stop_reason, 'common-event-missing-list');
+  assert.deepEqual(scan.path_stops[0].nested_list, {
+    type: 'common-event',
+    id: 9,
+    name: '',
+    depth: 1,
+    length: 0,
+  });
+});
+
+test('foresight scanner reports common event cycles as nested-list stops', () => {
+  const scanner = new ForesightScanner({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commonEvents: {
+      1: {
+        name: 'Recursive Common',
+        list: [
+          { code: 117, indent: 0, parameters: [1] },
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Stale recursive common text'] },
+        ],
+      },
+    },
+  });
+  const list = [
+    { code: 117, indent: 0, parameters: [1] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After recursive common text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'common-event-cycle');
+  assert.equal(scan.common_event_pushes, 1);
+  assert.equal(scan.path_stops[0].stop_reason, 'common-event-cycle');
+  assert.deepEqual(scan.path_stops[0].nested_list, {
+    type: 'common-event',
+    id: 1,
+    name: 'Recursive Common',
+    depth: 2,
+    length: 3,
+  });
+});
+
 test('foresight scanner stops at label jumps with target diagnostics', () => {
   const requests = [];
   const index = {

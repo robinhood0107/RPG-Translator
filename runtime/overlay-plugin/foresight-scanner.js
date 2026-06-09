@@ -238,7 +238,8 @@
       if (code === 117) {
         const commonEventId = readCommonEventId(command);
         const commonEvent = resolveCommonEvent(scanner.commonEvents, commonEventId);
-        if (commonEvent && Array.isArray(commonEvent.list) && !frame.commonStack.includes(commonEventId)) {
+        const nestedList = createCommonEventNestedList(commonEventId, commonEvent, frame);
+        if (commonEventId && commonEvent && Array.isArray(commonEvent.list) && !frame.commonStack.includes(commonEventId)) {
           stack.push({
             list,
             index: index + 1,
@@ -258,7 +259,14 @@
           diagnostics.common_event_pushes += 1;
           return;
         }
-        diagnostics.stop_reason = commonEvent ? 'common-event-recursion' : 'common-event-missing';
+        if (!commonEventId) {
+          diagnostics.stop_reason = 'common-event-missing-id';
+        } else if (!commonEvent || !Array.isArray(commonEvent.list)) {
+          diagnostics.stop_reason = 'common-event-missing-list';
+        } else {
+          diagnostics.stop_reason = 'common-event-cycle';
+        }
+        stack.length = 0;
         appendPathStop(diagnostics, {
           index,
           stop_reason: diagnostics.stop_reason,
@@ -266,6 +274,7 @@
           branch_path: cloneBranchPath(frame.branchPath),
           code,
           label: getEventCommandLabel(code),
+          nested_list: nestedList,
         });
         return;
       }
@@ -1096,6 +1105,9 @@
       label: stop && stop.label ? String(stop.label) : '',
       control_flow_target: cloneControlFlowTarget(stop && stop.control_flow_target),
     };
+    if (stop && Object.prototype.hasOwnProperty.call(stop, 'nested_list')) {
+      entry.nested_list = cloneNestedListInfo(stop.nested_list);
+    }
     if (stop && Object.prototype.hasOwnProperty.call(stop, 'route_barrier_code')) {
       entry.route_barrier_code = stop.route_barrier_code === null ? null : nullableNumber(stop.route_barrier_code);
       entry.route_barrier_reason = stop.route_barrier_reason ? String(stop.route_barrier_reason) : '';
@@ -1191,6 +1203,29 @@
       delete entry.route_barrier_label;
     }
     return entry;
+  }
+
+  function createCommonEventNestedList(commonEventId, commonEvent, frame) {
+    const stack = cloneCommonStack(frame && frame.commonStack);
+    const id = commonEventId ? Number(commonEventId) : null;
+    return {
+      type: 'common-event',
+      id,
+      name: nonEmptyString(commonEvent && commonEvent.name),
+      depth: Math.max(1, stack.length + 1),
+      length: commonEvent && Array.isArray(commonEvent.list) ? commonEvent.list.length : 0,
+    };
+  }
+
+  function cloneNestedListInfo(info) {
+    if (!info || typeof info !== 'object') return null;
+    return {
+      type: nonEmptyString(info.type),
+      id: info.id === null || info.id === undefined ? null : nullableNumber(info.id),
+      name: nonEmptyString(info.name),
+      depth: Math.max(0, Math.floor(Number(info.depth) || 0)),
+      length: Math.max(0, Math.floor(Number(info.length) || 0)),
+    };
   }
 
   function cloneControlFlowTarget(target) {
