@@ -19,6 +19,7 @@ const { StartupToast } = require('../startup-toast');
 const { TextCodec } = require('../text-codec');
 const { MessageWrapper } = require('../wrapping');
 const { WindowTextAdapter } = require('../window-text-adapter');
+const { ForesightScanner } = require('../foresight-scanner');
 
 test('text codec follows shared Rust/runtime vectors', () => {
   const vectorsPath = path.join(__dirname, '..', 'test', 'fixtures', 'text-codec-vectors.json');
@@ -568,6 +569,69 @@ test('message adapter wraps translated blocks when line counts differ', () => {
   new root.Window_Message().startMessage();
 
   assert.deepEqual(calls, [['A translated', 'sentence', 'that wraps']]);
+});
+
+test('foresight scanner predicts message blocks choices and common events through cache only', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Next line 1\nNext line 2') return '다음 1\n다음 2';
+      if (text === 'Choice A') return '선택 A';
+      if (text === 'Common hello') return '공통 안녕';
+      return null;
+    },
+  };
+  const scanner = new ForesightScanner(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    commonEvents: {
+      7: {
+        name: 'Common 7',
+        list: [
+          { code: 101, indent: 0, parameters: [] },
+          { code: 401, indent: 0, parameters: ['Common hello'] },
+        ],
+      },
+    },
+  });
+  const list = [
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Current block'] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Next line 1'] },
+    { code: 401, indent: 0, parameters: ['Next line 2'] },
+    { code: 102, indent: 0, parameters: [['Choice A', 'Choice miss']] },
+    { code: 117, indent: 0, parameters: [7] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 2,
+      indent: 0,
+      interpreterId: 'map',
+      frames: [],
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.kind, block.rawText, block.translation, block.cacheStatus]), [
+    ['message_block', 'Next line 1\nNext line 2', '다음 1\n다음 2', 'hit'],
+    ['choice', 'Choice A', '선택 A', 'hit'],
+    ['choice', 'Choice miss', null, 'miss'],
+    ['message_block', 'Common hello', '공통 안녕', 'hit'],
+  ]);
+  assert.deepEqual(requests, ['Next line 1\nNext line 2', 'Choice A', 'Choice miss', 'Common hello']);
+
+  const snapshot = scanner.getSnapshot();
+  assert.equal(snapshot.recent_scans[0].stop_reason, 'end-of-list');
+  assert.equal(snapshot.recent_scans[0].blocks, 4);
+  assert.equal(snapshot.cache_hits, 3);
+  assert.equal(snapshot.cache_misses, 1);
+  assert.equal(snapshot.command_counts['101'], 2);
+  assert.equal(snapshot.command_counts['102'], 1);
+  assert.equal(snapshot.command_counts['117'], 1);
 });
 
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
@@ -1121,6 +1185,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}render-guard.js`,
     `${baseUrl}wrapping.js`,
     `${baseUrl}orchestrator.js`,
+    `${baseUrl}foresight-scanner.js`,
     `${baseUrl}cache-loader.js`,
     `${baseUrl}message-adapter.js`,
     `${baseUrl}window-text-adapter.js`,

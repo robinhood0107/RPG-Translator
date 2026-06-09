@@ -7,6 +7,7 @@
     'render-guard.js',
     'wrapping.js',
     'orchestrator.js',
+    'foresight-scanner.js',
     'cache-loader.js',
     'message-adapter.js',
     'window-text-adapter.js',

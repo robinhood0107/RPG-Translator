@@ -7,6 +7,7 @@
   const { RenderGuard } = loadDependency(root, './render-guard');
   const { RuntimeMissLogger } = loadDependency(root, './runtime-miss-logger');
   const { TextOrchestrator } = loadDependency(root, './orchestrator');
+  const { ForesightScanner } = loadDependency(root, './foresight-scanner');
   const { SpriteTextAdapter } = loadDependency(root, './sprite-text-adapter');
   const { StartupToast } = loadDependency(root, './startup-toast');
   const { WindowTextAdapter } = loadDependency(root, './window-text-adapter');
@@ -29,6 +30,14 @@
           renderGuard: RenderGuard ? new RenderGuard() : null,
         })
         : index;
+      const foresightScanner = ForesightScanner
+        ? new ForesightScanner(index, {
+          engine: options.engine || 'unknown',
+          sourceLanguage: bundle.manifest.source_language,
+          targetLanguage: bundle.manifest.target_language,
+          commonEvents: scope.$dataCommonEvents,
+        })
+        : null;
       const nextOverlay = Object.assign(overlay, {
         installed: true,
         engine: options.engine || 'unknown',
@@ -36,6 +45,7 @@
         targetLanguage: bundle.manifest.target_language,
         index,
         orchestrator,
+        foresightScanner,
       });
       scope.RPGTranslatorOverlay = nextOverlay;
 
@@ -62,6 +72,7 @@
       './render-guard': 'RenderGuard',
       './runtime-miss-logger': 'RuntimeMissLogger',
       './orchestrator': 'TextOrchestrator',
+      './foresight-scanner': 'ForesightScanner',
       './sprite-text-adapter': 'SpriteTextAdapter',
       './startup-toast': 'StartupToast',
       './window-text-adapter': 'WindowTextAdapter',
