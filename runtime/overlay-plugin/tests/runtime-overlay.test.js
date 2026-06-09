@@ -864,6 +864,106 @@ test('foresight scanner stops at loop control flow instead of scanning stale loo
   assert.equal(scan.path_stops[0].control_flow_target.via_code, 413);
 });
 
+test('foresight scanner advances transparent movement routes before later messages', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'After route text') return '이동 후 텍스트';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const list = [
+    {
+      code: 205,
+      indent: 0,
+      parameters: [0, {
+        list: [
+          { code: 1, parameters: [] },
+          { code: 45, parameters: ['this.setOpacity(128);'] },
+          { code: 0, parameters: [] },
+        ],
+      }],
+    },
+    { code: 505, indent: 0, parameters: [{ code: 2, parameters: [] }] },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['After route text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks.map((block) => [block.kind, block.rawText, block.translation]), [
+    ['message_block', 'After route text', '이동 후 텍스트'],
+  ]);
+  assert.deepEqual(requests, ['After route text']);
+
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'scanned');
+  assert.equal(scan.stop_reason, 'end-of-list');
+  assert.equal(scan.route_commands, 1);
+  assert.equal(scan.route_barriers, 0);
+});
+
+test('foresight scanner stops at unreadable movement route commands', () => {
+  const requests = [];
+  const scanner = new ForesightScanner({
+    translate({ text }) {
+      requests.push(text);
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const list = [
+    {
+      code: 205,
+      indent: 0,
+      parameters: [0, {
+        list: [
+          { code: 999, parameters: [] },
+          { code: 0, parameters: [] },
+        ],
+      }],
+    },
+    { code: 101, indent: 0, parameters: [] },
+    { code: 401, indent: 0, parameters: ['Unsafe stale route text'] },
+  ];
+
+  const blocks = scanner.collectUpcomingMessageBlocks({
+    currentMessageOrigin: {
+      list,
+      nextIndex: 0,
+      indent: 0,
+      interpreterId: 'map',
+    },
+  });
+
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(requests, []);
+
+  const scan = scanner.getSnapshot().recent_scans[0];
+  assert.equal(scan.status, 'blocked');
+  assert.equal(scan.stop_reason, 'movement-route-barrier');
+  assert.equal(scan.route_commands, 1);
+  assert.equal(scan.route_barriers, 1);
+  assert.equal(scan.route_barrier_code, 999);
+  assert.equal(scan.route_barrier_label, 'Unknown movement-route command 999');
+  assert.equal(scan.path_stops[0].stop_reason, 'movement-route-barrier');
+});
+
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
   const index = {
     translate({ text }) {

@@ -182,6 +182,32 @@
         });
         return;
       }
+      if (code === 205) {
+        const routeRead = readMovementRouteCommand(list, index, readIndent(command));
+        diagnostics.route_commands += 1;
+        diagnostics.route_command_actions.push(...routeRead.route_command_actions);
+        if (routeRead.transparent) {
+          index = routeRead.nextIndex;
+          continue;
+        }
+        diagnostics.stop_reason = routeRead.stop_reason || 'movement-route-barrier';
+        diagnostics.route_barriers += 1;
+        diagnostics.route_barrier_code = routeRead.route_barrier_code;
+        diagnostics.route_barrier_reason = routeRead.route_barrier_reason || '';
+        diagnostics.route_barrier_label = routeRead.route_barrier_label || '';
+        appendPathStop(diagnostics, {
+          index,
+          stop_reason: diagnostics.stop_reason,
+          branch_depth: frame.branchDepth || 0,
+          branch_path: cloneBranchPath(frame.branchPath),
+          code,
+          label: getEventCommandLabel(code),
+          route_barrier_code: diagnostics.route_barrier_code,
+          route_barrier_reason: diagnostics.route_barrier_reason,
+          route_barrier_label: diagnostics.route_barrier_label,
+        });
+        return;
+      }
       if (code === 117) {
         const commonEventId = readCommonEventId(command);
         const commonEvent = resolveCommonEvent(scanner.commonEvents, commonEventId);
@@ -427,6 +453,134 @@
     return commonEvents[id] || commonEvents[String(id)] || null;
   }
 
+  function readMovementRouteCommand(list, index, expectedIndent) {
+    const routeCommands = getMovementRouteCommands(list, index, expectedIndent);
+    const nextIndex = getMovementRouteNextIndex(list, index, expectedIndent);
+    const routeCommandActions = routeCommands.map(createRouteCommandAction);
+    if (!routeCommands.length) {
+      return {
+        transparent: false,
+        stop_reason: 'movement-route-missing-list',
+        route_barrier_code: null,
+        route_barrier_reason: 'missing-list',
+        route_barrier_label: 'Missing movement route',
+        route_command_actions: routeCommandActions,
+      };
+    }
+    const barrier = findRouteBarrierCommand(routeCommands);
+    if (barrier) {
+      return {
+        transparent: false,
+        stop_reason: 'movement-route-barrier',
+        route_barrier_code: barrier.code,
+        route_barrier_reason: barrier.reason,
+        route_barrier_label: barrier.label,
+        route_command_actions: routeCommandActions,
+      };
+    }
+    return {
+      transparent: true,
+      nextIndex,
+      route_command_actions: routeCommandActions,
+    };
+  }
+
+  function getMovementRouteCommands(list, index, expectedIndent) {
+    const command = list[index];
+    const params = Array.isArray(command && command.parameters) ? command.parameters : [];
+    const route = params[1] && typeof params[1] === 'object' ? params[1] : null;
+    const commands = [];
+    if (route && Array.isArray(route.list)) commands.push(...route.list);
+    let cursor = index + 1;
+    while (cursor < list.length && isMovementRouteLine(list[cursor], expectedIndent)) {
+      const routeParams = Array.isArray(list[cursor].parameters) ? list[cursor].parameters : [];
+      if (routeParams[0] && typeof routeParams[0] === 'object') commands.push(routeParams[0]);
+      cursor += 1;
+    }
+    return commands;
+  }
+
+  function getMovementRouteNextIndex(list, index, expectedIndent) {
+    let cursor = index + 1;
+    while (cursor < list.length && isMovementRouteLine(list[cursor], expectedIndent)) cursor += 1;
+    return cursor;
+  }
+
+  function isMovementRouteLine(command, expectedIndent) {
+    return isCommand(command) && Number(command.code) === 505 && readIndent(command) === expectedIndent;
+  }
+
+  function findRouteBarrierCommand(routeCommands) {
+    for (const routeCommand of routeCommands) {
+      const code = Number(routeCommand && routeCommand.code);
+      if (!Number.isFinite(code)) {
+        return { code: null, reason: 'unknown', label: 'Unknown movement-route command' };
+      }
+      const metadata = getMovementRouteCommandMetadata(code);
+      if (metadata.scanBehavior !== 'advance') {
+        return {
+          code,
+          reason: metadata.reason || reasonFromLabel(metadata.label) || metadata.classification,
+          label: metadata.label,
+        };
+      }
+    }
+    return null;
+  }
+
+  function createRouteCommandAction(routeCommand) {
+    const code = Number(routeCommand && routeCommand.code);
+    const metadata = getMovementRouteCommandMetadata(code);
+    return {
+      code: Number.isFinite(code) ? code : null,
+      label: metadata.label,
+      scan_behavior: metadata.scanBehavior,
+      staleness_risk: metadata.stalenessRisk,
+      reason: metadata.reason,
+    };
+  }
+
+  function getMovementRouteCommandMetadata(code) {
+    const numeric = Number(code);
+    if (!Number.isFinite(numeric)) {
+      return {
+        code: null,
+        label: 'Unknown movement-route command',
+        classification: 'external',
+        scanBehavior: 'barrier',
+        stalenessRisk: 'external',
+        reason: 'unknown',
+      };
+    }
+    const labels = {
+      0: 'Route End',
+      1: 'Move Down',
+      2: 'Move Left',
+      3: 'Move Right',
+      4: 'Move Up',
+      41: 'Change Image',
+      45: 'Script (runs JavaScript)',
+    };
+    if (numeric >= 0 && numeric <= 45) {
+      return {
+        code: numeric,
+        label: labels[numeric] || `Movement Route Command ${numeric}`,
+        classification: numeric === 45 ? 'external' : 'linear',
+        scanBehavior: 'advance',
+        stalenessRisk: numeric === 27 || numeric === 28 ? 'state' : (numeric === 45 ? 'external' : ''),
+        reason: numeric === 45 ? 'script' : '',
+      };
+    }
+    return {
+      code: numeric,
+      label: `Unknown movement-route command ${numeric}`,
+      classification: 'external',
+      scanBehavior: 'barrier',
+      stalenessRisk: 'external',
+      reason: 'unknown',
+    };
+  }
+
   function isControlFlowCommand(code) {
     return code === 112 || code === 113 || code === 119 || code === 413;
   }
@@ -565,6 +719,7 @@
       117: 'Common Event',
       118: 'Label',
       119: 'Jump to Label',
+      205: 'Set Movement Route',
       411: 'Else',
       412: 'Branch End',
       413: 'Repeat Above',
@@ -593,6 +748,12 @@
       common_event_pushes: 0,
       branch_paths: 0,
       control_flow_targets: 0,
+      route_commands: 0,
+      route_barriers: 0,
+      route_barrier_code: null,
+      route_barrier_reason: '',
+      route_barrier_label: '',
+      route_command_actions: [],
       path_stops: [],
     };
   }
@@ -609,11 +770,16 @@
       common_event_pushes: diagnostics.common_event_pushes || 0,
       branch_paths: diagnostics.branch_paths || 0,
       control_flow_targets: diagnostics.control_flow_targets || 0,
+      route_commands: diagnostics.route_commands || 0,
+      route_barriers: diagnostics.route_barriers || 0,
+      route_barrier_code: diagnostics.route_barrier_code === null ? null : nullableNumber(diagnostics.route_barrier_code),
+      route_barrier_reason: diagnostics.route_barrier_reason || '',
+      route_barrier_label: diagnostics.route_barrier_label || '',
+      route_command_actions: Array.isArray(diagnostics.route_command_actions)
+        ? diagnostics.route_command_actions.map((action) => Object.assign({}, action))
+        : [],
       path_stops: Array.isArray(diagnostics.path_stops)
-        ? diagnostics.path_stops.map((stop) => Object.assign({}, stop, {
-          branch_path: cloneBranchPath(stop.branch_path),
-          control_flow_target: cloneControlFlowTarget(stop.control_flow_target),
-        }))
+        ? diagnostics.path_stops.map(sanitizePathStop)
         : [],
     };
   }
@@ -644,7 +810,7 @@
   function appendPathStop(diagnostics, stop) {
     if (!diagnostics) return;
     if (!Array.isArray(diagnostics.path_stops)) diagnostics.path_stops = [];
-    diagnostics.path_stops.push({
+    const entry = {
       index: Math.max(0, Math.floor(Number(stop && stop.index) || 0)),
       stop_reason: stop && stop.stop_reason ? String(stop.stop_reason) : '',
       branch_depth: Math.max(0, Math.floor(Number(stop && stop.branch_depth) || 0)),
@@ -652,7 +818,30 @@
       code: Number.isFinite(Number(stop && stop.code)) ? Number(stop.code) : null,
       label: stop && stop.label ? String(stop.label) : '',
       control_flow_target: cloneControlFlowTarget(stop && stop.control_flow_target),
+    };
+    if (stop && Object.prototype.hasOwnProperty.call(stop, 'route_barrier_code')) {
+      entry.route_barrier_code = stop.route_barrier_code === null ? null : nullableNumber(stop.route_barrier_code);
+      entry.route_barrier_reason = stop.route_barrier_reason ? String(stop.route_barrier_reason) : '';
+      entry.route_barrier_label = stop.route_barrier_label ? String(stop.route_barrier_label) : '';
+    }
+    diagnostics.path_stops.push(entry);
+  }
+
+  function sanitizePathStop(stop) {
+    const entry = Object.assign({}, stop, {
+      branch_path: cloneBranchPath(stop && stop.branch_path),
+      control_flow_target: cloneControlFlowTarget(stop && stop.control_flow_target),
     });
+    if (stop && Object.prototype.hasOwnProperty.call(stop, 'route_barrier_code')) {
+      entry.route_barrier_code = stop.route_barrier_code === null ? null : nullableNumber(stop.route_barrier_code);
+      entry.route_barrier_reason = stop.route_barrier_reason || '';
+      entry.route_barrier_label = stop.route_barrier_label || '';
+    } else {
+      delete entry.route_barrier_code;
+      delete entry.route_barrier_reason;
+      delete entry.route_barrier_label;
+    }
+    return entry;
   }
 
   function cloneControlFlowTarget(target) {
@@ -690,6 +879,14 @@
   function nonEmptyString(value) {
     const text = String(value ?? '').trim();
     return text || '';
+  }
+
+  function reasonFromLabel(label) {
+    return String(label || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
   }
 
   function positiveInteger(value, fallback) {
