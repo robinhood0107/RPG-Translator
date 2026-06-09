@@ -51,7 +51,7 @@
         if (translated && translated !== originalText) {
           redrawMessageFallback(scope, this, translated, originalText);
         }
-        scheduleForesightScan(scope, scope.$gameMessage);
+        scheduleForesightScan(scope, scope.$gameMessage, message && message.messageOrigin);
         return translated;
       };
       installProcessCharacterFallback(prototype, scope, translator, trackedWindows);
@@ -491,9 +491,9 @@
     }
   }
 
-  function scheduleForesightScan(scope, gameMessage) {
+  function scheduleForesightScan(scope, gameMessage, fallbackOrigin = null) {
     const scanner = scope && scope.RPGTranslatorOverlay && scope.RPGTranslatorOverlay.foresightScanner;
-    const origin = gameMessage && gameMessage._trMessageOrigin;
+    const origin = fallbackOrigin || (gameMessage && gameMessage._trMessageOrigin);
     if (!origin || !scanner || typeof scanner.collectUpcomingMessageBlocks !== 'function') return [];
     try {
       return scanner.collectUpcomingMessageBlocks({ currentMessageOrigin: origin });
