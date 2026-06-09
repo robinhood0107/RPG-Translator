@@ -2373,6 +2373,85 @@ test("desktop window close destroys the window after bounded safe shutdown attem
   expect(appWindowDestroyMock).toHaveBeenCalledOnce();
 });
 
+test("desktop window close does not wait beyond the total safe close budget", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledWith("save_workbench_state", expect.any(Object));
+    expect(invokeMock).toHaveBeenCalledWith("prepare_safe_shutdown", {
+      request: { db_path: testDbPath },
+    });
+    expect(appWindowDestroyMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await closePromise;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("desktop window close falls back when destroy does not settle", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  appWindowDestroyMock.mockReturnValue(new Promise<never>(() => {}));
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return Promise.resolve({ settings: hydratedWorkbench({ active_tab: "scan" }).settings, saved_drafts: 0, saved_at: "1" });
+    }
+    if (name === "prepare_safe_shutdown") {
+      return Promise.resolve({ pause_requested: false, provider_run_id: null, mode: "no-active-run", stale_runs_interrupted: 0 });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await closePromise;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("web command API rejects desktop commands instead of returning mock data", async () => {
   await expect(callCommand("list_projects", { db_path: "workbench.sqlite" })).rejects.toThrow(
     "desktop runtime is required",

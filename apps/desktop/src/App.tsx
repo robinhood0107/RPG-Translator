@@ -273,7 +273,7 @@ const defaultTargetLanguage: TargetLanguageCode = "ko";
 const defaultProviderModel = "auto";
 const customTargetLanguageValue: TargetLanguageSelection = "custom";
 const defaultReviewPageSize = 200;
-const safeCloseStepTimeoutMs = 2500;
+const safeCloseTotalTimeoutMs = 2000;
 const reviewPageSizeOptions = [50, 100, 200, 500];
 const languageStorageKey = "rpg-translator-language";
 const sourceLanguageStorageKey = "rpg-translator-source-language";
@@ -1332,18 +1332,16 @@ export default function App() {
           safeCloseArmedRef.current = true;
           setSaveStatus("safe_stopping");
           setSaveMessage(t.safeStopping);
-          await boundedCloseStep(flushWorkbenchState({
+          const closeStartedAt = Date.now();
+          const flushWork = flushWorkbenchState({
             drafts: Object.values(reviewDraftSaves),
             visible: true,
-          }));
-          await boundedCloseStep(callCommand("prepare_safe_shutdown", {
+          });
+          const shutdownWork = callCommand("prepare_safe_shutdown", {
             db_path: activeDbPath || null,
-          }));
-          try {
-            await appWindow.destroy();
-          } catch {
-            await appWindow.close();
-          }
+          });
+          await boundedCloseWork([flushWork, shutdownWork], closeStartedAt);
+          await closeWindowWithFallback(appWindow, closeStartedAt);
         });
       })
       .then((listener) => {
@@ -3001,13 +2999,44 @@ function readRecentProjectFilePath() {
   return normalizeWindowsUserPath(localStorage.getItem(recentProjectFileStorageKey)?.trim() ?? "");
 }
 
-async function boundedCloseStep(work: Promise<unknown>) {
+async function boundedCloseWork(work: Array<Promise<unknown>>, startedAtMs: number) {
+  const remainingMs = Math.max(0, safeCloseTotalTimeoutMs - (Date.now() - startedAtMs));
   await Promise.race([
-    work.catch(() => undefined),
+    Promise.allSettled(work),
     new Promise<void>((resolve) => {
-      window.setTimeout(resolve, safeCloseStepTimeoutMs);
+      window.setTimeout(resolve, remainingMs);
     }),
   ]);
+}
+
+type CloseableAppWindow = {
+  destroy: () => Promise<unknown> | unknown;
+  close: () => Promise<unknown> | unknown;
+};
+
+async function closeWindowWithFallback(appWindow: CloseableAppWindow, startedAtMs: number) {
+  const remainingMs = Math.max(0, safeCloseTotalTimeoutMs - (Date.now() - startedAtMs));
+  const destroyCompleted = await settleBeforeTimeout(appWindow.destroy(), Math.min(500, remainingMs));
+  if (!destroyCompleted) {
+    await settleBeforeTimeout(appWindow.close(), 500);
+  }
+}
+
+async function settleBeforeTimeout(work: Promise<unknown> | unknown, timeoutMs: number) {
+  let settled = false;
+  await Promise.race([
+    Promise.resolve(work)
+      .then(() => {
+        settled = true;
+      })
+      .catch(() => {
+        settled = false;
+      }),
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, Math.max(0, timeoutMs));
+    }),
+  ]);
+  return settled;
 }
 
 function displayPath(value: string | null | undefined, fallback: string) {
