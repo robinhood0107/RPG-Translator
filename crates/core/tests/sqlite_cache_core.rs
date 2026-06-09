@@ -1,8 +1,8 @@
 use rpg_translator_core::{
     CacheKeyBuilder, CacheKeyParts, Engine, ExtractedOccurrence, NewOccurrence, NewProject,
-    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, OccurrenceContext, Result,
-    ReviewUpdateRequest, TextCodec, TranslationDb, TranslationJobProgressUpdate,
-    WorkbenchSettingsUpdate,
+    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, OccurrenceContext,
+    OccurrenceSegment, Result, ReviewUpdateRequest, TextCodec, TranslationDb,
+    TranslationJobProgressUpdate, WorkbenchSettingsUpdate,
 };
 use rusqlite::{Connection, OpenFlags, params};
 use tempfile::NamedTempFile;
@@ -70,18 +70,15 @@ fn migrations_are_idempotent_and_source_texts_dedupe() -> Result<()> {
     })?;
     assert_eq!(project_id, same_project_id);
 
-    let source = NewSourceText {
-        source_language: "ja".to_string(),
-        normalized_text: "\\C[2]Hello".to_string(),
-        visible_text: "Hello".to_string(),
-        control_code_signature: "\\C[2]".to_string(),
-    };
+    let source = source_text_with_signature("ja", "\\C[2]Hello", "Hello", "\\C[2]");
     let source_id = db.upsert_source_text(&source)?;
     let duplicate_id = db.upsert_source_text(&source)?;
-    let different_signature_id = db.upsert_source_text(&NewSourceText {
-        control_code_signature: "\\N[1]".to_string(),
-        ..source
-    })?;
+    let different_signature_id = db.upsert_source_text(&source_text_with_signature(
+        "ja",
+        "\\C[2]Hello",
+        "Hello",
+        "\\N[1]",
+    ))?;
 
     assert_eq!(source_id, duplicate_id);
     assert_ne!(source_id, different_signature_id);
@@ -133,8 +130,19 @@ fn cleanup_duplicate_projects_merges_references_by_canonical_windows_path() -> R
         let duplicate_id = conn.last_insert_rowid();
         conn.execute(
             "
-            INSERT INTO source_texts (source_language, normalized_text, visible_text, control_code_signature)
-            VALUES ('en', 'Emma', 'Emma', '')
+            INSERT INTO source_texts (
+                source_language,
+                unit_kind,
+                normalized_hash,
+                normalized_text,
+                visible_text,
+                codec_text,
+                control_code_signature,
+                line_count,
+                newline_count,
+                placeholder_count
+            )
+            VALUES ('en', 'text', hex(zeroblob(32)), 'Emma', 'Emma', 'Emma', '', 1, 0, 0)
             ",
             [],
         )
@@ -283,22 +291,19 @@ fn bulk_scan_persistence_dedupes_sources_and_keeps_all_occurrences() -> Result<(
         display_name: "Synthetic Game".to_string(),
         engine: Engine::Mz,
     })?;
-    let source = NewSourceText {
-        source_language: "en".to_string(),
-        normalized_text: "Hello".to_string(),
-        visible_text: "Hello".to_string(),
-        control_code_signature: String::new(),
-    };
+    let source = source_text("Hello");
     let occurrences = vec![
         ExtractedOccurrence {
             raw_text: "Hello".to_string(),
             source_text: source.clone(),
             context: scan_context("data/Map001.json", 0),
+            segments: Vec::new(),
         },
         ExtractedOccurrence {
             raw_text: "Hello".to_string(),
             source_text: source,
             context: scan_context("data/Map002.json", 1),
+            segments: Vec::new(),
         },
     ];
 
@@ -312,6 +317,78 @@ fn bulk_scan_persistence_dedupes_sources_and_keeps_all_occurrences() -> Result<(
     assert_eq!(persistence.removed_occurrence_count, 0);
     assert_eq!(dashboard.source_text_count, 1);
     assert_eq!(dashboard.occurrence_count, 2);
+
+    Ok(())
+}
+
+#[test]
+fn scan_persistence_stores_ordered_occurrence_segments_for_block_units() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let project_id = db.upsert_project(&NewProject {
+        game_root: "/synthetic/game".to_string(),
+        display_name: "Synthetic Game".to_string(),
+        engine: Engine::Mz,
+    })?;
+    let source = NewSourceText {
+        source_language: "en".to_string(),
+        normalized_text: "Line one\nLine two".to_string(),
+        visible_text: "Line one\nLine two".to_string(),
+        control_code_signature: String::new(),
+        unit_kind: "message_block".to_string(),
+        normalized_hash: "fixture-hash".to_string(),
+        codec_text: "Line one\nLine two".to_string(),
+        line_count: 2,
+        newline_count: 1,
+        placeholder_count: 0,
+    };
+    let occurrence = ExtractedOccurrence {
+        raw_text: "Line one\nLine two".to_string(),
+        source_text: source,
+        context: OccurrenceContext {
+            file_path: "data/Map001.json".to_string(),
+            json_path: "$.events[1].pages[0].list[0]".to_string(),
+            entity_type: "event.command".to_string(),
+            event_id: Some(1),
+            page_index: Some(0),
+            command_index: Some(0),
+            command_code: Some(101),
+            parameter_index: None,
+            object_key: None,
+            extraction_rule_id: "event.message.block".to_string(),
+        },
+        segments: vec![
+            OccurrenceSegment {
+                segment_index: 0,
+                command_code: Some(401),
+                json_path: "$.events[1].pages[0].list[1].parameters[0]".to_string(),
+                raw_text: "Line one".to_string(),
+                line_index: 0,
+            },
+            OccurrenceSegment {
+                segment_index: 1,
+                command_code: Some(401),
+                json_path: "$.events[1].pages[0].list[2].parameters[0]".to_string(),
+                raw_text: "Line two".to_string(),
+                line_index: 1,
+            },
+        ],
+    };
+
+    db.persist_project_scan_occurrences(project_id, 1, &[occurrence])?;
+    let rows = db.occurrence_segments_for_source_text(project_id, "Line one\nLine two")?;
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].segment_index, 0);
+    assert_eq!(
+        rows[0].json_path,
+        "$.events[1].pages[0].list[1].parameters[0]"
+    );
+    assert_eq!(rows[1].segment_index, 1);
+    assert_eq!(
+        rows[1].json_path,
+        "$.events[1].pages[0].list[2].parameters[0]"
+    );
 
     Ok(())
 }
@@ -393,11 +470,27 @@ fn project_rescan_keeps_translations_and_only_counts_active_occurrences() -> Res
 }
 
 fn source_text(text: &str) -> NewSourceText {
+    source_text_with_signature("en", text, text, "")
+}
+
+fn source_text_with_signature(
+    source_language: &str,
+    normalized_text: &str,
+    visible_text: &str,
+    control_code_signature: &str,
+) -> NewSourceText {
+    let provider_state = TextCodec::encode_for_provider(normalized_text);
     NewSourceText {
-        source_language: "en".to_string(),
-        normalized_text: text.to_string(),
-        visible_text: text.to_string(),
-        control_code_signature: String::new(),
+        source_language: source_language.to_string(),
+        unit_kind: "text".to_string(),
+        normalized_hash: String::new(),
+        normalized_text: normalized_text.to_string(),
+        visible_text: visible_text.to_string(),
+        codec_text: provider_state.provider_text,
+        control_code_signature: control_code_signature.to_string(),
+        line_count: normalized_text.matches('\n').count() as i64 + 1,
+        newline_count: normalized_text.matches('\n').count() as i64,
+        placeholder_count: provider_state.control_codes.len() as i64,
     }
 }
 
@@ -410,6 +503,7 @@ fn extracted(
         raw_text: raw_text.to_string(),
         source_text,
         context,
+        segments: Vec::new(),
     }
 }
 
@@ -491,12 +585,7 @@ fn migration_normalizes_legacy_batch_validation_findings_for_issue_filters() -> 
     ];
 
     for (index, (_, message, _)) in cases.iter().enumerate() {
-        let source_id = db.upsert_source_text(&NewSourceText {
-            source_language: "en".to_string(),
-            normalized_text: format!("Line {index}"),
-            visible_text: format!("Line {index}"),
-            control_code_signature: String::new(),
-        })?;
+        let source_id = db.upsert_source_text(&source_text(&format!("Line {index}")))?;
         db.insert_occurrence(&NewOccurrence {
             project_id: Some(project_id),
             source_text_id: source_id,
@@ -905,12 +994,7 @@ fn review_drafts_restore_in_queue_and_clear_after_save() -> Result<()> {
         display_name: "Synthetic Game".to_string(),
         engine: Engine::Mz,
     })?;
-    let source_id = db.upsert_source_text(&NewSourceText {
-        source_language: "en".to_string(),
-        normalized_text: "Emma".to_string(),
-        visible_text: "Emma".to_string(),
-        control_code_signature: String::new(),
-    })?;
+    let source_id = db.upsert_source_text(&source_text("Emma"))?;
     db.insert_project_occurrence(
         project_id,
         &NewOccurrence {
@@ -1027,12 +1111,8 @@ fn translation_upsert_updates_existing_target_language() -> Result<()> {
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;
 
-    let source_id = db.upsert_source_text(&NewSourceText {
-        source_language: "ja".to_string(),
-        normalized_text: "Hello".to_string(),
-        visible_text: "Hello".to_string(),
-        control_code_signature: String::new(),
-    })?;
+    let source_id =
+        db.upsert_source_text(&source_text_with_signature("ja", "Hello", "Hello", ""))?;
     let provider_run_id = db.start_provider_run(&rpg_translator_core::NewProviderRun {
         provider: "fake".to_string(),
         model: Some("synthetic-v2".to_string()),
@@ -1081,12 +1161,7 @@ fn review_update_detects_conflicts_and_bulk_approves_clean_pending_rows() -> Res
         display_name: "Synthetic Game".to_string(),
         engine: Engine::Mz,
     })?;
-    let source_id = db.upsert_source_text(&NewSourceText {
-        source_language: "en".to_string(),
-        normalized_text: "White Underwear".to_string(),
-        visible_text: "White Underwear".to_string(),
-        control_code_signature: String::new(),
-    })?;
+    let source_id = db.upsert_source_text(&source_text("White Underwear"))?;
     db.insert_project_occurrence(
         project_id,
         &NewOccurrence {
@@ -1159,12 +1234,12 @@ fn review_update_detects_conflicts_and_bulk_approves_clean_pending_rows() -> Res
 fn review_update_resolves_findings_only_after_machine_validation_passes() -> Result<()> {
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;
-    let source_id = db.upsert_source_text(&NewSourceText {
-        source_language: "en".to_string(),
-        normalized_text: "Hello \\V[1]".to_string(),
-        visible_text: "Hello ".to_string(),
-        control_code_signature: "\\V[1]".to_string(),
-    })?;
+    let source_id = db.upsert_source_text(&source_text_with_signature(
+        "en",
+        "Hello \\V[1]",
+        "Hello ",
+        "\\V[1]",
+    ))?;
     db.insert_qa_finding(&NewQaFinding {
         source_text_id: source_id,
         translation_id: None,
@@ -1233,12 +1308,8 @@ fn batch_translation_transaction_rolls_back_when_one_row_fails() -> Result<()> {
         model: Some("synthetic".to_string()),
         request_settings_json: "{}".to_string(),
     })?;
-    let source_id = db.upsert_source_text(&NewSourceText {
-        source_language: "ja".to_string(),
-        normalized_text: "Hello".to_string(),
-        visible_text: "Hello".to_string(),
-        control_code_signature: String::new(),
-    })?;
+    let source_id =
+        db.upsert_source_text(&source_text_with_signature("ja", "Hello", "Hello", ""))?;
 
     let result = db.upsert_translations_in_transaction(&[
         NewTranslation {

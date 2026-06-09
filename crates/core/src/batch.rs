@@ -97,7 +97,15 @@ pub struct BatchJob {
     pub source_text_ids: Vec<i64>,
     pub provider_text: String,
     pub token_estimate: usize,
+    lane: BatchLane,
     provider_state: ProviderTextState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BatchLane {
+    Short,
+    PlainBlock,
+    Complex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,9 +167,11 @@ impl BatchPlanner {
                 source_text_ids: records.iter().map(|record| record.id).collect(),
                 provider_text: provider_state.provider_text.clone(),
                 token_estimate,
+                lane: lane_for_record(first),
                 provider_state,
             });
         }
+        jobs.sort_by_key(|job| (job.lane, job.id));
 
         let batches = build_batches(&jobs, &config);
         Ok(BatchPlan { jobs, batches })
@@ -183,6 +193,7 @@ impl BatchPlanner {
                     source_text_ids: vec![item.id],
                     provider_text: item.text,
                     token_estimate: 1,
+                    lane: BatchLane::Short,
                     provider_state,
                 }
             })
@@ -235,6 +246,13 @@ impl BatchValidator {
             if translation.trim().is_empty() {
                 return Err(Error::invalid_input(format!(
                     "provider returned empty translation for id {id}"
+                )));
+            }
+            let expected_line_breaks = job.provider_state.provider_text.matches('\n').count();
+            let actual_line_breaks = translation.matches('\n').count();
+            if expected_line_breaks != actual_line_breaks {
+                return Err(Error::invalid_input(format!(
+                    "provider row {id} line-break mismatch: expected {expected_line_breaks}, got {actual_line_breaks}"
                 )));
             }
             let restored =
@@ -1793,7 +1811,10 @@ fn build_batches(jobs: &[BatchJob], config: &BatchPlannerConfig) -> Vec<Vec<Batc
         let would_exceed_items = current.len() >= max_items;
         let would_exceed_tokens =
             !current.is_empty() && current_tokens + job.token_estimate > token_budget;
-        if would_exceed_items || would_exceed_tokens {
+        let would_change_lane = current
+            .first()
+            .is_some_and(|first: &BatchJob| first.lane != job.lane);
+        if would_exceed_items || would_exceed_tokens || would_change_lane {
             batches.push(current);
             current = Vec::new();
             current_tokens = 0;
@@ -1806,6 +1827,20 @@ fn build_batches(jobs: &[BatchJob], config: &BatchPlannerConfig) -> Vec<Vec<Batc
         batches.push(current);
     }
     batches
+}
+
+fn lane_for_record(record: &SourceTextRecord) -> BatchLane {
+    if record.placeholder_count > 0
+        || record.newline_count > 0
+            && record.unit_kind != "message_block"
+            && record.unit_kind != "scroll_block"
+    {
+        return BatchLane::Complex;
+    }
+    match record.unit_kind.as_str() {
+        "message_block" | "scroll_block" => BatchLane::PlainBlock,
+        _ => BatchLane::Short,
+    }
 }
 
 fn strip_chat_template_artifacts(raw: &str) -> &str {

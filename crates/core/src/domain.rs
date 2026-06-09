@@ -96,18 +96,30 @@ pub struct GameSnapshotRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewSourceText {
     pub source_language: String,
+    pub unit_kind: String,
+    pub normalized_hash: String,
     pub normalized_text: String,
     pub visible_text: String,
+    pub codec_text: String,
     pub control_code_signature: String,
+    pub line_count: i64,
+    pub newline_count: i64,
+    pub placeholder_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceTextRecord {
     pub id: i64,
     pub source_language: String,
+    pub unit_kind: String,
+    pub normalized_hash: String,
     pub normalized_text: String,
     pub visible_text: String,
+    pub codec_text: String,
     pub control_code_signature: String,
+    pub line_count: i64,
+    pub newline_count: i64,
+    pub placeholder_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +146,16 @@ pub struct ExtractedOccurrence {
     pub raw_text: String,
     pub source_text: NewSourceText,
     pub context: OccurrenceContext,
+    pub segments: Vec<OccurrenceSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccurrenceSegment {
+    pub segment_index: i64,
+    pub command_code: Option<i64>,
+    pub json_path: String,
+    pub raw_text: String,
+    pub line_index: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,9 +318,15 @@ pub struct ExportableTranslationRecord {
     pub source_text_id: i64,
     pub source_language: String,
     pub target_language: String,
+    pub unit_kind: String,
+    pub normalized_hash: String,
     pub normalized_text: String,
     pub visible_text: String,
+    pub codec_text: String,
     pub control_code_signature: String,
+    pub line_count: i64,
+    pub newline_count: i64,
+    pub placeholder_count: i64,
     pub translated_text: String,
     pub review_state: String,
     pub qa_state: String,

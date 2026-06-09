@@ -34,6 +34,23 @@ fn write_text(path: &Path, text: &str) {
     fs::write(path, text).expect("write fixture file");
 }
 
+fn source_text_fixture(source_language: &str, text: &str) -> NewSourceText {
+    let analysis = TextCodec::analyze(text);
+    let provider_state = TextCodec::encode_for_provider(&analysis.normalized_text);
+    NewSourceText {
+        source_language: source_language.to_string(),
+        unit_kind: "text".to_string(),
+        normalized_hash: String::new(),
+        normalized_text: analysis.normalized_text.clone(),
+        visible_text: analysis.visible_text,
+        codec_text: provider_state.provider_text,
+        control_code_signature: analysis.control_code_signature,
+        line_count: analysis.normalized_text.matches('\n').count() as i64 + 1,
+        newline_count: analysis.normalized_text.matches('\n').count() as i64,
+        placeholder_count: provider_state.control_codes.len() as i64,
+    }
+}
+
 fn write_json(path: &Path, text: &str) {
     write_text(path, text);
 }
@@ -143,7 +160,7 @@ fn make_export_bundle(root: &Path) {
     );
     write_text(
         &root.join("cache.jsonl"),
-        r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
+        r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","cache_aliases":["ck:v1:0000000000000000000000000000000000000000000000000000000000000000"],"source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
     );
 }
 
@@ -159,14 +176,8 @@ fn seed_review_project(db_path: &Path) -> i64 {
         .expect("insert project");
 
     for (index, text) in ["Alpha", "Beta", "Gamma"].iter().enumerate() {
-        let analysis = TextCodec::analyze(text);
         let source_text_id = db
-            .upsert_source_text(&NewSourceText {
-                source_language: "en".to_string(),
-                normalized_text: analysis.normalized_text,
-                visible_text: analysis.visible_text,
-                control_code_signature: analysis.control_code_signature,
-            })
+            .upsert_source_text(&source_text_fixture("en", text))
             .expect("insert source text");
         db.insert_project_occurrence(
             project_id,
@@ -454,9 +465,10 @@ fn commands_run_synthetic_workbench_flow() {
         .expect("list projects");
         assert_eq!(projects.projects.len(), 1);
 
-        let provider = spawn_local_provider_with_model_list(
-            r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"안녕¤\"}\n{\"id\":2,\"translation\":\"예\"}\n{\"id\":3,\"translation\":\"아니요\"}"}}]}"#,
-        );
+        let provider = spawn_local_provider_with_model_list_responses(vec![
+            r#"{"choices":[{"message":{"content":"{\"id\":2,\"translation\":\"예\"}\n{\"id\":3,\"translation\":\"아니요\"}"}}]}"#,
+            r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"안녕¤\"}"}}]}"#,
+        ]);
         let translated = translate::translate_with_local_provider_for_test(TranslateRequest {
             db_path: db_path.clone(),
             project_id: Some(scan.report.project_id),
@@ -697,7 +709,7 @@ fn scanned_common_events_flow_into_review_counts_and_export() {
             .find(|row| row.visible_text.contains("Do you have something you need"))
             .expect("common event line in review queue");
         assert_eq!(common_line.first_file_path, "data/CommonEvents.json");
-        assert_eq!(common_line.first_json_path, "$[1].list[1].parameters[0]");
+        assert_eq!(common_line.first_json_path, "$[1].list[0]");
         assert_eq!(common_line.review_state, "missing");
 
         for row in rows {
@@ -1129,14 +1141,8 @@ fn translate_pause_aborts_active_provider_request() {
         let db_path = temp.path().join("workbench.sqlite");
         let mut db = TranslationDb::open(&db_path).expect("open db");
         db.migrate().expect("migrate db");
-        let analysis = TextCodec::analyze("Hello");
-        db.upsert_source_text(&NewSourceText {
-            source_language: "en".to_string(),
-            normalized_text: analysis.normalized_text,
-            visible_text: analysis.visible_text,
-            control_code_signature: analysis.control_code_signature,
-        })
-        .expect("insert source text");
+        db.upsert_source_text(&source_text_fixture("en", "Hello"))
+            .expect("insert source text");
         drop(db);
 
         let (provider, request_started) = spawn_hanging_local_provider();
@@ -1256,14 +1262,8 @@ fn provider_benchmark_uses_real_prompt_and_does_not_write_translation_state() {
                     engine: Engine::Mz,
                 })
                 .expect("upsert project");
-            let analysis = TextCodec::analyze("Hello there.");
             let source_id = db
-                .upsert_source_text(&NewSourceText {
-                    source_language: "en".to_string(),
-                    normalized_text: analysis.normalized_text,
-                    visible_text: analysis.visible_text,
-                    control_code_signature: analysis.control_code_signature,
-                })
+                .upsert_source_text(&source_text_fixture("en", "Hello there."))
                 .expect("upsert source");
             db.insert_occurrence(&NewOccurrence {
                 project_id: Some(project_id),
@@ -1424,6 +1424,12 @@ impl Drop for ProviderServer {
 }
 
 fn spawn_local_provider_with_model_list(response_body: &'static str) -> ProviderServer {
+    spawn_local_provider_with_model_list_responses(vec![response_body])
+}
+
+fn spawn_local_provider_with_model_list_responses(
+    response_bodies: Vec<&'static str>,
+) -> ProviderServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind provider server");
     let address = listener.local_addr().expect("provider server address");
     let handle = thread::spawn(move || {
@@ -1448,36 +1454,38 @@ fn spawn_local_provider_with_model_list(response_body: &'static str) -> Provider
         listener
             .set_nonblocking(true)
             .expect("set nonblocking provider listener");
-        let started = Instant::now();
-        let (mut chat_stream, _) = loop {
-            match listener.accept() {
-                Ok(connection) => break connection,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        started.elapsed() < Duration::from_secs(5),
-                        "timed out waiting for provider request"
-                    );
-                    thread::sleep(Duration::from_millis(10));
+        for response_body in response_bodies {
+            let started = Instant::now();
+            let (mut chat_stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < Duration::from_secs(5),
+                            "timed out waiting for provider request"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept provider request: {error}"),
                 }
-                Err(error) => panic!("accept provider request: {error}"),
-            }
-        };
-        let mut chat_request = [0_u8; 8192];
-        let chat_read = chat_stream
-            .read(&mut chat_request)
-            .expect("read provider request");
-        let chat_request_text = String::from_utf8_lossy(&chat_request[..chat_read]);
-        assert!(chat_request_text.contains("POST /v1/chat/completions"));
-        assert!(chat_request_text.contains("fixture-model"));
-        assert!(!chat_request_text.contains("\"model\":\"auto\""));
-        let chat_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        chat_stream
-            .write_all(chat_response.as_bytes())
-            .expect("write response");
+            };
+            let mut chat_request = [0_u8; 8192];
+            let chat_read = chat_stream
+                .read(&mut chat_request)
+                .expect("read provider request");
+            let chat_request_text = String::from_utf8_lossy(&chat_request[..chat_read]);
+            assert!(chat_request_text.contains("POST /v1/chat/completions"));
+            assert!(chat_request_text.contains("fixture-model"));
+            assert!(!chat_request_text.contains("\"model\":\"auto\""));
+            let chat_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            chat_stream
+                .write_all(chat_response.as_bytes())
+                .expect("write response");
+        }
     });
 
     ProviderServer {

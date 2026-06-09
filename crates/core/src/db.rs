@@ -5,16 +5,17 @@ use std::{
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
 
 use crate::{
     BulkReviewApproveReport, DuplicateProjectCleanupReport, Engine, ExportStatusRecord,
     ExportableTranslationRecord, ExtractedOccurrence, GameSnapshotRecord, InstallRecord,
     InstallStatusRecord, NewInstallRecord, NewOccurrence, NewProject, NewProviderRun, NewQaFinding,
-    NewSourceText, NewTranslation, OccurrenceContext, ProjectRecord, ProviderRunStatusRecord,
-    QaFindingRecord, Result, ReviewCounts, ReviewQueueRow, ReviewUpdateRequest,
-    ScanPersistenceStats, SourceTextRecord, TextCodec, TranslationJobProgressUpdate,
-    TranslationJobSummary, TranslationRecord, WorkbenchDashboardSummary, WorkbenchSettingsRecord,
-    WorkbenchSettingsUpdate,
+    NewSourceText, NewTranslation, OccurrenceContext, OccurrenceSegment, ProjectRecord,
+    ProviderRunStatusRecord, QaFindingRecord, Result, ReviewCounts, ReviewQueueRow,
+    ReviewUpdateRequest, ScanPersistenceStats, SourceTextRecord, TextCodec,
+    TranslationJobProgressUpdate, TranslationJobSummary, TranslationRecord,
+    WorkbenchDashboardSummary, WorkbenchSettingsRecord, WorkbenchSettingsUpdate,
 };
 
 pub struct TranslationDb {
@@ -63,6 +64,7 @@ impl TranslationDb {
     }
 
     pub fn migrate(&mut self) -> Result<()> {
+        self.recreate_translation_units_if_incompatible()?;
         self.conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -88,12 +90,17 @@ impl TranslationDb {
             CREATE TABLE IF NOT EXISTS source_texts (
                 id INTEGER PRIMARY KEY,
                 source_language TEXT NOT NULL,
+                unit_kind TEXT NOT NULL,
+                normalized_hash TEXT NOT NULL,
                 normalized_text TEXT NOT NULL,
                 visible_text TEXT NOT NULL,
+                codec_text TEXT NOT NULL,
                 control_code_signature TEXT NOT NULL,
+                line_count INTEGER NOT NULL DEFAULT 1,
+                newline_count INTEGER NOT NULL DEFAULT 0,
+                placeholder_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(source_language, normalized_text, control_code_signature)
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS occurrences (
@@ -116,6 +123,16 @@ impl TranslationDb {
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS occurrence_segments (
+                occurrence_id INTEGER NOT NULL REFERENCES occurrences(id) ON DELETE CASCADE,
+                segment_index INTEGER NOT NULL,
+                command_code INTEGER,
+                json_path TEXT NOT NULL,
+                raw_text TEXT NOT NULL,
+                line_index INTEGER NOT NULL,
+                PRIMARY KEY(occurrence_id, segment_index)
+            ) WITHOUT ROWID;
 
             CREATE TABLE IF NOT EXISTS translations (
                 id INTEGER PRIMARY KEY,
@@ -314,6 +331,24 @@ impl TranslationDb {
                 }
             }
         }
+        if tables.contains("source_texts") {
+            let columns = self.table_columns("source_texts")?;
+            for column in [
+                "unit_kind",
+                "normalized_hash",
+                "codec_text",
+                "line_count",
+                "newline_count",
+                "placeholder_count",
+            ] {
+                if !columns.contains(column) {
+                    return Ok(true);
+                }
+            }
+        }
+        if tables.contains("occurrences") && !tables.contains("occurrence_segments") {
+            return Ok(true);
+        }
         if !tables.contains("review_drafts") {
             return Ok(true);
         }
@@ -357,6 +392,43 @@ impl TranslationDb {
         self.conn
             .execute("VACUUM INTO ?1", params![backup_path_text])?;
         Ok(backup_path)
+    }
+
+    fn recreate_translation_units_if_incompatible(&self) -> Result<()> {
+        let tables = self.table_names()?;
+        if !tables.contains("source_texts") {
+            return Ok(());
+        }
+        let source_columns = self.table_columns("source_texts")?;
+        let has_block_columns = [
+            "unit_kind",
+            "normalized_hash",
+            "codec_text",
+            "line_count",
+            "newline_count",
+            "placeholder_count",
+        ]
+        .iter()
+        .all(|column| source_columns.contains(*column));
+        let has_segments =
+            !tables.contains("occurrences") || tables.contains("occurrence_segments");
+        if has_block_columns && has_segments {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
+            PRAGMA foreign_keys = OFF;
+            DROP TABLE IF EXISTS review_drafts;
+            DROP TABLE IF EXISTS qa_findings;
+            DROP TABLE IF EXISTS translations;
+            DROP TABLE IF EXISTS occurrence_segments;
+            DROP TABLE IF EXISTS occurrences;
+            DROP TABLE IF EXISTS source_texts;
+            PRAGMA foreign_keys = ON;
+            ",
+        )?;
+        Ok(())
     }
 
     fn ensure_qa_findings_columns(&self) -> Result<()> {
@@ -651,6 +723,8 @@ impl TranslationDb {
         self.deduplicate_occurrence_identities()?;
         self.conn.execute_batch(
             "
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_source_texts_language_kind_hash_unique
+                ON source_texts(source_language, unit_kind, normalized_hash);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_occurrences_project_identity_unique
                 ON occurrences(project_id, occurrence_identity)
                 WHERE project_id IS NOT NULL AND occurrence_identity <> '';
@@ -658,6 +732,8 @@ impl TranslationDb {
                 ON occurrences(project_id, active, source_text_id);
             CREATE INDEX IF NOT EXISTS idx_occurrences_source_project_active
                 ON occurrences(source_text_id, project_id, active);
+            CREATE INDEX IF NOT EXISTS idx_occurrence_segments_occurrence_order
+                ON occurrence_segments(occurrence_id, segment_index);
             CREATE INDEX IF NOT EXISTS idx_translations_target_review_qa_source
                 ON translations(target_language, review_state, qa_state, source_text_id);
             CREATE INDEX IF NOT EXISTS idx_qa_findings_source_target_status_type
@@ -920,39 +996,54 @@ impl TranslationDb {
     }
 
     fn upsert_source_text_in_tx(tx: &Transaction<'_>, input: &NewSourceText) -> Result<i64> {
+        let normalized_hash = source_text_hash(input);
         tx.execute(
             "
             INSERT INTO source_texts (
                 source_language,
+                unit_kind,
+                normalized_hash,
                 normalized_text,
                 visible_text,
-                control_code_signature
+                codec_text,
+                control_code_signature,
+                line_count,
+                newline_count,
+                placeholder_count
             )
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(source_language, normalized_text, control_code_signature)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(source_language, unit_kind, normalized_hash)
             DO UPDATE SET
+                normalized_text = excluded.normalized_text,
                 visible_text = excluded.visible_text,
+                codec_text = excluded.codec_text,
+                control_code_signature = excluded.control_code_signature,
+                line_count = excluded.line_count,
+                newline_count = excluded.newline_count,
+                placeholder_count = excluded.placeholder_count,
                 updated_at = CURRENT_TIMESTAMP
             ",
             params![
                 input.source_language,
+                input.unit_kind,
+                normalized_hash,
                 input.normalized_text,
                 input.visible_text,
-                input.control_code_signature
+                input.codec_text,
+                input.control_code_signature,
+                input.line_count,
+                input.newline_count,
+                input.placeholder_count
             ],
         )?;
         let id = tx.query_row(
             "
             SELECT id FROM source_texts
             WHERE source_language = ?1
-              AND normalized_text = ?2
-              AND control_code_signature = ?3
+              AND unit_kind = ?2
+              AND normalized_hash = ?3
             ",
-            params![
-                input.source_language,
-                input.normalized_text,
-                input.control_code_signature
-            ],
+            params![input.source_language, input.unit_kind, normalized_hash],
             |row| row.get(0),
         )?;
         Ok(id)
@@ -1107,6 +1198,21 @@ impl TranslationDb {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1, CURRENT_TIMESTAMP)
             ",
         )?;
+        let mut delete_segments =
+            tx.prepare("DELETE FROM occurrence_segments WHERE occurrence_id = ?1")?;
+        let mut insert_segment = tx.prepare(
+            "
+            INSERT INTO occurrence_segments (
+                occurrence_id,
+                segment_index,
+                command_code,
+                json_path,
+                raw_text,
+                line_index
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+        )?;
 
         for occurrence in occurrences {
             let source_text_id = source_text_ids_by_key
@@ -1116,7 +1222,7 @@ impl TranslationDb {
             source_text_ids.insert(source_text_id);
             let identity = occurrence_identity_from_context(&occurrence.context);
             current_identities.insert(identity.clone());
-            if let Some(id) = existing_identity_ids.get(&identity) {
+            let occurrence_id = if let Some(id) = existing_identity_ids.get(&identity) {
                 update_occurrence.execute(params![
                     id,
                     source_text_id,
@@ -1132,6 +1238,7 @@ impl TranslationDb {
                     occurrence.context.extraction_rule_id,
                     snapshot_id,
                 ])?;
+                *id
             } else {
                 insert_occurrence.execute(params![
                     project_id,
@@ -1148,6 +1255,18 @@ impl TranslationDb {
                     occurrence.context.extraction_rule_id,
                     snapshot_id,
                     identity,
+                ])?;
+                tx.last_insert_rowid()
+            };
+            delete_segments.execute(params![occurrence_id])?;
+            for segment in &occurrence.segments {
+                insert_segment.execute(params![
+                    occurrence_id,
+                    segment.segment_index,
+                    segment.command_code,
+                    segment.json_path,
+                    segment.raw_text,
+                    segment.line_index,
                 ])?;
             }
         }
@@ -1169,6 +1288,8 @@ impl TranslationDb {
         };
         drop(insert_occurrence);
         drop(update_occurrence);
+        drop(insert_segment);
+        drop(delete_segments);
         tx.commit()?;
         Ok(stats)
     }
@@ -1976,9 +2097,15 @@ impl TranslationDb {
             SELECT
                 id,
                 source_language,
+                unit_kind,
+                normalized_hash,
                 normalized_text,
                 visible_text,
-                control_code_signature
+                codec_text,
+                control_code_signature,
+                line_count,
+                newline_count,
+                placeholder_count
             FROM source_texts
             WHERE (?2 = 1 OR NOT EXISTS (
                 SELECT 1
@@ -1994,15 +2121,7 @@ impl TranslationDb {
                 target_language,
                 if include_existing_translations { 1 } else { 0 }
             ],
-            |row| {
-                Ok(SourceTextRecord {
-                    id: row.get(0)?,
-                    source_language: row.get(1)?,
-                    normalized_text: row.get(2)?,
-                    visible_text: row.get(3)?,
-                    control_code_signature: row.get(4)?,
-                })
-            },
+            source_text_record_from_row,
         )?;
         let mut records = Vec::new();
         for row in rows {
@@ -2027,9 +2146,15 @@ impl TranslationDb {
                 SELECT DISTINCT
                     source_texts.id,
                     source_texts.source_language,
+                    source_texts.unit_kind,
+                    source_texts.normalized_hash,
                     source_texts.normalized_text,
                     source_texts.visible_text,
-                    source_texts.control_code_signature
+                    source_texts.codec_text,
+                    source_texts.control_code_signature,
+                    source_texts.line_count,
+                    source_texts.newline_count,
+                    source_texts.placeholder_count
                 FROM source_texts
                 INNER JOIN occurrences ON occurrences.source_text_id = source_texts.id
                 WHERE occurrences.project_id = ?1
@@ -2040,13 +2165,7 @@ impl TranslationDb {
                 ",
             )?;
             let rows = statement.query_map(params![project_id, source_language, limit], |row| {
-                Ok(SourceTextRecord {
-                    id: row.get(0)?,
-                    source_language: row.get(1)?,
-                    normalized_text: row.get(2)?,
-                    visible_text: row.get(3)?,
-                    control_code_signature: row.get(4)?,
-                })
+                source_text_record_from_row(row)
             })?;
             let mut records = Vec::new();
             for row in rows {
@@ -2060,9 +2179,15 @@ impl TranslationDb {
             SELECT
                 id,
                 source_language,
+                unit_kind,
+                normalized_hash,
                 normalized_text,
                 visible_text,
-                control_code_signature
+                codec_text,
+                control_code_signature,
+                line_count,
+                newline_count,
+                placeholder_count
             FROM source_texts
             WHERE source_language = ?1
             ORDER BY id
@@ -2070,13 +2195,7 @@ impl TranslationDb {
             ",
         )?;
         let rows = statement.query_map(params![source_language, limit], |row| {
-            Ok(SourceTextRecord {
-                id: row.get(0)?,
-                source_language: row.get(1)?,
-                normalized_text: row.get(2)?,
-                visible_text: row.get(3)?,
-                control_code_signature: row.get(4)?,
-            })
+            source_text_record_from_row(row)
         })?;
         let mut records = Vec::new();
         for row in rows {
@@ -2171,9 +2290,15 @@ impl TranslationDb {
                 source_texts.id,
                 source_texts.source_language,
                 translations.target_language,
+                source_texts.unit_kind,
+                source_texts.normalized_hash,
                 source_texts.normalized_text,
                 source_texts.visible_text,
+                source_texts.codec_text,
                 source_texts.control_code_signature,
+                source_texts.line_count,
+                source_texts.newline_count,
+                source_texts.placeholder_count,
                 translations.translated_text,
                 translations.review_state,
                 translations.qa_state
@@ -2187,9 +2312,15 @@ impl TranslationDb {
                 source_texts.id,
                 source_texts.source_language,
                 translations.target_language,
+                source_texts.unit_kind,
+                source_texts.normalized_hash,
                 source_texts.normalized_text,
                 source_texts.visible_text,
+                source_texts.codec_text,
                 source_texts.control_code_signature,
+                source_texts.line_count,
+                source_texts.newline_count,
+                source_texts.placeholder_count,
                 translations.translated_text,
                 translations.review_state,
                 translations.qa_state
@@ -2201,12 +2332,18 @@ impl TranslationDb {
                 source_text_id: row.get(0)?,
                 source_language: row.get(1)?,
                 target_language: row.get(2)?,
-                normalized_text: row.get(3)?,
-                visible_text: row.get(4)?,
-                control_code_signature: row.get(5)?,
-                translated_text: row.get(6)?,
-                review_state: row.get(7)?,
-                qa_state: row.get(8)?,
+                unit_kind: row.get(3)?,
+                normalized_hash: row.get(4)?,
+                normalized_text: row.get(5)?,
+                visible_text: row.get(6)?,
+                codec_text: row.get(7)?,
+                control_code_signature: row.get(8)?,
+                line_count: row.get(9)?,
+                newline_count: row.get(10)?,
+                placeholder_count: row.get(11)?,
+                translated_text: row.get(12)?,
+                review_state: row.get(13)?,
+                qa_state: row.get(14)?,
             })
         })?;
 
@@ -3326,6 +3463,43 @@ impl TranslationDb {
             .conn
             .query_row("SELECT COUNT(*) FROM occurrences", [], |row| row.get(0))?)
     }
+
+    pub fn occurrence_segments_for_source_text(
+        &self,
+        project_id: i64,
+        normalized_text: &str,
+    ) -> Result<Vec<OccurrenceSegment>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                occurrence_segments.segment_index,
+                occurrence_segments.command_code,
+                occurrence_segments.json_path,
+                occurrence_segments.raw_text,
+                occurrence_segments.line_index
+            FROM occurrence_segments
+            INNER JOIN occurrences ON occurrences.id = occurrence_segments.occurrence_id
+            INNER JOIN source_texts ON source_texts.id = occurrences.source_text_id
+            WHERE occurrences.project_id = ?1
+              AND source_texts.normalized_text = ?2
+            ORDER BY occurrence_segments.segment_index
+            ",
+        )?;
+        let rows = statement.query_map(params![project_id, normalized_text], |row| {
+            Ok(OccurrenceSegment {
+                segment_index: row.get(0)?,
+                command_code: row.get(1)?,
+                json_path: row.get(2)?,
+                raw_text: row.get(3)?,
+                line_index: row.get(4)?,
+            })
+        })?;
+        let mut segments = Vec::new();
+        for row in rows {
+            segments.push(row?);
+        }
+        Ok(segments)
+    }
 }
 
 fn review_issue_filter_clause(issue_filter: Option<&str>) -> Result<&'static str> {
@@ -3586,6 +3760,22 @@ fn active_project_source_text_ids_tx(
     Ok(ids)
 }
 
+fn source_text_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceTextRecord> {
+    Ok(SourceTextRecord {
+        id: row.get(0)?,
+        source_language: row.get(1)?,
+        unit_kind: row.get(2)?,
+        normalized_hash: row.get(3)?,
+        normalized_text: row.get(4)?,
+        visible_text: row.get(5)?,
+        codec_text: row.get(6)?,
+        control_code_signature: row.get(7)?,
+        line_count: row.get(8)?,
+        newline_count: row.get(9)?,
+        placeholder_count: row.get(10)?,
+    })
+}
+
 fn active_project_occurrence_identity_ids_tx(
     tx: &Transaction<'_>,
     project_id: i64,
@@ -3613,9 +3803,38 @@ fn active_project_occurrence_identity_ids_tx(
 fn source_text_key(input: &NewSourceText) -> (String, String, String) {
     (
         input.source_language.clone(),
-        input.normalized_text.clone(),
-        input.control_code_signature.clone(),
+        input.unit_kind.clone(),
+        source_text_hash(input),
     )
+}
+
+fn source_text_hash(input: &NewSourceText) -> String {
+    if input.normalized_hash.len() == 64
+        && input
+            .normalized_hash
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit())
+    {
+        return input.normalized_hash.clone();
+    }
+    let mut hasher = Sha256::new();
+    for (name, value) in [
+        ("source_language", input.source_language.as_str()),
+        ("unit_kind", input.unit_kind.as_str()),
+        ("normalized_text", input.normalized_text.as_str()),
+        (
+            "control_code_signature",
+            input.control_code_signature.as_str(),
+        ),
+    ] {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.len().to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0xff]);
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn occurrence_identity_from_new(input: &NewOccurrence) -> String {
@@ -3726,8 +3945,10 @@ fn normalize_drive_path(path: &str) -> String {
 fn required_index_names() -> &'static [&'static str] {
     &[
         "idx_occurrences_project_identity_unique",
+        "idx_source_texts_language_kind_hash_unique",
         "idx_occurrences_project_active_source",
         "idx_occurrences_source_project_active",
+        "idx_occurrence_segments_occurrence_order",
         "idx_translations_target_review_qa_source",
         "idx_qa_findings_source_target_status_type",
         "idx_exports_project_latest",
