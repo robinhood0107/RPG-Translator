@@ -3,6 +3,8 @@
   const INSTALL_TOKEN = 'rpg-translator-bitmap-text-v2';
   const MUTATION_TOKEN = 'rpg-translator-bitmap-mutation-v2';
   const FRAME_TOKEN = 'rpg-translator-bitmap-frame-v2';
+  const SMALL_TEXT_TOKEN = 'rpg-translator-bitmap-small-text-v2';
+  const NORMAL_CHAR_TOKEN = 'rpg-translator-bitmap-normal-character-v2';
   let nextBitmapId = 1;
 
   class BitmapTextAdapter {
@@ -14,6 +16,9 @@
       if (typeof originalDrawText !== 'function') return false;
       overlay(scope).__bitmapTextTranslator = translator;
       prototype.drawText = function translatedBitmapText(text, ...rest) {
+        if (isSmallTextDrawActive(scope, this) || isSmallTextScratchBitmap(scope, this)) {
+          return originalDrawText.call(this, text, ...rest);
+        }
         if (this.__rpgTranslatorBitmapReplayDepth > 0 || !translator || typeof translator.observeRecord !== 'function') {
           return originalDrawText.call(this, translateText(translator, scope, text, this), ...rest);
         }
@@ -29,6 +34,8 @@
       prototype.drawText.__rpgTranslatorOriginal = originalDrawText;
       prototype.__rpgTranslatorBitmapTextInstalled = INSTALL_TOKEN;
       installMutationHooks(prototype, translator);
+      installSmallTextMarkers(scope);
+      installNormalCharacterMarker(scope);
       installFrameHooks(scope);
       return true;
     }
@@ -266,6 +273,75 @@
     target[methodName].__rpgTranslatorOriginal = original;
     target[methodName].__rpgTranslatorBitmapFrame = FRAME_TOKEN;
     return true;
+  }
+
+  function installSmallTextMarkers(scope) {
+    const BitmapCtor = scope && scope.Bitmap;
+    installSmallTextMarker(scope, BitmapCtor && BitmapCtor.prototype, 'drawSmallText');
+    installSmallTextMarker(scope, BitmapCtor, 'drawSmallText');
+  }
+
+  function installSmallTextMarker(scope, target, methodName) {
+    if (!target || typeof target[methodName] !== 'function') return false;
+    if (target[methodName].__rpgTranslatorBitmapSmallText === SMALL_TEXT_TOKEN) return true;
+    const original = target[methodName];
+    target[methodName] = function translatedBitmapSmallTextMarker(...args) {
+      const overlayScope = overlay(scope);
+      overlayScope.__bitmapTextSmallTextDepth = (overlayScope.__bitmapTextSmallTextDepth || 0) + 1;
+      try {
+        return original.apply(this, args);
+      } finally {
+        overlayScope.__bitmapTextSmallTextDepth = Math.max(0, (overlayScope.__bitmapTextSmallTextDepth || 1) - 1);
+      }
+    };
+    target[methodName].__rpgTranslatorOriginal = original;
+    target[methodName].__rpgTranslatorBitmapSmallText = SMALL_TEXT_TOKEN;
+    return true;
+  }
+
+  function installNormalCharacterMarker(scope) {
+    const prototype = scope && scope.Window_Base && scope.Window_Base.prototype;
+    if (!prototype || typeof prototype.processNormalCharacter !== 'function') return false;
+    if (prototype.processNormalCharacter.__rpgTranslatorBitmapNormalCharacter === NORMAL_CHAR_TOKEN) return true;
+    const original = prototype.processNormalCharacter;
+    prototype.processNormalCharacter = function translatedBitmapNormalCharacterMarker(...args) {
+      const overlayScope = overlay(scope);
+      overlayScope.__bitmapTextNormalCharacterDepth = (overlayScope.__bitmapTextNormalCharacterDepth || 0) + 1;
+      if (this && this.contents) {
+        this.contents.__rpgTranslatorBitmapNormalCharacterDepth =
+          (this.contents.__rpgTranslatorBitmapNormalCharacterDepth || 0) + 1;
+      }
+      try {
+        return original.apply(this, args);
+      } finally {
+        overlayScope.__bitmapTextNormalCharacterDepth =
+          Math.max(0, (overlayScope.__bitmapTextNormalCharacterDepth || 1) - 1);
+        if (this && this.contents) {
+          this.contents.__rpgTranslatorBitmapNormalCharacterDepth =
+            Math.max(0, (this.contents.__rpgTranslatorBitmapNormalCharacterDepth || 1) - 1);
+        }
+      }
+    };
+    prototype.processNormalCharacter.__rpgTranslatorOriginal = original;
+    prototype.processNormalCharacter.__rpgTranslatorBitmapNormalCharacter = NORMAL_CHAR_TOKEN;
+    return true;
+  }
+
+  function isSmallTextDrawActive(scope, bitmap) {
+    const overlayScope = overlay(scope);
+    return !!(
+      (overlayScope.__bitmapTextSmallTextDepth || 0) > 0
+      || (overlayScope.__bitmapTextNormalCharacterDepth || 0) > 0
+      || (bitmap && (
+        (bitmap.__rpgTranslatorBitmapSmallTextDepth || 0) > 0
+        || (bitmap.__rpgTranslatorBitmapNormalCharacterDepth || 0) > 0
+      ))
+    );
+  }
+
+  function isSmallTextScratchBitmap(scope, bitmap) {
+    const BitmapCtor = scope && scope.Bitmap;
+    return !!(bitmap && BitmapCtor && BitmapCtor.drawSmallTextBitmap && bitmap === BitmapCtor.drawSmallTextBitmap);
   }
 
   function translateText(translator, scope, text, surface) {

@@ -5922,6 +5922,65 @@ test('bitmap text adapter flushes queued fragments through every frame render ho
   assert.deepEqual(requests, ['Queued', 'Second']);
 });
 
+test('bitmap text adapter bypasses small-text and normal-character marker draws', () => {
+  const requests = [];
+  const index = {
+    translate({ text }) {
+      requests.push(text);
+      if (text === 'Tiny') return '작게';
+      if (text === 'Glyph') return '글리프';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 160;
+      this.height = 80;
+      this.fontSize = 20;
+    },
+    Window_Base: function WindowBase() {
+      this.contents = new root.Bitmap();
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['frame']);
+      },
+    },
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+  root.Bitmap.prototype.drawSmallText = function drawSmallText(text) {
+    return this.drawText(text, 0, 0, 80, 24, 'left');
+  };
+  root.Window_Base.prototype.processNormalCharacter = function processNormalCharacter(textState) {
+    return this.contents.drawText(textState.text, 0, 24, 80, 24, 'left');
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+  const windowBase = new root.Window_Base();
+
+  bitmap.drawSmallText('Tiny');
+  windowBase.processNormalCharacter({ text: 'Glyph' });
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(requests, []);
+  assert.deepEqual(calls, [
+    ['drawText', 'Tiny', 0, 0, 80, 24, 'left'],
+    ['drawText', 'Glyph', 0, 24, 80, 24, 'left'],
+    ['frame'],
+  ]);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+});
+
 test('pixi text adapter retires removed objects and restores translated text scale', () => {
   const index = {
     translate({ text }) {
