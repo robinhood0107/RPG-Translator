@@ -1630,6 +1630,7 @@ impl BatchProcessor<'_> {
                 status: status.to_string(),
                 failure_type: failure_type.map(str::to_string),
                 effective_batch_size: usize_to_i64(self.report.effective_batch_size),
+                adaptive_decision_reason: self.report.adaptive_decision_reason.clone(),
                 model: self.provider.model_name().map(str::to_string),
                 prompt_hash: self.config.prompt_hash.clone(),
             })?;

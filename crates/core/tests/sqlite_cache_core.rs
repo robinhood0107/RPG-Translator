@@ -729,6 +729,7 @@ fn translation_speed_samples_are_indexed_and_queryable() -> Result<()> {
         status: "success".to_string(),
         failure_type: None,
         effective_batch_size: 16,
+        adaptive_decision_reason: "adaptive: accelerating from test".to_string(),
         model: Some("gemma".to_string()),
         prompt_hash: "prompt-hash".to_string(),
     })?;
@@ -747,6 +748,10 @@ fn translation_speed_samples_are_indexed_and_queryable() -> Result<()> {
     assert_eq!(sample.total_elapsed_ms, 3950);
     assert_eq!(sample.status, "success");
     assert_eq!(sample.effective_batch_size, 16);
+    assert_eq!(
+        sample.adaptive_decision_reason,
+        "adaptive: accelerating from test"
+    );
 
     let conn = Connection::open(file.path())?;
     let index_count: i64 = conn.query_row(
@@ -764,6 +769,54 @@ fn translation_speed_samples_are_indexed_and_queryable() -> Result<()> {
     )?;
     assert_eq!(index_count, 2);
 
+    Ok(())
+}
+
+#[test]
+fn migrate_adds_adaptive_reason_to_legacy_speed_samples() -> Result<()> {
+    let file = NamedTempFile::new().expect("create temp db");
+    {
+        let conn = Connection::open(file.path())?;
+        conn.execute_batch(
+            "
+            CREATE TABLE translation_speed_samples (
+                id INTEGER PRIMARY KEY,
+                provider_run_id INTEGER NOT NULL,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                lane TEXT NOT NULL DEFAULT 'unknown',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                estimated_token_count INTEGER NOT NULL DEFAULT 0,
+                request_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                success_delay_ms INTEGER NOT NULL DEFAULT 0,
+                total_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'success',
+                failure_type TEXT,
+                effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                prompt_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+    }
+
+    let mut db = TranslationDb::open(file.path())?;
+    assert!(db.needs_schema_upgrade()?);
+    db.migrate()?;
+    assert!(!db.needs_schema_upgrade()?);
+
+    let conn = Connection::open(file.path())?;
+    let column_count: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM pragma_table_info('translation_speed_samples')
+        WHERE name = 'adaptive_decision_reason'
+        ",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(column_count, 1);
     Ok(())
 }
 

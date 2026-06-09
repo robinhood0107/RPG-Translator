@@ -271,6 +271,7 @@ impl TranslationDb {
                 status TEXT NOT NULL DEFAULT 'success',
                 failure_type TEXT,
                 effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                adaptive_decision_reason TEXT NOT NULL DEFAULT '',
                 model TEXT,
                 prompt_hash TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -333,6 +334,12 @@ impl TranslationDb {
         }
         if !tables.is_empty() && !tables.contains("translation_speed_samples") {
             return Ok(true);
+        }
+        if tables.contains("translation_speed_samples") {
+            let columns = self.table_columns("translation_speed_samples")?;
+            if !columns.contains("adaptive_decision_reason") {
+                return Ok(true);
+            }
         }
         if tables.contains("qa_findings") {
             let columns = self.table_columns("qa_findings")?;
@@ -641,12 +648,20 @@ impl TranslationDb {
                 status TEXT NOT NULL DEFAULT 'success',
                 failure_type TEXT,
                 effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                adaptive_decision_reason TEXT NOT NULL DEFAULT '',
                 model TEXT,
                 prompt_hash TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             ",
         )?;
+        let columns = self.table_columns("translation_speed_samples")?;
+        if !columns.contains("adaptive_decision_reason") {
+            self.conn.execute(
+                "ALTER TABLE translation_speed_samples ADD COLUMN adaptive_decision_reason TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -2652,10 +2667,11 @@ impl TranslationDb {
                 status,
                 failure_type,
                 effective_batch_size,
+                adaptive_decision_reason,
                 model,
                 prompt_hash
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ",
             params![
                 input.provider_run_id,
@@ -2670,6 +2686,7 @@ impl TranslationDb {
                 input.status,
                 input.failure_type,
                 input.effective_batch_size,
+                input.adaptive_decision_reason,
                 input.model,
                 input.prompt_hash
             ],
@@ -2700,6 +2717,7 @@ impl TranslationDb {
                 status,
                 failure_type,
                 effective_batch_size,
+                adaptive_decision_reason,
                 model,
                 prompt_hash,
                 created_at
@@ -2725,9 +2743,10 @@ impl TranslationDb {
                 status: row.get(10)?,
                 failure_type: row.get(11)?,
                 effective_batch_size: row.get(12)?,
-                model: row.get(13)?,
-                prompt_hash: row.get(14)?,
-                created_at: row.get(15)?,
+                adaptive_decision_reason: row.get(13)?,
+                model: row.get(14)?,
+                prompt_hash: row.get(15)?,
+                created_at: row.get(16)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

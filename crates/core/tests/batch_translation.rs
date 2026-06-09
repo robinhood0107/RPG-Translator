@@ -119,6 +119,7 @@ fn speed_sample(status: &str, batch_size: i64, total_elapsed_ms: i64) -> Transla
         status: status.to_string(),
         failure_type: None,
         effective_batch_size: batch_size,
+        adaptive_decision_reason: "adaptive: fixture".to_string(),
         model: Some("gemma".to_string()),
         prompt_hash: "prompt".to_string(),
         created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -196,6 +197,11 @@ fn fake_provider_success_persists_batch_translations() {
     assert!(samples.iter().all(|sample| sample.status == "success"));
     assert!(samples.iter().all(|sample| sample.item_count == 1));
     assert!(samples.iter().all(|sample| sample.char_count > 0));
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.adaptive_decision_reason.starts_with("adaptive:"))
+    );
     assert!(
         samples
             .iter()

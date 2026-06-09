@@ -527,6 +527,7 @@ pub struct NewTranslationSpeedSample {
     pub status: String,
     pub failure_type: Option<String>,
     pub effective_batch_size: i64,
+    pub adaptive_decision_reason: String,
     pub model: Option<String>,
     pub prompt_hash: String,
 }
@@ -546,6 +547,7 @@ pub struct TranslationSpeedSample {
     pub status: String,
     pub failure_type: Option<String>,
     pub effective_batch_size: i64,
+    pub adaptive_decision_reason: String,
     pub model: Option<String>,
     pub prompt_hash: String,
     pub created_at: String,

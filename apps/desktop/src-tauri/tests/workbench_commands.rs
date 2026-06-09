@@ -1365,6 +1365,7 @@ fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
                     status: "success".to_string(),
                     failure_type: None,
                     effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture".to_string(),
                     model: Some("fixture-model".to_string()),
                     prompt_hash: prompt_hash.clone(),
                 })
