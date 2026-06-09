@@ -385,6 +385,7 @@
     const interpreterPrototype = scope && scope.Game_Interpreter && scope.Game_Interpreter.prototype;
     installInterpreterExecutionContextHook(scope, interpreterPrototype);
     installInterpreterChildOriginHook(scope, interpreterPrototype);
+    installGamePlayerTransferForesightHook(scope);
     if (interpreterPrototype
       && typeof interpreterPrototype.command101 === 'function'
       && interpreterPrototype.command101.__rpgTranslatorMessageOrigin !== FORESIGHT_ORIGIN_TOKEN) {
@@ -452,6 +453,38 @@
     interpreterPrototype.setupChild.__rpgTranslatorOriginal = original;
     interpreterPrototype.setupChild.__rpgTranslatorMessageOrigin = FORESIGHT_ORIGIN_TOKEN;
     return true;
+  }
+
+  function installGamePlayerTransferForesightHook(scope) {
+    const prototype = scope && scope.Game_Player && scope.Game_Player.prototype;
+    if (!prototype) return false;
+    const reserveHooked = wrapGamePlayerTransferForesightMethod(scope, prototype, 'reserveTransfer', 'map-transfer-reserved');
+    const performHooked = wrapGamePlayerTransferForesightMethod(scope, prototype, 'performTransfer', 'map-transfer-started');
+    return reserveHooked || performHooked;
+  }
+
+  function wrapGamePlayerTransferForesightMethod(scope, prototype, methodName, reason) {
+    if (!prototype || typeof prototype[methodName] !== 'function') return false;
+    if (prototype[methodName].__rpgTranslatorMessageOrigin === FORESIGHT_ORIGIN_TOKEN) return false;
+    const original = prototype[methodName];
+    prototype[methodName] = function transferWithForesightClear(...args) {
+      clearForesightState(scope, reason);
+      return original.apply(this, args);
+    };
+    prototype[methodName].__rpgTranslatorOriginal = original;
+    prototype[methodName].__rpgTranslatorMessageOrigin = FORESIGHT_ORIGIN_TOKEN;
+    return true;
+  }
+
+  function clearForesightState(scope, reason) {
+    const scanner = scope && scope.RPGTranslatorOverlay && scope.RPGTranslatorOverlay.foresightScanner;
+    if (scanner && typeof scanner.clearSnapshot === 'function') {
+      try {
+        scanner.clearSnapshot(reason);
+      } catch (_) {
+        // Map transfer must remain game-safe even if diagnostics state is unavailable.
+      }
+    }
   }
 
   function createPendingMessageOrigin(scope, interpreter) {

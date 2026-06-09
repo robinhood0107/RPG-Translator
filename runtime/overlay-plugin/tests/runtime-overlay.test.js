@@ -3526,6 +3526,66 @@ test('boot passes exported foresight command catalog to scanner', async () => {
   assert.equal(root.RPGTranslatorOverlay.foresightScanner.getSnapshot().recent_scans[0].route_barriers, 0);
 });
 
+test('boot clears cache-only foresight state on map transfers', async () => {
+  const root = {
+    document: { body: null },
+    $gameMessage: { _texts: [] },
+    Window_Message: function WindowMessage() {},
+    Window_Base: function WindowBase() {},
+    Game_Player: function GamePlayer() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Base.prototype.drawText = function drawText() {};
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) { return text.length; };
+  root.Game_Player.prototype.reserveTransfer = function reserveTransfer() {
+    this.reserved = true;
+    return 'reserved';
+  };
+  root.Game_Player.prototype.performTransfer = function performTransfer() {
+    this.performed = true;
+    return 'performed';
+  };
+
+  await Boot.install(root, {
+    bundle: {
+      manifest: { schema_version: 1, key_schema_version: 'v1', source_language: 'en', target_language: 'ko' },
+      config: { startup_toast_enabled: false },
+      records: [],
+    },
+    engine: 'mz',
+  });
+
+  const origin = {
+    list: [
+      { code: 101, indent: 0, parameters: [] },
+      { code: 401, indent: 0, parameters: ['Current'] },
+      { code: 101, indent: 0, parameters: [] },
+      { code: 401, indent: 0, parameters: ['Next'] },
+    ],
+    nextIndex: 2,
+    indent: 0,
+    interpreterId: 'map',
+  };
+  const player = new root.Game_Player();
+
+  root.RPGTranslatorOverlay.foresightScanner.collectUpcomingMessageBlocks({ currentMessageOrigin: origin });
+  assert.equal(root.RPGTranslatorOverlay.foresightScanner.getSnapshot().recent_scans.length, 1);
+  assert.equal(player.reserveTransfer(), 'reserved');
+  assert.equal(player.reserved, true);
+  assert.equal(root.RPGTranslatorOverlay.foresightScanner.getSnapshot().recent_scans.length, 0);
+
+  root.RPGTranslatorOverlay.foresightScanner.collectUpcomingMessageBlocks({ currentMessageOrigin: origin });
+  assert.equal(root.RPGTranslatorOverlay.foresightScanner.getSnapshot().recent_scans.length, 1);
+  assert.equal(player.performTransfer(), 'performed');
+  assert.equal(player.performed, true);
+  assert.equal(root.RPGTranslatorOverlay.foresightScanner.getSnapshot().recent_scans.length, 0);
+
+  root.RPGTranslatorOverlay.foresightScanner.clearSnapshot = function clearSnapshotFailure() {
+    throw new Error('diagnostics unavailable');
+  };
+  assert.equal(player.reserveTransfer(), 'reserved');
+});
+
 test('RPG Maker plugin entry loads support modules in deterministic order and boots overlay', async () => {
   const loaded = [];
   const baseUrl = 'file:///game/js/plugins/rpg-translator/';
