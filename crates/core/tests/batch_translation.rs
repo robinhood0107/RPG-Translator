@@ -151,6 +151,24 @@ fn adaptive_tuning_uses_speed_history_for_initial_batch_and_delay() {
 }
 
 #[test]
+fn adaptive_tuning_uses_failure_only_history_conservatively() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let failure_samples = vec![
+        speed_sample("recoverable_provider", 16, 1_000),
+        speed_sample("parse_failed", 16, 1_000),
+        speed_sample("final_failed", 16, 1_000),
+    ];
+
+    let tuning = adaptive_translation_tuning_from_samples(&failure_samples, 16, 4096, spacing);
+
+    assert_eq!(tuning.max_items_per_batch, 8);
+    assert_eq!(tuning.input_token_budget, 2048);
+    assert_eq!(tuning.provider_spacing.base_success_spacing_ms, 1500);
+    assert!(tuning.decision_reason.contains("conservative"));
+    assert!(tuning.decision_reason.contains("failure_rate=100%"));
+}
+
+#[test]
 fn adaptive_tuning_uses_real_prompt_benchmark_samples() {
     let spacing = ProviderRequestSpacingConfig::stable();
     let benchmark_samples = vec![
@@ -650,8 +668,10 @@ fn provider_503_is_retry_pending_until_retry_succeeds() {
         .recent_translation_speed_samples(None, None, 10)
         .expect("speed samples");
     assert!(
-        samples.iter().any(|sample| sample.status == "recoverable_provider"
-            && sample.failure_type.as_deref() == Some("provider-503")),
+        samples
+            .iter()
+            .any(|sample| sample.status == "recoverable_provider"
+                && sample.failure_type.as_deref() == Some("provider-503")),
         "recoverable provider failures should seed adaptive failure-rate history"
     );
     assert!(

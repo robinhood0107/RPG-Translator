@@ -419,6 +419,21 @@ pub fn adaptive_translation_tuning_from_samples(
         .filter(|sample| is_success_speed_sample(sample) && sample.total_elapsed_ms > 0)
         .collect::<Vec<_>>();
     if success_samples.is_empty() {
+        if !samples.is_empty() {
+            let suggested_batch = (requested_batch_size / 2).max(1);
+            let token_budget = (default_token_budget / 2).clamp(1024, default_token_budget);
+            spacing.base_success_spacing_ms = spacing.base_success_spacing_ms.max(1_500);
+            return AdaptiveTranslationTuning {
+                max_items_per_batch: suggested_batch,
+                input_token_budget: token_budget,
+                provider_spacing: spacing.clone(),
+                decision_reason: format!(
+                    "adaptive: conservative from {} samples; failure_rate=100%; p95=unavailable; batch={suggested_batch}; token_budget={token_budget}; success_floor={}ms",
+                    samples.len(),
+                    spacing.base_success_spacing_ms
+                ),
+            };
+        }
         let success_floor_ms = spacing.base_success_spacing_ms;
         return AdaptiveTranslationTuning {
             max_items_per_batch: requested_batch_size,
