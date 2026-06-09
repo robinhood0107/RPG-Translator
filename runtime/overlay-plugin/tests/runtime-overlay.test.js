@@ -399,6 +399,42 @@ test('orchestrator records canonical items and rejects stale render commands', (
   assert.equal(diagnostics.detached_items, 0);
   assert.equal(diagnostics.archived_items, 0);
   assert.equal(diagnostics.queued_render_commands, 1);
+  assert.deepEqual(diagnostics.active.map((item) => [
+    item.id,
+    item.adapter,
+    item.kind,
+    item.state,
+    item.sourceText,
+    item.translationState,
+    item.lastRenderStatus,
+    item.history.map((event) => event.type),
+  ]), [[
+    command.itemId,
+    'window-text',
+    'drawText',
+    'active',
+    'Origin',
+    'hit',
+    'rejected',
+    ['observed', 'cacheHit', 'renderQueued', 'renderAccepted', 'renderRejected'],
+  ]]);
+  assert.deepEqual(diagnostics.detached, []);
+  assert.deepEqual(diagnostics.archived, []);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [
+    entry.id,
+    entry.itemId,
+    entry.status,
+    entry.reason,
+    entry.sourceText,
+    entry.translatedText,
+  ]), [[
+    command.id,
+    command.itemId,
+    'hit',
+    'stale-render',
+    'Origin',
+    '번역',
+  ]]);
   assert.deepEqual(diagnostics.recent_events.map((event) => [event.type, event.reason]), [
     ['observed', 'observed'],
     ['cacheHit', 'cache-hit'],
@@ -406,6 +442,63 @@ test('orchestrator records canonical items and rejects stale render commands', (
     ['renderAccepted', 'render-accepted'],
     ['renderRejected', 'stale-render'],
   ]);
+});
+
+test('orchestrator diagnostics snapshots detached and archived item lifecycle', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      return request.text === 'Lifecycle source' ? '라이프사이클 번역' : null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const command = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawTextEx',
+    surface,
+    slotKey: 'lifecycle',
+    text: 'Lifecycle source',
+    contextHash: 'menu-status',
+  });
+
+  assert.equal(orchestrator.detachItem(command.itemId), true);
+  let diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.active_items, 0);
+  assert.equal(diagnostics.detached_items, 1);
+  assert.equal(diagnostics.archived_items, 0);
+  assert.deepEqual(diagnostics.detached.map((item) => [
+    item.id,
+    item.state,
+    item.contextHash,
+    item.translationState,
+    item.history.map((event) => event.type),
+  ]), [[
+    command.itemId,
+    'detached',
+    'menu-status',
+    'hit',
+    ['observed', 'cacheHit', 'renderQueued'],
+  ]]);
+
+  assert.equal(orchestrator.archiveItem(command.itemId), true);
+  diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.active_items, 0);
+  assert.equal(diagnostics.detached_items, 0);
+  assert.equal(diagnostics.archived_items, 1);
+  assert.deepEqual(diagnostics.archived.map((item) => [
+    item.id,
+    item.state,
+    item.sourceText,
+    item.translationState,
+  ]), [[
+    command.itemId,
+    'archived',
+    'Lifecycle source',
+    'hit',
+  ]]);
 });
 
 test('orchestrator routes render commands through record subscriptions', () => {

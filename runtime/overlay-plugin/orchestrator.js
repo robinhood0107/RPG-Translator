@@ -2,6 +2,8 @@
   const { RenderGuard } = loadDependency(root, './render-guard');
   const DEFAULT_EVENT_LIMIT = 128;
   const MAX_EVENT_LIMIT = 512;
+  const DEFAULT_ITEM_HISTORY_LIMIT = 24;
+  const MAX_ITEM_HISTORY_LIMIT = 128;
   const TEXT_LIMIT = 160;
 
   class TextOrchestrator {
@@ -28,6 +30,7 @@
       this.now = typeof options.now === 'function' ? options.now : () => Date.now();
       this.eventSequence = 0;
       this.eventLimit = positiveInteger(options.eventLimit, DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT);
+      this.itemHistoryLimit = positiveInteger(options.itemHistoryLimit, DEFAULT_ITEM_HISTORY_LIMIT, MAX_ITEM_HISTORY_LIMIT);
       this.diagnosticState = {
         observed_items: 0,
         cache_hits: 0,
@@ -232,7 +235,12 @@
         detached_items: this.detachedItems.size,
         archived_items: this.archivedItems.size,
         queued_render_commands: this.renderQueue.length,
+        active: snapshotItems(this.activeItems),
+        detached: snapshotItems(this.detachedItems),
+        archived: snapshotItems(this.archivedItems),
         recent_events: this.events.slice(),
+        events: this.events.slice(),
+        renderQueue: this.renderQueue.map(cloneRenderCommand),
       });
       if (this.runtimeDiagnostics && typeof this.runtimeDiagnostics.snapshot === 'function') {
         diagnostics.runtime_diagnostics = this.runtimeDiagnostics.snapshot({ detailView: false });
@@ -458,8 +466,10 @@
 
     emit(type, payload) {
       const event = { type, payload };
-      this.events.push(this.toDiagnosticEvent(type, payload));
+      const diagnosticEvent = this.toDiagnosticEvent(type, payload);
+      this.events.push(diagnosticEvent);
       while (this.events.length > this.eventLimit) this.events.shift();
+      this.appendItemHistory(diagnosticEvent);
       for (const listener of this.listeners) {
         try {
           listener(event);
@@ -488,6 +498,18 @@
         current: stringValue(source.current),
         ownershipKind: type === 'ownershipConflict' ? stringValue(source.kind) : '',
       };
+    }
+
+    appendItemHistory(event) {
+      if (!event || !event.itemId) return;
+      const item = this.activeItems.get(event.itemId)
+        || this.detachedItems.get(event.itemId)
+        || this.archivedItems.get(event.itemId);
+      if (!item) return;
+      const history = Array.isArray(item.history) ? item.history : [];
+      history.push(Object.assign({}, event));
+      while (history.length > this.itemHistoryLimit) history.shift();
+      item.history = history;
     }
   }
 
@@ -540,6 +562,49 @@
     const text = stringValue(value);
     if (text.length <= TEXT_LIMIT) return text;
     return `${text.slice(0, TEXT_LIMIT)}...`;
+  }
+
+  function snapshotItems(map) {
+    return Array.from(map.values()).map(cloneItemForDiagnostics);
+  }
+
+  function cloneItemForDiagnostics(item) {
+    const source = item && typeof item === 'object' ? item : {};
+    return {
+      id: stringValue(source.id),
+      adapter: stringValue(source.adapter),
+      kind: stringValue(source.kind),
+      surfaceId: stringValue(source.surfaceId),
+      slotId: stringValue(source.slotId),
+      sourceText: limitText(source.sourceText),
+      contextHash: source.contextHash === null || typeof source.contextHash === 'undefined'
+        ? null
+        : stringValue(source.contextHash),
+      generation: numberOrDefault(source.generation, 0),
+      renderStrategy: stringValue(source.renderStrategy),
+      state: stringValue(source.state),
+      translationState: stringValue(source.translationState),
+      lastRenderStatus: stringValue(source.lastRenderStatus),
+      history: Array.isArray(source.history)
+        ? source.history.map((event) => Object.assign({}, event))
+        : [],
+    };
+  }
+
+  function cloneRenderCommand(command) {
+    const source = command && typeof command === 'object' ? command : {};
+    return {
+      id: stringValue(source.id),
+      itemId: stringValue(source.itemId),
+      surfaceId: stringValue(source.surfaceId),
+      slotId: stringValue(source.slotId),
+      sourceText: limitText(source.sourceText),
+      translatedText: limitText(source.translatedText),
+      status: stringValue(source.status),
+      reason: stringValue(source.reason),
+      strategy: stringValue(source.strategy),
+      generation: numberOrDefault(source.generation, 0),
+    };
   }
 
   function normalizeSurfaceDrawDecision(input) {
