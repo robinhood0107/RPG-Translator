@@ -813,6 +813,84 @@ test('orchestrator routes render commands through record subscriptions', () => {
   ]);
 });
 
+test('orchestrator contains lightweight render subscription callback errors', () => {
+  const acceptedSurface = {};
+  const rejectedSurface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Lightweight queued error') return '가벼운 큐 오류';
+      if (request.text === 'Lightweight accepted') return '가벼운 승인';
+      if (request.text === 'Lightweight rejected') return '가벼운 거부';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    onRenderQueued(command) {
+      if (command.sourceText === 'Lightweight queued error') {
+        throw new Error('queued callback exploded');
+      }
+      return true;
+    },
+    onRenderAccepted() {
+      throw new Error('accepted callback exploded');
+    },
+    onRenderRejected() {
+      throw new Error('rejected callback exploded');
+    },
+  });
+
+  const queuedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'lightweight-queued-error',
+    text: 'Lightweight queued error',
+    renderStrategy: 'window-text',
+  });
+  const acceptedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: acceptedSurface,
+    slotKey: 'lightweight-accepted',
+    text: 'Lightweight accepted',
+    renderStrategy: 'window-text',
+  });
+  const rejectedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: rejectedSurface,
+    slotKey: 'lightweight-rejected',
+    text: 'Lightweight rejected',
+    renderStrategy: 'window-text',
+  });
+  assert.equal(orchestrator.acceptRender(acceptedCommand, acceptedSurface, 'Lightweight accepted'), true);
+  orchestrator.markSurfaceChanged(rejectedSurface);
+  assert.equal(orchestrator.acceptRender(rejectedCommand, rejectedSurface, 'Lightweight rejected'), false);
+  unsubscribe();
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.render_queued'
+    && event.itemId === queuedCommand.itemId
+  )));
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.render_accepted'
+    && event.itemId === acceptedCommand.itemId
+  )));
+  assert.ok(diagnostics.recent_events.some((event) => (
+    event.type === 'adapterCallbackError'
+    && event.reason === 'subscribeRecords.render_rejected'
+    && event.itemId === rejectedCommand.itemId
+  )));
+});
+
 test('orchestrator validates record-backed render subscriptions and reports decisions', () => {
   const records = new Map();
   const routed = [];

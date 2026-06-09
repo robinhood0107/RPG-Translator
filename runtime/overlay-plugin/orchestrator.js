@@ -543,9 +543,19 @@
             return;
           }
           const route = this.renderRoute('item.render_queued', command);
-          const decision = source.onRenderQueued(command, route);
+          let decision = null;
+          try {
+            decision = source.onRenderQueued(command, route);
+          } catch (error) {
+            this.recordAdapterCallbackError('render_queued', command.itemId || route.itemId, error);
+            return;
+          }
           if (decision === false && typeof source.onRenderRejected === 'function') {
-            source.onRenderRejected(command, this.renderRoute('item.render_rejected', command, 'adapter-declined'));
+            try {
+              source.onRenderRejected(command, this.renderRoute('item.render_rejected', command, 'adapter-declined'));
+            } catch (error) {
+              this.recordAdapterCallbackError('render_rejected', command.itemId || route.itemId, error);
+            }
           }
           return;
         }
@@ -554,11 +564,21 @@
           return;
         }
         if (event.type === 'renderAccepted' && typeof source.onRenderAccepted === 'function') {
-          source.onRenderAccepted(command, this.renderRoute('item.render_accepted', command));
+          const route = this.renderRoute('item.render_accepted', command);
+          try {
+            source.onRenderAccepted(command, route);
+          } catch (error) {
+            this.recordAdapterCallbackError('render_accepted', command.itemId || route.itemId, error);
+          }
           return;
         }
         if (event.type === 'renderRejected' && typeof source.onRenderRejected === 'function') {
-          source.onRenderRejected(command, this.renderRoute('item.render_rejected', command, 'render-rejected'));
+          const route = this.renderRoute('item.render_rejected', command, 'render-rejected');
+          try {
+            source.onRenderRejected(command, route);
+          } catch (error) {
+            this.recordAdapterCallbackError('render_rejected', command.itemId || route.itemId, error);
+          }
         }
       });
     }
