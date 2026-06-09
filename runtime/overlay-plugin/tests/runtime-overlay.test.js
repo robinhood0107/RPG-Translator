@@ -1205,6 +1205,99 @@ test('orchestrator contains record-backed render decision callback errors', () =
   )));
 });
 
+test('orchestrator remembers record-backed events on adapter records', async () => {
+  const records = new Map();
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Remember render target') return '렌더 기억 대상';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const renderCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'remember-render-target',
+    text: 'Remember render target',
+    renderStrategy: 'window-text',
+  });
+  const skippedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'remember-skipped-target',
+    text: 'Remember skipped target',
+    renderStrategy: 'window-text',
+  });
+  const failedCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'remember-failed-target',
+    text: 'Remember failed target',
+    renderStrategy: 'window-text',
+  });
+  records.set(renderCommand.itemId, {
+    name: 'render-record',
+    generation: renderCommand.generation,
+    current: true,
+    status: 'detected',
+  });
+  records.set(skippedCommand.itemId, {
+    name: 'skipped-record',
+    status: 'detected',
+  });
+  records.set(failedCommand.itemId, {
+    name: 'failed-record',
+    status: 'detected',
+  });
+
+  const unsubscribe = orchestrator.subscribeRecords({
+    renderStrategy: 'window-text',
+    records,
+    getRenderGeneration(record) {
+      return record.generation;
+    },
+    isRenderTargetCurrent(record) {
+      return record.current === true;
+    },
+    onRenderQueued() {
+      return true;
+    },
+    onSkipped() {},
+    onFailed() {},
+  });
+
+  orchestrator.requestItemTranslation(renderCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  const skippedHandle = orchestrator.requestItemTranslation(skippedCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
+  assert.equal(await skippedHandle.promise, 'Remember skipped target');
+  orchestrator.retireItem(failedCommand.itemId, 'failed', {
+    eventType: 'item.failed',
+    message: 'adapter failed',
+  });
+  unsubscribe();
+
+  assert.equal(records.get(renderCommand.itemId).status, 'completed');
+  assert.equal(records.get(renderCommand.itemId).lastEventType, 'item.render_queued');
+  assert.equal(records.get(skippedCommand.itemId).status, 'skipped');
+  assert.equal(records.get(skippedCommand.itemId).lastEventType, 'requestSkipped');
+  assert.equal(records.get(skippedCommand.itemId).lastEventReason, 'cache-only-miss');
+  assert.equal(records.get(failedCommand.itemId).status, 'failed');
+  assert.equal(records.get(failedCommand.itemId).lastEventType, 'item.failed');
+  assert.equal(records.get(failedCommand.itemId).lastEventReason, 'adapter failed');
+});
+
 test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', () => {
   const orchestrator = new TextOrchestrator({
     translate(request) {

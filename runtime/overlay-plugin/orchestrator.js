@@ -609,9 +609,10 @@
         return false;
       }
 
+      let lifecycleRecord = target;
       let validationFailure = null;
       try {
-        const lifecycleRecord = resolveLifecycleRecord(source, target, command, route);
+        lifecycleRecord = resolveLifecycleRecord(source, target, command, route);
         validationFailure = this.validateSubscriptionRenderCommand(source, target, lifecycleRecord, command, route);
       } catch (error) {
         validationFailure = createAdapterRenderErrorDecision(command, route, error);
@@ -621,6 +622,7 @@
         return false;
       }
 
+      rememberSubscriptionRecordEvent(lifecycleRecord, route.recordId, { type: 'item.render_queued' }, route);
       let callbackDecision = null;
       try {
         callbackDecision = normalizeSubscriptionRenderCallbackDecision(
@@ -682,6 +684,7 @@
         return false;
       }
       if (!canTouchSubscriptionLifecycleRecord(target)) return false;
+      rememberSubscriptionRecordEvent(target, recordId, event, route);
       try {
         handler(target, event, route);
       } catch (error) {
@@ -1222,6 +1225,52 @@
       return source.getLifecycleRecord(target, command, route) || null;
     }
     return target || null;
+  }
+
+  function rememberSubscriptionRecordEvent(record, recordId, event, route) {
+    if (!record || (typeof record !== 'object' && typeof record !== 'function')) return null;
+    const eventType = String(event && event.type || (route && route.eventType) || '');
+    const reason = String(
+      (route && route.reason)
+      || (event && event.reason)
+      || (event && event.message)
+      || '',
+    );
+    const nextStatus = subscriptionRecordStatusForEvent(eventType, route && route.status);
+    try {
+      if (recordId) record.recordId = String(recordId);
+      if (eventType) record.lastEventType = eventType;
+      if (reason) record.lastEventReason = reason;
+      if (nextStatus) {
+        record.status = nextStatus;
+        record.lastEventStatus = nextStatus;
+        if (nextStatus === 'stale' || nextStatus === 'disappeared' || nextStatus === 'removed') {
+          record.active = false;
+          record.requestActive = false;
+        } else if (nextStatus === 'pending' || nextStatus === 'translating') {
+          record.requestActive = true;
+        } else {
+          record.requestActive = false;
+        }
+      }
+      record.updatedAt = Date.now();
+    } catch (_error) {
+      return null;
+    }
+    return record;
+  }
+
+  function subscriptionRecordStatusForEvent(eventType, fallbackStatus) {
+    const type = String(eventType || '');
+    if (type === 'item.render_queued') return 'completed';
+    if (type === 'requestSkipped' || type === 'item.skipped') return 'skipped';
+    if (type === 'item.failed' || type === 'item.translation_noop' || type === 'item.translation_noop_detached') {
+      return 'failed';
+    }
+    if (type === 'item.stale') return 'stale';
+    if (type === 'item.disappeared') return 'disappeared';
+    if (type === 'item.removed') return 'removed';
+    return normalizeSubscriptionRecordStatus(fallbackStatus);
   }
 
   function validateSubscriptionGeneration(source, target, command, route) {
