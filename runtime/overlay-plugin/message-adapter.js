@@ -44,13 +44,13 @@
           scope.$gameMessage._texts = translatedLines(translated, originalText, this);
         }
         if (translated && translated !== originalText) {
-          redrawMessageFallback(this, translated, originalText);
+          redrawMessageFallback(scope, this, translated, originalText);
         }
         return translated;
       };
       installProcessCharacterFallback(prototype, scope, translator, trackedWindows);
       installWindowLifecycleHooks(prototype, translator, trackedWindows);
-      installPendingRedrawHook(prototype);
+      installPendingRedrawHook(prototype, scope);
       prototype.__rpgTranslatorMessageInstalled = INSTALL_TOKEN;
       wrapGameMessageClear(scope, translator, trackedWindows);
       return true;
@@ -179,13 +179,13 @@
     });
   }
 
-  function installPendingRedrawHook(prototype) {
+  function installPendingRedrawHook(prototype, scope) {
     if (!prototype || typeof prototype.update !== 'function') return false;
     if (prototype.update.__rpgTranslatorMessagePendingRedraw === LIFECYCLE_TOKEN) return true;
     const original = prototype.update;
     prototype.update = function messageUpdateWithPendingRedraw(...args) {
       const result = original.apply(this, args);
-      applyPendingMessageRedraw(this);
+      applyPendingMessageRedraw(scope, this);
       return result;
     };
     prototype.update.__rpgTranslatorOriginal = original;
@@ -327,7 +327,7 @@
     return windowInstance[STATE_KEY];
   }
 
-  function redrawMessageFallback(windowInstance, translated, originalText) {
+  function redrawMessageFallback(scope, windowInstance, translated, originalText) {
     if (!windowInstance) return false;
     const state = ensureState(windowInstance);
     if (!isMessageWindowReady(windowInstance)) {
@@ -338,18 +338,18 @@
       return false;
     }
     state.pendingRedraw = null;
-    return drawMessageTextExFallback(windowInstance, translated, originalText);
+    return drawMessageTextExFallback(scope, windowInstance, translated, originalText);
   }
 
-  function applyPendingMessageRedraw(windowInstance) {
+  function applyPendingMessageRedraw(scope, windowInstance) {
     const state = getState(windowInstance);
     const pending = state && state.pendingRedraw ? state.pendingRedraw : null;
     if (!pending || !isMessageWindowReady(windowInstance)) return false;
     state.pendingRedraw = null;
-    return drawMessageTextExFallback(windowInstance, pending.text, pending.originalText);
+    return drawMessageTextExFallback(scope, windowInstance, pending.text, pending.originalText);
   }
 
-  function drawMessageTextExFallback(windowInstance, translated, originalText) {
+  function drawMessageTextExFallback(scope, windowInstance, translated, originalText) {
     if (!windowInstance || typeof windowInstance.drawTextEx !== 'function') return false;
     const contents = windowInstance.contents;
     if (contents && typeof contents.clear === 'function') {
@@ -357,6 +357,7 @@
     }
     if (typeof windowInstance.resetFontSettings === 'function') windowInstance.resetFontSettings();
     drawMessageFaceIfNeeded(windowInstance);
+    const scaleScope = createMessageTextScaleScope(scope, windowInstance);
     const text = redrawText(translated, originalText, windowInstance);
     const x = finiteNumber(windowInstance._trMsgStartX, 0);
     const y = finiteNumber(windowInstance._trMsgStartY, 0);
@@ -364,9 +365,140 @@
     try {
       windowInstance.drawTextEx(text, x, y);
     } finally {
+      if (scaleScope && typeof scaleScope.restore === 'function') scaleScope.restore();
       windowInstance.__rpgTranslatorMessageRedrawDepth = Math.max(0, (windowInstance.__rpgTranslatorMessageRedrawDepth || 1) - 1);
     }
     return true;
+  }
+
+  function createMessageTextScaleScope(scope, windowInstance) {
+    const scalePercent = resolveMessageTextScale(scope);
+    if (!windowInstance || !windowInstance.contents || !shouldScaleText(scalePercent)) return null;
+
+    const contents = windowInstance.contents;
+    const originalState = captureBitmapDrawState(contents);
+    const originalResetFontSettings = windowInstance.resetFontSettings;
+    const hadOwnReset = Object.prototype.hasOwnProperty.call(windowInstance, 'resetFontSettings');
+    const originalMakeFontBigger = windowInstance.makeFontBigger;
+    const hadOwnBigger = Object.prototype.hasOwnProperty.call(windowInstance, 'makeFontBigger');
+    const originalMakeFontSmaller = windowInstance.makeFontSmaller;
+    const hadOwnSmaller = Object.prototype.hasOwnProperty.call(windowInstance, 'makeFontSmaller');
+    let logicalFontSize = positiveNumber(contents.fontSize, null);
+
+    const refreshLogicalFontSize = () => {
+      const current = positiveNumber(contents.fontSize, null);
+      if (current !== null) logicalFontSize = current;
+    };
+    const applyScaledFontSize = () => {
+      if (logicalFontSize === null) return;
+      contents.fontSize = scaleFontSizeValue(logicalFontSize, scalePercent);
+    };
+    const invokeWithLogicalFontSize = (original, context, args) => {
+      if (logicalFontSize !== null) contents.fontSize = logicalFontSize;
+      const result = original.apply(context, args);
+      refreshLogicalFontSize();
+      applyScaledFontSize();
+      return result;
+    };
+
+    if (typeof originalResetFontSettings === 'function') {
+      windowInstance.resetFontSettings = function resetFontSettingsWithMessageTextScale(...args) {
+        const result = originalResetFontSettings.apply(this, args);
+        refreshLogicalFontSize();
+        applyScaledFontSize();
+        return result;
+      };
+    }
+    if (typeof originalMakeFontBigger === 'function') {
+      windowInstance.makeFontBigger = function makeFontBiggerWithMessageTextScale(...args) {
+        return invokeWithLogicalFontSize(originalMakeFontBigger, this, args);
+      };
+    }
+    if (typeof originalMakeFontSmaller === 'function') {
+      windowInstance.makeFontSmaller = function makeFontSmallerWithMessageTextScale(...args) {
+        return invokeWithLogicalFontSize(originalMakeFontSmaller, this, args);
+      };
+    }
+
+    applyScaledFontSize();
+    return {
+      restore() {
+        restoreWrappedMethod(windowInstance, 'resetFontSettings', originalResetFontSettings, hadOwnReset);
+        restoreWrappedMethod(windowInstance, 'makeFontBigger', originalMakeFontBigger, hadOwnBigger);
+        restoreWrappedMethod(windowInstance, 'makeFontSmaller', originalMakeFontSmaller, hadOwnSmaller);
+        applyBitmapDrawState(contents, originalState);
+      },
+    };
+  }
+
+  function resolveMessageTextScale(scope) {
+    const overlayApi = overlay(scope);
+    const settings = overlayApi.config || overlayApi.settings || {};
+    const gameMessage = settings && settings.gameMessage && typeof settings.gameMessage === 'object'
+      ? settings.gameMessage
+      : {};
+    const candidates = [
+      gameMessage.textScale,
+      gameMessage.text_scale,
+      settings.messageTextScale,
+      settings.message_text_scale,
+      settings.textScaleMessage,
+      settings.text_scale_message,
+      overlayApi.messageTextScalePercent,
+      overlayApi.textScalePercent,
+      settings.textScale,
+      settings.text_scale,
+    ];
+    for (const candidate of candidates) {
+      const numeric = Number(candidate);
+      if (Number.isFinite(numeric)) return numeric;
+    }
+    return 100;
+  }
+
+  function shouldScaleText(scalePercent) {
+    return Number.isInteger(scalePercent) && scalePercent > 0 && scalePercent < 100;
+  }
+
+  function scaleFontSizeValue(value, scalePercent) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return value;
+    return Math.max(1, Math.round(numeric * (scalePercent / 100)));
+  }
+
+  function captureBitmapDrawState(bitmap) {
+    if (!bitmap) return null;
+    const state = {};
+    let hasAny = false;
+    for (const key of ['fontFace', 'fontSize', 'fontBold', 'fontItalic', 'textColor', 'outlineColor', 'outlineWidth', 'paintOpacity']) {
+      if (bitmap[key] !== undefined) {
+        state[key] = bitmap[key];
+        hasAny = true;
+      }
+    }
+    return hasAny ? state : null;
+  }
+
+  function applyBitmapDrawState(bitmap, state) {
+    if (!bitmap || !state) return;
+    for (const [key, value] of Object.entries(state)) {
+      try { bitmap[key] = value; } catch (_) {}
+    }
+  }
+
+  function restoreWrappedMethod(target, name, original, hadOwnProperty) {
+    try {
+      if (hadOwnProperty) {
+        target[name] = original;
+      } else {
+        delete target[name];
+      }
+    } catch (_) {}
+  }
+
+  function positiveNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : fallback;
   }
 
   function drawMessageFaceIfNeeded(windowInstance) {

@@ -1207,6 +1207,63 @@ test('message adapter redraws message faces before fallback text', () => {
   ]);
 });
 
+test('message adapter applies and restores fallback text scale', () => {
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      config: { gameMessage: { textScale: 50 } },
+    },
+    $gameMessage: { _texts: ['Scale JP'] },
+    Window_Message: function WindowMessage() {
+      this.visible = true;
+      this.contents = {
+        fontSize: 20,
+        clear() {
+          calls.push(['clear', this.fontSize]);
+        },
+      };
+    },
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.isOpen = () => true;
+  root.Window_Message.prototype.resetFontSettings = function resetFontSettings() {
+    calls.push(['resetFontSettings', this.contents.fontSize]);
+  };
+  root.Window_Message.prototype.drawTextEx = function drawTextEx(text, x, y) {
+    calls.push(['drawTextEx', text, x, y, this.contents.fontSize]);
+    return text.length;
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Scale JP') return 'Scale KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.processCompleteMessage({
+    visible: 'Scale JP',
+    resolved: 'Scale JP',
+    translationSource: 'Scale JP',
+  }, 'session-scale');
+
+  assert.deepEqual(calls, [
+    ['clear', 20],
+    ['resetFontSettings', 20],
+    ['drawTextEx', 'Scale KO', 0, 0, 10],
+  ]);
+  assert.equal(messageWindow.contents.fontSize, 20);
+});
+
 test('message adapter falls back to processCharacter completed text capture', () => {
   const requests = [];
   const root = {
