@@ -1,4 +1,6 @@
 (function attach(root) {
+  const { MessageWrapper } = loadDependency(root, './wrapping');
+
   class MessageAdapter {
     static install(scope, translator) {
       if (!scope || !scope.Window_Message || !scope.Window_Message.prototype) return false;
@@ -12,10 +14,9 @@
           const translated = translateText(translator, scope, originalText, this);
           if (
             translated &&
-            translated !== originalText &&
-            countNewlines(translated) === countNewlines(originalText)
+            translated !== originalText
           ) {
-            message._texts = translated.split('\n');
+            message._texts = translatedLines(translated, originalText, this);
           }
         }
         if (typeof originalStartMessage === 'function') {
@@ -39,6 +40,16 @@
     return String(text || '').split('\n').length - 1;
   }
 
+  function translatedLines(translated, originalText, windowInstance) {
+    if (MessageWrapper && typeof MessageWrapper.wrap === 'function') {
+      return MessageWrapper.wrap(translated, { window: windowInstance });
+    }
+    if (countNewlines(translated) === countNewlines(originalText)) {
+      return String(translated).split('\n');
+    }
+    return String(originalText).split('\n');
+  }
+
   function translateText(translator, scope, text, surface) {
     const request = {
         engine: overlay(scope).engine || 'unknown',
@@ -60,6 +71,15 @@
 
   function overlay(scope) {
     return scope.RPGTranslatorOverlay || {};
+  }
+
+  function loadDependency(scope, modulePath) {
+    const overlayApi = scope.RPGTranslatorOverlay || {};
+    if (overlayApi.MessageWrapper) return overlayApi;
+    if (typeof module !== 'undefined' && module.exports && typeof require === 'function') {
+      return require(modulePath);
+    }
+    return overlayApi;
   }
 
   publish(root, { MessageAdapter });

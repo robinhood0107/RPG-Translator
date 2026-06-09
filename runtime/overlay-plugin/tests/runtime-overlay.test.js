@@ -17,6 +17,7 @@ const { RuntimeMissLogger } = require('../runtime-miss-logger');
 const { SpriteTextAdapter } = require('../sprite-text-adapter');
 const { StartupToast } = require('../startup-toast');
 const { TextCodec } = require('../text-codec');
+const { MessageWrapper } = require('../wrapping');
 const { WindowTextAdapter } = require('../window-text-adapter');
 
 test('text codec follows shared Rust/runtime vectors', () => {
@@ -293,6 +294,17 @@ test('orchestrator records canonical items and rejects stale render commands', (
   });
 });
 
+test('message wrapper preserves escapes and wraps soft lines by capacity', () => {
+  assert.deepEqual(
+    MessageWrapper.wrap('\\C[3]Emma\\C[0] has a very long thought', { capacity: 12 }),
+    ['\\C[3]Emma\\C[0] has a', 'very long', 'thought'],
+  );
+  assert.deepEqual(
+    MessageWrapper.wrap('아이콘 \\I[12] 테스트', { capacity: 10 }),
+    ['아이콘 \\I[12]', '테스트'],
+  );
+});
+
 test('startup toast appears once and auto-dismisses', () => {
   const removed = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
@@ -399,6 +411,31 @@ test('message adapter translates joined message blocks instead of individual 401
   assert.deepEqual(requests, ['Line one\nLine two']);
   assert.deepEqual(root.$gameMessage._texts, ['첫 줄', '둘째 줄']);
   assert.deepEqual(calls, ['WindowMessage', ['첫 줄', '둘째 줄']]);
+});
+
+test('message adapter wraps translated blocks when line counts differ', () => {
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['short', 'block'] },
+    Window_Message: function WindowMessage() {},
+  };
+  const calls = [];
+  root.Window_Message.prototype.contentsWidth = () => 120;
+  root.Window_Message.prototype.textWidth = () => 10;
+  root.Window_Message.prototype.startMessage = function startMessage() {
+    calls.push(root.$gameMessage._texts.slice());
+  };
+  const translator = {
+    translateText(request) {
+      if (request.text === 'short\nblock') return 'A translated sentence that wraps';
+      return null;
+    },
+  };
+
+  MessageAdapter.install(root, translator);
+  new root.Window_Message().startMessage();
+
+  assert.deepEqual(calls, [['A translated', 'sentence', 'that wraps']]);
 });
 
 test('bitmap sprite and pixi lite adapters translate cache hits in synthetic RPG Maker harness', () => {
@@ -522,6 +559,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}runtime-miss-logger.js`,
     `${baseUrl}lookup-index.js`,
     `${baseUrl}render-guard.js`,
+    `${baseUrl}wrapping.js`,
     `${baseUrl}orchestrator.js`,
     `${baseUrl}cache-loader.js`,
     `${baseUrl}message-adapter.js`,

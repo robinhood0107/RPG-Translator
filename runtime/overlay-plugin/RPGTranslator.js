@@ -5,6 +5,7 @@
     'runtime-miss-logger.js',
     'lookup-index.js',
     'render-guard.js',
+    'wrapping.js',
     'orchestrator.js',
     'cache-loader.js',
     'message-adapter.js',
