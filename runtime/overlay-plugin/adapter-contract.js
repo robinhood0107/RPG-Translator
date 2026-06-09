@@ -17,6 +17,7 @@
     const defaultHook = nonEmptyString(options.defaultHook, adapterId);
     const gateway = options.orchestratorGateway || options.gateway || null;
     const logger = options.logger || {};
+    const subscriptions = Object.create(null);
     const states = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
     const stateKey = `__rpgTranslatorAdapterRecordState_${safeIdPart(adapterId)}`;
     const statesById = new Map();
@@ -182,23 +183,33 @@
       if (!hasMethod('subscribeSurfaceDraws')) return false;
       const source = options && typeof options === 'object' ? options : {};
       if (typeof source.onDraw !== 'function') return false;
-      return callGateway('subscribeSurfaceDraws', () => gateway.subscribeSurfaceDraws((event) => {
+      const token = nonEmptyString(source.token, 'surface-draws');
+      return subscribeThrough('subscribeSurfaceDraws', token, () => gateway.subscribeSurfaceDraws((event) => {
         if (!event || typeof event !== 'object') return undefined;
         if (event.adapterId && String(event.adapterId) !== adapterId) return undefined;
         return source.onDraw(event.payload || {}, event);
-      }, { adapterId, token: nonEmptyString(source.token, 'surface-draws') }));
+      }, { adapterId, token }));
     }
 
-    function subscribe(listener) {
+    function subscribe(listener, token = '') {
       if (typeof listener !== 'function' || !hasMethod('subscribe')) return false;
-      const unsubscribe = callGateway('subscribe', () => gateway.subscribe(listener));
-      return unsubscribe === null ? false : unsubscribe;
+      return subscribeThrough('subscribe', token || 'default', () => gateway.subscribe(listener));
     }
 
     function subscribeRecords(options = {}) {
       if (!hasMethod('subscribeRecords')) return false;
       const source = options && typeof options === 'object' ? options : {};
-      return callGateway('subscribeRecords', () => gateway.subscribeRecords(wrapRecordSubscription(source)));
+      const token = nonEmptyString(source.token, source.subscriptionToken, source.renderStrategy, source.strategy, 'records');
+      return subscribeThrough('subscribeRecords', token, () => gateway.subscribeRecords(wrapRecordSubscription(source)));
+    }
+
+    function subscribeThrough(methodName, token, callback) {
+      const key = `${safeIdPart(adapterId)}:${safeIdPart(methodName)}:${safeIdPart(token || 'default')}`;
+      if (subscriptions[key]) return true;
+      const unsubscribe = callGateway(methodName, callback);
+      if (unsubscribe === null || unsubscribe === false) return false;
+      subscriptions[key] = unsubscribe || true;
+      return true;
     }
 
     function wrapRecordSubscription(source) {

@@ -1438,6 +1438,55 @@ test('adapter contract uses mycode-style ownership payload tokens', () => {
   assert.equal(orchestrator.diagnostics().surface_releases, 1);
 });
 
+test('adapter contract deduplicates tokenized subscriptions', () => {
+  const counts = {
+    subscribe: 0,
+    surface: 0,
+    records: 0,
+  };
+  const gateway = {
+    observeRecord() {
+      return { itemId: 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    retireItem() {
+      return {};
+    },
+    subscribe() {
+      counts.subscribe += 1;
+      return () => {};
+    },
+    subscribeSurfaceDraws() {
+      counts.surface += 1;
+      return () => {};
+    },
+    subscribeRecords() {
+      counts.records += 1;
+      return () => {};
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+
+  assert.equal(contract.subscribe(() => {}, 'same-token'), true);
+  assert.equal(contract.subscribe(() => {}, 'same-token'), true);
+  assert.equal(contract.subscribe(() => {}, 'other-token'), true);
+  assert.equal(counts.subscribe, 2);
+
+  assert.equal(contract.subscribeSurfaceDraws({ token: 'surface-token', onDraw() {} }), true);
+  assert.equal(contract.subscribeSurfaceDraws({ token: 'surface-token', onDraw() {} }), true);
+  assert.equal(counts.surface, 1);
+
+  assert.equal(contract.subscribeRecords({ token: 'records-token', onRenderQueued() {} }), true);
+  assert.equal(contract.subscribeRecords({ token: 'records-token', onRenderQueued() {} }), true);
+  assert.equal(counts.records, 1);
+});
+
 test('adapter contract remembers subscribed render skip and failure events', async () => {
   const records = new Map();
   const events = [];
@@ -1484,7 +1533,7 @@ test('adapter contract remembers subscribed render skip and failure events', asy
   renderRecord.generation = renderObserved.generation;
   renderRecord.current = true;
 
-  const unsubscribe = contract.subscribeRecords({
+  assert.equal(contract.subscribeRecords({
     renderStrategy: 'window-text',
     records,
     getRenderGeneration(record) {
@@ -1503,7 +1552,7 @@ test('adapter contract remembers subscribed render skip and failure events', asy
     onFailed(record, event, route) {
       events.push(['failed', record.name, event.type, route.reason]);
     },
-  });
+  }), true);
 
   contract.updateItem(renderRecord, {
     sourceText: 'Contract subscribed source',
@@ -1529,8 +1578,6 @@ test('adapter contract remembers subscribed render skip and failure events', asy
   });
   assert.equal(contract.getRecordStatus(failedRecord), 'failed');
   assert.equal(contract.isRecordRequestActive(failedRecord), false);
-  unsubscribe();
-
   assert.deepEqual(events, [
     ['queued', 'render-record', '계약 구독 번역'],
     ['skipped', 'skipped-record', 'requestSkipped', 'cache-only-miss'],
