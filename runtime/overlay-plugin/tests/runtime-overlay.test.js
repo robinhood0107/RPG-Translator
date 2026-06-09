@@ -1030,6 +1030,50 @@ test('orchestrator records adapter render decisions against queued commands', ()
   ]);
 });
 
+test('orchestrator recordDraw keeps received and drawn translations distinct', () => {
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Draw source') return '수신 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const command = orchestrator.observeRecord({
+    adapter: 'bitmap-text',
+    kind: 'Bitmap.drawText',
+    surface: {},
+    slotKey: 'draw-record',
+    text: 'Draw source',
+    renderStrategy: 'bitmap-text',
+  });
+
+  const rendered = orchestrator.recordDraw(command.itemId, 'bitmap replay', {
+    translationReceived: '수신 번역',
+    translationDrawn: '화면 번역',
+    text: 'fallback text should not win',
+  });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(rendered.id, command.itemId);
+  assert.equal(rendered.translationReceived, '수신 번역');
+  assert.equal(rendered.translationDrawn, '화면 번역');
+  assert.equal(rendered.translation, '화면 번역');
+  assert.equal(diagnostics.active[0].translationReceived, '수신 번역');
+  assert.equal(diagnostics.active[0].translationDrawn, '화면 번역');
+  assert.equal(diagnostics.active[0].translation, '화면 번역');
+  assert.deepEqual(diagnostics.recent_events.slice(-1).map((event) => [
+    event.type,
+    event.reason,
+    event.translatedText,
+  ]), [
+    ['item.rendered', 'bitmap replay', '화면 번역'],
+  ]);
+});
+
 test('orchestrator routes render commands through record subscriptions', () => {
   const surface = {};
   const routed = [];
@@ -1640,6 +1684,46 @@ test('adapter contract wraps cache-only orchestrator lifecycle for adapter recor
   assert.equal(contract.retireItem(record, 'removed').status, 'removed');
   assert.equal(contract.isRecordActive(record), false);
   assert.equal(contract.requestItemTranslation(record), false);
+});
+
+test('adapter contract forwards recordDraw through cache-only lifecycle', () => {
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Contract draw source') return '계약 수신';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+  const record = { name: 'draw-record' };
+
+  const observed = contract.observeRecord(record, {
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'contract-draw',
+    text: 'Contract draw source',
+    renderStrategy: 'window-text',
+  });
+  const rendered = contract.recordDraw(record, 'drawText replay', {
+    receivedTranslation: '계약 수신',
+    drawnText: '계약 화면',
+  });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(observed.itemId, record.recordId);
+  assert.equal(rendered.translationReceived, '계약 수신');
+  assert.equal(rendered.translationDrawn, '계약 화면');
+  assert.equal(contract.getRecordStatus(record), 'completed');
+  assert.deepEqual(diagnostics.active[0].history.slice(-1).map((event) => [event.type, event.reason]), [
+    ['item.rendered', 'drawText replay'],
+  ]);
 });
 
 test('adapter contract uses mycode-style ownership payload tokens', () => {

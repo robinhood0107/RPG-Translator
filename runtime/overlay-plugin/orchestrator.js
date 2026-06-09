@@ -189,6 +189,7 @@
       if (Object.prototype.hasOwnProperty.call(source, 'strategy')) item.renderStrategy = String(source.strategy || '');
       if (Object.prototype.hasOwnProperty.call(source, 'translationState')) item.translationState = String(source.translationState || '');
       if (Object.prototype.hasOwnProperty.call(source, 'translationReceived')) item.translationReceived = String(source.translationReceived || '');
+      if (Object.prototype.hasOwnProperty.call(source, 'translationDrawn')) item.translationDrawn = String(source.translationDrawn || '');
       if (Object.prototype.hasOwnProperty.call(source, 'translation')) item.translation = String(source.translation || '');
       if (Object.prototype.hasOwnProperty.call(source, 'status')) item.status = String(source.status || item.state || '');
       if (Object.prototype.hasOwnProperty.call(source, 'priority')) item.priority = normalizePriority(source.priority);
@@ -199,6 +200,7 @@
       if (previousSourceText !== item.sourceText) {
         item.translationState = '';
         item.translationReceived = '';
+        item.translationDrawn = '';
         item.translation = '';
         item.sourceHint = '';
         item.lastRenderStatus = '';
@@ -253,6 +255,28 @@
         translatedText,
       }, item));
       return createCacheOnlyHandle(String(translatedText), 'completed', sourceHint);
+    }
+
+    recordDraw(itemId, eventName = 'draw', details = null) {
+      const source = details && typeof details === 'object' ? details : {};
+      const patch = {};
+      const drawnText = firstNonEmpty(
+        source.translationDrawn,
+        source.drawnTranslation,
+        source.drawnText,
+        source.text,
+      );
+      const receivedText = firstNonEmpty(source.translationReceived, source.receivedTranslation);
+      if (drawnText) {
+        patch.translation = drawnText;
+        patch.translationDrawn = drawnText;
+      }
+      if (receivedText) patch.translationReceived = receivedText;
+      return this.updateItem(itemId, patch, {
+        eventType: 'item.rendered',
+        message: String(eventName || 'draw'),
+        details: source,
+      });
     }
 
     cancelItemTranslation(itemId, reason = 'translation canceled', options = {}) {
@@ -1359,7 +1383,7 @@
         status: stringValue(source.status),
         reason: stringValue(source.reason || defaultEventReason(type, source)),
         sourceText: limitText(source.sourceText || source.text),
-        translatedText: limitText(source.translatedText),
+        translatedText: limitText(source.translatedText || source.translationDrawn || source.drawnTranslation || source.translation),
         owner: stringValue(source.owner),
         current: stringValue(source.current),
         ownershipKind: type === 'ownershipConflict' ? stringValue(source.kind) : '',
@@ -1509,6 +1533,7 @@
       backgrounded: source.backgrounded === true,
       translationState: stringValue(source.translationState),
       translationReceived: limitText(source.translationReceived),
+      translationDrawn: limitText(source.translationDrawn),
       translation: limitText(source.translation),
       lastRenderStatus: stringValue(source.lastRenderStatus),
       sourceHint: stringValue(source.sourceHint),

@@ -123,6 +123,21 @@
       return callGateway('recordDecision', () => gateway.recordDecision(id, type, message, details));
     }
 
+    function recordDraw(record, eventName = 'draw', details = null) {
+      if (!canTouchRecord(record) || !hasMethod('recordDraw')) return null;
+      const id = getCapabilityRecordId(record);
+      if (!id) return null;
+      const rendered = callGateway('recordDraw', () => gateway.recordDraw(id, eventName || 'draw', details));
+      if (rendered) {
+        rememberRecordEvent(record, id, {
+          type: 'item.rendered',
+          status: 'completed',
+          reason: String(eventName || 'draw'),
+        });
+      }
+      return rendered;
+    }
+
     function recordRenderAccepted(record, decision = {}) {
       return recordRenderDecision(record, 'recordRenderAccepted', decision);
     }
@@ -346,7 +361,7 @@
       setRecordStateId(state, id);
       if (event && event.status) updateRecordStateStatus(state, event.status);
       const eventType = String(event && event.type || '');
-      if (eventType === 'item.render_queued') updateRecordStateStatus(state, 'completed');
+      if (eventType === 'item.render_queued' || eventType === 'item.rendered') updateRecordStateStatus(state, 'completed');
       if (eventType === 'requestSkipped' || eventType === 'item.skipped') updateRecordStateStatus(state, 'skipped');
       if (eventType === 'item.failed'
         || eventType === 'item.translation_noop'
@@ -546,6 +561,7 @@
       backgroundItem,
       retireItem,
       recordDecision,
+      recordDraw,
       recordRenderAccepted,
       recordRenderDeferred,
       recordRenderRejected,
