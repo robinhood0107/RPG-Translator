@@ -381,6 +381,138 @@ test('message and window adapters translate cache hits in synthetic RPG Maker ha
   assert.equal(drawTextExResult, 'missing'.length);
 });
 
+test('window text adapter bypasses dedicated message windows', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Message JP') return 'Message KO';
+      return null;
+    },
+  };
+  const calls = [];
+  const root = {
+    Window_Base: function WindowBase() {},
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Base.prototype.drawText = function drawText(text) {
+    calls.push(text);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    calls.push(text);
+    return text.length;
+  };
+  root.Window_Message.prototype = Object.create(root.Window_Base.prototype);
+  root.Window_Message.prototype.constructor = root.Window_Message;
+
+  WindowTextAdapter.install(root, index);
+  const messageWindow = new root.Window_Message();
+  messageWindow.drawText('Message JP');
+
+  assert.deepEqual(calls, ['Message JP']);
+});
+
+test('window text adapter retires entries when window contents are mutated', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Menu JP') return 'Menu KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.contents = {
+        clear() {
+          calls.push(['contents-clear']);
+        },
+      };
+    },
+  };
+  root.Window_Base.prototype.drawText = function drawText(text, x, y) {
+    calls.push(['drawText', text, x, y]);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    calls.push(['drawTextEx', text]);
+    return text.length;
+  };
+
+  WindowTextAdapter.install(root, orchestrator);
+  const windowInstance = new root.Window_Base();
+  windowInstance.drawText('Menu JP', 1, 2);
+
+  assert.deepEqual(calls, [['drawText', 'Menu KO', 1, 2]]);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  windowInstance.contents.clear();
+
+  assert.deepEqual(calls, [['drawText', 'Menu KO', 1, 2], ['contents-clear']]);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+});
+
+test('window text adapter respects ownership and stale render rejection', () => {
+  const staleIndex = {
+    translate({ text }) {
+      if (text === 'Stale JP') return 'Stale KO';
+      return null;
+    },
+  };
+  const staleOrchestrator = new TextOrchestrator(staleIndex, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const staleTranslator = Object.create(staleOrchestrator);
+  staleTranslator.observeRecord = (request) => {
+    const command = staleOrchestrator.observeRecord(request);
+    staleOrchestrator.markSurfaceChanged(request.surface);
+    return command;
+  };
+  staleTranslator.acceptRender = (...args) => staleOrchestrator.acceptRender(...args);
+  staleTranslator.claimSurface = (...args) => staleOrchestrator.claimSurface(...args);
+  staleTranslator.claimText = (...args) => staleOrchestrator.claimText(...args);
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {},
+  };
+  root.Window_Base.prototype.drawText = function drawText(text) {
+    this.lastText = text;
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    this.lastText = text;
+    return text.length;
+  };
+
+  WindowTextAdapter.install(root, staleTranslator);
+  const staleWindow = new root.Window_Base();
+  staleWindow.drawText('Stale JP', 1, 2);
+  assert.equal(staleWindow.lastText, 'Stale JP');
+  assert.equal(staleOrchestrator.diagnostics().render_rejected, 1);
+
+  const ownedOrchestrator = new TextOrchestrator(staleIndex, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const otherRoot = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Window_Base: function OtherBase() {},
+  };
+  otherRoot.Window_Base.prototype.drawText = function drawText(text) { this.lastText = text; };
+  otherRoot.Window_Base.prototype.drawTextEx = function drawTextEx(text) { this.lastText = text; return text.length; };
+  WindowTextAdapter.install(otherRoot, ownedOrchestrator);
+  const conflictWindow = new otherRoot.Window_Base();
+  assert.equal(ownedOrchestrator.claimSurface(conflictWindow, 'bitmap-text'), true);
+  conflictWindow.drawText('Stale JP', 1, 2);
+  assert.equal(conflictWindow.lastText, 'Stale JP');
+  assert.equal(ownedOrchestrator.diagnostics().active_items, 0);
+});
+
 test('message adapter translates joined message blocks instead of individual 401 lines', () => {
   const requests = [];
   const index = {
