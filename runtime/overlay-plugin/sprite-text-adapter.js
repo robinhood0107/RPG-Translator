@@ -448,11 +448,25 @@
   function retireMissingParentRun(parent, translator, sprite) {
     const parentState = parent && parent[PARENT_RUN_KEY];
     if (!parentState) return false;
-    const key = parentState.lastActiveKeyByChild.get(sprite);
-    if (!key) return false;
-    const run = parentState.runs.get(key);
+    let key = parentState.lastActiveKeyByChild.get(sprite);
+    let run = key ? parentState.runs.get(key) : null;
+    if (!run) {
+      for (const [candidateKey, candidateRun] of parentState.runs.entries()) {
+        const group = Array.isArray(candidateRun && candidateRun.group) ? candidateRun.group : [];
+        if (group.some((item) => item && item.sprite === sprite)) {
+          key = candidateKey;
+          run = candidateRun;
+          break;
+        }
+      }
+    }
     if (!run) return false;
+    const group = Array.isArray(run.group) ? run.group : [];
+    group.forEach((item) => {
+      if (item && item.sprite) parentState.lastActiveKeyByChild.delete(item.sprite);
+    });
     parentState.lastActiveKeyByChild.delete(sprite);
+    if (key) parentState.runs.delete(key);
     return retireParentRun(run, translator, 'parent-run-not-seen');
   }
 
@@ -786,6 +800,7 @@
   function installLifecycleHooks(prototype, translator) {
     installDestroyHook(prototype, translator);
     installChildHook(prototype, 'removeChild', translator);
+    installRemoveChildAtHook(prototype, translator);
     installRemoveChildrenHook(prototype, translator);
   }
 
@@ -805,21 +820,23 @@
     if (typeof original !== 'function' || original.__rpgTranslatorSpriteChild === INSTALL_TOKEN) return;
     prototype[methodName] = function translatedSpriteChild(child, ...args) {
       const result = original.call(this, child, ...args);
-      if (child && child._rpgTranslatorSpriteTextOverlay) {
-        if (child.__rpgTranslatorSpriteTextDetachBypass) return result;
-        const source = child._rpgTranslatorSpriteTextSource;
-        retireSprite(source, translator, `${methodName}:overlay`);
-      } else if (child && child._rpgTranslatorSpriteTextParentRunOverlay) {
-        if (child.__rpgTranslatorSpriteTextDetachBypass) return result;
-        retireParentRun(child._rpgTranslatorSpriteTextParentRun, translator, `${methodName}:parent-run-overlay`);
-      } else {
-        retireMissingParentRun(this, translator, child);
-        retireSprite(child, translator, methodName);
-      }
+      handleRemovedChild(this, child, translator, methodName);
       return result;
     };
     prototype[methodName].__rpgTranslatorOriginal = original;
     prototype[methodName].__rpgTranslatorSpriteChild = INSTALL_TOKEN;
+  }
+
+  function installRemoveChildAtHook(prototype, translator) {
+    const original = prototype.removeChildAt;
+    if (typeof original !== 'function' || original.__rpgTranslatorSpriteRemoveChildAt === INSTALL_TOKEN) return;
+    prototype.removeChildAt = function translatedSpriteRemoveChildAt(...args) {
+      const child = original.apply(this, args);
+      handleRemovedChild(this, child, translator, 'removeChildAt');
+      return child;
+    };
+    prototype.removeChildAt.__rpgTranslatorOriginal = original;
+    prototype.removeChildAt.__rpgTranslatorSpriteRemoveChildAt = INSTALL_TOKEN;
   }
 
   function installRemoveChildrenHook(prototype, translator) {
@@ -828,20 +845,28 @@
     prototype.removeChildren = function translatedSpriteRemoveChildren(...args) {
       const before = childList(this).slice();
       const result = original.apply(this, args);
-      before.forEach((child) => {
-        if (child && child._rpgTranslatorSpriteTextOverlay) {
-          retireSprite(child._rpgTranslatorSpriteTextSource, translator, 'removeChildren:overlay');
-        } else if (child && child._rpgTranslatorSpriteTextParentRunOverlay) {
-          retireParentRun(child._rpgTranslatorSpriteTextParentRun, translator, 'removeChildren:parent-run-overlay');
-        } else {
-          retireMissingParentRun(this, translator, child);
-          retireSprite(child, translator, 'removeChildren');
-        }
-      });
+      before.forEach((child) => handleRemovedChild(this, child, translator, 'removeChildren'));
       return result;
     };
     prototype.removeChildren.__rpgTranslatorOriginal = original;
     prototype.removeChildren.__rpgTranslatorSpriteRemoveChildren = INSTALL_TOKEN;
+  }
+
+  function handleRemovedChild(parent, child, translator, reason) {
+    if (!child) return false;
+    if (child._rpgTranslatorSpriteTextOverlay) {
+      if (child.__rpgTranslatorSpriteTextDetachBypass) return false;
+      retireSprite(child._rpgTranslatorSpriteTextSource, translator, `${reason}:overlay`);
+      return true;
+    }
+    if (child._rpgTranslatorSpriteTextParentRunOverlay) {
+      if (child.__rpgTranslatorSpriteTextDetachBypass) return false;
+      retireParentRun(child._rpgTranslatorSpriteTextParentRun, translator, `${reason}:parent-run-overlay`);
+      return true;
+    }
+    retireMissingParentRun(parent, translator, child);
+    retireSprite(child, translator, reason);
+    return true;
   }
 
   function childList(sprite) {
