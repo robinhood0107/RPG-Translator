@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use crate::{Error, ProviderBatchRequest, ProviderBatchResponse, ProviderClient, Result};
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = concat!(
-    "Translate the user's text into Korean. Raw translation only, no explanations or alternative translations.\n",
-    "Format: JSON Lines. Return one JSON Line per input line containing raw translated output. {\"id\":123,\"translation\":\"translated text\"}\\n\n",
-    "Preserve every ¤ character exactly if one appears in the source text.",
+    "Translate RPG Maker game text. Return JSON Lines only, one JSON object per input item: ",
+    "{\"id\":123,\"translation\":\"translated text\"}.\n",
+    "Preserve RPG Maker control codes, placeholders, and line breaks exactly.",
 );
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,15 +88,10 @@ impl<T: LocalProviderTransport> LocalOpenAiProvider<T> {
         api_mode: LocalProviderApiMode,
         request: &ProviderBatchRequest,
     ) -> Value {
-        let system_prompt = self.config.system_prompt.trim();
-        let prompt = if system_prompt.is_empty() || system_prompt == DEFAULT_SYSTEM_PROMPT {
-            DEFAULT_SYSTEM_PROMPT.to_string()
-        } else {
-            format!("{system_prompt}\n{DEFAULT_SYSTEM_PROMPT}")
-        };
-        let prompt = format!(
-            "{prompt}\nSource language: {}. Target language: {}.",
-            self.config.source_language, self.config.target_language
+        let prompt = build_provider_system_prompt(
+            &self.config.system_prompt,
+            &self.config.source_language,
+            &self.config.target_language,
         );
         if api_mode == LocalProviderApiMode::LmStudio {
             let mut body = json!({
@@ -140,6 +135,77 @@ impl<T: LocalProviderTransport> LocalOpenAiProvider<T> {
             body["max_tokens"] = json!(max_output_tokens);
         }
         body
+    }
+}
+
+#[must_use]
+pub fn build_provider_system_prompt(
+    user_prompt: &str,
+    source_language: &str,
+    target_language: &str,
+) -> String {
+    let user_prompt = user_prompt.trim();
+    let prompt = if user_prompt.is_empty() || user_prompt == DEFAULT_SYSTEM_PROMPT {
+        DEFAULT_SYSTEM_PROMPT
+    } else {
+        return format!(
+            "{user_prompt}\n{DEFAULT_SYSTEM_PROMPT}\n\n{}",
+            final_translation_rule(
+                &language_display_name(source_language),
+                &language_display_name(target_language)
+            )
+        );
+    };
+    let source_language_name = language_display_name(source_language);
+    let target_language_name = language_display_name(target_language);
+    format!(
+        "{prompt}\n\n{}",
+        final_translation_rule(&source_language_name, &target_language_name)
+    )
+}
+
+fn final_translation_rule(source_language_name: &str, target_language_name: &str) -> String {
+    format!(
+        "System: You are an expert game localization engine. Your task is to translate the given text from {source_language_name} to {target_language_name}.\n\n\
+Strict Rules:\n\n\
+Formatting Protection: You MUST completely preserve the exact structural placement of the JSONL format, IDs, placeholders, RPG Maker control codes (e.g., \\N[1], \\C[3]), intended line/page breaks (\\n), and all ¤ characters. Do not translate, remove, or modify these technical elements.\n\n\
+Translation: Translate only the actual story/dialogue text into {target_language_name}.\n\n\
+Output Constraint: Output ONLY the final valid JSONL line. Do NOT include markdown code blocks (like ```json), greetings, explanations, or any extra text."
+    )
+}
+
+fn language_display_name(language: &str) -> String {
+    let trimmed = language.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "en" | "eng" | "english" => "English".to_string(),
+        "ja" | "jp" | "jpn" | "japanese" | "日本語" => "Japanese".to_string(),
+        "ko" | "kor" | "korean" | "한국어" => "Korean".to_string(),
+        "zh" | "zho" | "chinese" | "中文" => "Chinese".to_string(),
+        "zh-tw" | "zh_tw" | "traditional chinese" | "chinese traditional" => {
+            "Chinese Traditional".to_string()
+        }
+        "es" | "spa" | "spanish" => "Spanish".to_string(),
+        "fr" | "fra" | "fre" | "french" => "French".to_string(),
+        "de" | "deu" | "ger" | "german" => "German".to_string(),
+        "it" | "ita" | "italian" => "Italian".to_string(),
+        "pt" | "por" | "portuguese" => "Portuguese".to_string(),
+        "ru" | "rus" | "russian" => "Russian".to_string(),
+        "vi" | "vie" | "vietnamese" => "Vietnamese".to_string(),
+        "th" | "tha" | "thai" => "Thai".to_string(),
+        "id" | "ind" | "indonesian" => "Indonesian".to_string(),
+        "tr" | "tur" | "turkish" => "Turkish".to_string(),
+        "pl" | "pol" | "polish" => "Polish".to_string(),
+        "uk" | "ukr" | "ukrainian" => "Ukrainian".to_string(),
+        "ar" | "ara" | "arabic" => "Arabic".to_string(),
+        "hi" | "hin" | "hindi" => "Hindi".to_string(),
+        "ms" | "msa" | "malay" => "Malay".to_string(),
+        _ => {
+            if trimmed.is_empty() {
+                "the target language".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
     }
 }
 

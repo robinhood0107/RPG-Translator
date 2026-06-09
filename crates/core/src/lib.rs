@@ -51,6 +51,7 @@ pub use project_manifest::{
 };
 pub use provider::{
     DEFAULT_SYSTEM_PROMPT, LocalOpenAiConfig, LocalOpenAiProvider, LocalProviderTransport,
+    build_provider_system_prompt,
 };
 pub use scanner::{ExtractionRuleSet, GameScanner, RpgMakerDetector, ScanOptions};
 pub use text_codec::{ProviderTextState, TextCodec};

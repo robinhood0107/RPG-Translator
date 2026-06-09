@@ -5,7 +5,7 @@ use rpg_translator_core::{
     BatchTranslator, BatchTranslatorConfig, Engine, InstallStatusRecord, LocalOpenAiConfig,
     LocalOpenAiProvider, LocalProviderTransport, NewInstallRecord, NewProject, NewSourceText,
     NewTranslation, ProviderBatchRequest, Result, ScanOptions, TextCodec, TranslationDb,
-    TranslationJobProgressUpdate, WorkbenchService,
+    TranslationJobProgressUpdate, WorkbenchService, build_provider_system_prompt,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -114,15 +114,44 @@ fn local_openai_provider_builds_safe_request_and_parses_chat_response() -> Resul
     );
     assert!(system_prompt.contains("JSON Lines"));
     assert!(system_prompt.contains(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
+    assert!(system_prompt.contains("from Japanese to Korean"));
+    assert!(
+        system_prompt
+            .contains("Translation: Translate only the actual story/dialogue text into Korean.")
+    );
+    assert!(system_prompt.contains("Output ONLY the final valid JSONL line"));
     assert!(
         system_prompt.find(ui_prompt).expect("ui prompt present")
             < system_prompt
                 .find(rpg_translator_core::DEFAULT_SYSTEM_PROMPT)
                 .expect("rust default prompt present")
     );
+    assert!(
+        system_prompt
+            .find(rpg_translator_core::DEFAULT_SYSTEM_PROMPT)
+            .expect("rust default prompt present")
+            < system_prompt
+                .find("Strict Rules:")
+                .expect("final strict rules present")
+    );
     assert_eq!(response.raw_output, "{\"id\":1,\"translation\":\"안녕¤\"}");
 
     Ok(())
+}
+
+#[test]
+fn provider_prompt_builder_forces_display_target_language() {
+    let prompt = build_provider_system_prompt("Custom prompt.", "en", "vi");
+    assert!(prompt.starts_with("Custom prompt."));
+    assert!(prompt.contains(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
+    assert!(prompt.contains("from English to Vietnamese"));
+    assert!(prompt.contains("into Vietnamese"));
+    assert!(prompt.contains("Do NOT include markdown code blocks"));
+
+    let custom_target = build_provider_system_prompt("", "English", "Pirate Korean");
+    assert!(custom_target.starts_with(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
+    assert!(custom_target.contains("from English to Pirate Korean"));
+    assert!(custom_target.contains("into Pirate Korean"));
 }
 
 #[test]
