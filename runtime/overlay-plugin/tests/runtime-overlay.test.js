@@ -981,6 +981,42 @@ test('message adapter falls back to processCharacter completed text capture', ()
   assert.equal(orchestrator.diagnostics().active_items, 1);
 });
 
+test('message adapter retires active item when message window hides', () => {
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['Hide JP'] },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  root.Window_Message.prototype.hide = function hide() {
+    this.hidden = true;
+  };
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Hide JP') return 'Hide KO';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.startMessage();
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  messageWindow.hide();
+
+  assert.equal(messageWindow.hidden, true);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
+  assert.equal(orchestrator.diagnostics().surface_releases, 1);
+  assert.equal(orchestrator.diagnostics().text_releases, 1);
+});
+
 test('foresight scanner predicts message blocks choices and common events through cache only', () => {
   const requests = [];
   const index = {

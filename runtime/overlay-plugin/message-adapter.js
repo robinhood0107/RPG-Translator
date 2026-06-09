@@ -4,6 +4,7 @@
   const INSTALL_TOKEN = 'rpg-translator-message-v2';
   const CLEAR_TOKEN = 'rpg-translator-message-clear-v1';
   const PROCESS_TOKEN = 'rpg-translator-message-process-v1';
+  const LIFECYCLE_TOKEN = 'rpg-translator-message-lifecycle-v1';
 
   class MessageAdapter {
     static install(scope, translator) {
@@ -45,6 +46,7 @@
         return translated;
       };
       installProcessCharacterFallback(prototype, scope, translator, trackedWindows);
+      installWindowLifecycleHooks(prototype, translator, trackedWindows);
       prototype.__rpgTranslatorMessageInstalled = INSTALL_TOKEN;
       wrapGameMessageClear(scope, translator, trackedWindows);
       return true;
@@ -147,6 +149,27 @@
       scope.$gameMessage._texts = translatedLines(translated, sourceText, windowInstance);
     }
     state.processCharacterCompletedState = textState;
+  }
+
+  function installWindowLifecycleHooks(prototype, translator, trackedWindows) {
+    ['close', 'hide', 'destroy'].forEach((methodName) => {
+      const current = prototype && prototype[methodName];
+      if (typeof current !== 'function') return;
+      if (current.__rpgTranslatorMessageLifecycle === LIFECYCLE_TOKEN) return;
+      const original = current;
+      prototype[methodName] = function messageLifecycleWithRetire(...args) {
+        trackedWindows.add(this);
+        if (methodName === 'destroy') {
+          retireMessageWindow(translator, this, `message-window-${methodName}`);
+          return original.apply(this, args);
+        }
+        const result = original.apply(this, args);
+        retireMessageWindow(translator, this, `message-window-${methodName}`);
+        return result;
+      };
+      prototype[methodName].__rpgTranslatorOriginal = original;
+      prototype[methodName].__rpgTranslatorMessageLifecycle = LIFECYCLE_TOKEN;
+    });
   }
 
   function translateText(translator, scope, text, surface) {
