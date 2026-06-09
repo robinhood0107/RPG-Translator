@@ -614,6 +614,9 @@
       if (!lifecycleRecord || (typeof lifecycleRecord !== 'object' && typeof lifecycleRecord !== 'function')) {
         return createSubscriptionRenderDecision('rejected', 'missing-lifecycle-record', command, route);
       }
+      if (!canTouchSubscriptionLifecycleRecord(lifecycleRecord)) {
+        return createSubscriptionRenderDecision('rejected', 'inactive-record', command, route);
+      }
       const generationFailure = validateSubscriptionGeneration(source, target, command, route);
       if (generationFailure) return generationFailure;
       if (typeof source.isRenderTargetCurrent !== 'function') {
@@ -1088,6 +1091,21 @@
       });
     }
     return null;
+  }
+
+  function canTouchSubscriptionLifecycleRecord(record) {
+    if (!record || (typeof record !== 'object' && typeof record !== 'function')) return false;
+    if (record.active === false) return record.detached === true;
+    const status = normalizeSubscriptionRecordStatus(record.status);
+    if (!status) return true;
+    return status !== 'stale' && status !== 'disappeared' && status !== 'removed';
+  }
+
+  function normalizeSubscriptionRecordStatus(status) {
+    const value = String(status || '').toLowerCase();
+    if (value === 'cancelled' || value === 'canceled') return 'stale';
+    if (value === 'gone') return 'disappeared';
+    return value;
   }
 
   function createSubscriptionRenderDecision(status, reason, command, route, details = {}) {

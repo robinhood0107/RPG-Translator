@@ -822,6 +822,7 @@ test('orchestrator validates record-backed render subscriptions and reports deci
       if (request.text === 'Accepted target') return '승인 대상';
       if (request.text === 'Stale target') return '오래된 대상';
       if (request.text === 'Missing target') return '없는 대상';
+      if (request.text === 'Inactive target') return '비활성 대상';
       return null;
     },
   }, {
@@ -871,6 +872,22 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     renderStrategy: 'window-text',
   });
 
+  const inactiveCommand = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'inactive-target',
+    text: 'Inactive target',
+    renderStrategy: 'window-text',
+  });
+  records.set(inactiveCommand.itemId, {
+    name: 'inactive',
+    generation: inactiveCommand.generation,
+    current: true,
+    active: false,
+    decision: true,
+  });
+
   const unsubscribe = orchestrator.subscribeRecords({
     renderStrategy: 'window-text',
     records,
@@ -907,6 +924,10 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     renderStrategy: 'window-text',
     sourceHint: 'cache-only',
   });
+  orchestrator.requestItemTranslation(inactiveCommand.itemId, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  });
   unsubscribe();
 
   const diagnostics = orchestrator.diagnostics();
@@ -915,11 +936,12 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     ['accepted', 'accepted', 'accepted', acceptedCommand.id],
     ['rejected', 'stale', 'generation-mismatch', staleCommand.id],
     ['rejected', 'missing', 'missing-adapter-record', missingCommand.id],
+    ['rejected', 'inactive', 'inactive-record', inactiveCommand.id],
   ]);
   assert.deepEqual(misses, [[missingCommand.itemId, missingCommand.id, 'missing-adapter-record']]);
   assert.equal(diagnostics.render_accepted, 1);
-  assert.equal(diagnostics.render_rejected, 2);
-  assert.deepEqual(diagnostics.renderQueue.slice(-3).map((entry) => [
+  assert.equal(diagnostics.render_rejected, 3);
+  assert.deepEqual(diagnostics.renderQueue.slice(-4).map((entry) => [
     entry.id,
     entry.renderStatus,
     entry.renderReason,
@@ -927,6 +949,7 @@ test('orchestrator validates record-backed render subscriptions and reports deci
     [acceptedCommand.id, 'accepted', 'accepted'],
     [staleCommand.id, 'rejected', 'generation-mismatch'],
     [missingCommand.id, 'rejected', 'missing-adapter-record'],
+    [inactiveCommand.id, 'rejected', 'inactive-record'],
   ]);
 });
 
