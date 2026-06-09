@@ -2137,6 +2137,52 @@ test('adapter contract contains fallback subscribeRecords render callback errors
   ]);
 });
 
+test('adapter contract contains fallback subscribeRecords record event callback errors', () => {
+  const records = new Map();
+  let subscribed = null;
+  const gateway = {
+    observeRecord(payload) {
+      return { itemId: payload.id || 'item-1' };
+    },
+    requestItemTranslation() {
+      return true;
+    },
+    subscribe(listener) {
+      subscribed = listener;
+      return () => {};
+    },
+  };
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: gateway,
+  });
+  const record = {};
+
+  contract.observeRecord(record, {
+    id: 'fallback-record-event-error',
+    kind: 'drawText',
+    surface: {},
+    slotKey: 'fallback-event-error-slot',
+    text: 'Fallback event error source',
+    renderStrategy: 'window-text',
+  }, {}, { records });
+  assert.equal(contract.subscribeRecords({
+    token: 'fallback-event-error-records',
+    records,
+    onSkipped() {
+      throw new Error('fallback skipped callback exploded');
+    },
+  }), true);
+
+  assert.doesNotThrow(() => subscribed({
+    type: 'item.skipped',
+    id: 'fallback-record-event-error',
+    message: 'cache miss skipped',
+  }));
+  assert.equal(contract.getRecordStatus(record), 'skipped');
+});
+
 test('adapter contract remembers subscribed render skip and failure events', async () => {
   const records = new Map();
   const events = [];

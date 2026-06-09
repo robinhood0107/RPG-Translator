@@ -376,8 +376,13 @@
       if (!record) return dispatchSubscribedMissingRecord(source, route, event, command, operation);
       if (!canTouchRecord(record)) return false;
       rememberRecordEvent(record, recordId, event);
-      if (command) return handler(record, command, event, route);
-      return handler(record, event, route);
+      try {
+        if (command) handler(record, command, event, route);
+        else handler(record, event, route);
+      } catch (_error) {
+        return false;
+      }
+      return true;
     }
 
     function notifySubscribedRenderRejected(source, record, decision, route) {
@@ -398,13 +403,21 @@
 
     function dispatchSubscribedMissingRecord(source, route, event, command, operation) {
       if (typeof source.onMissingRecord !== 'function') return false;
-      source.onMissingRecord(route, event, command, operation);
+      try {
+        source.onMissingRecord(route, event, command, operation);
+      } catch (_error) {
+        return false;
+      }
       return true;
     }
 
     function resolveSubscribedRecord(source, recordId, event, command) {
       if (typeof source.resolveRecord === 'function') {
-        return source.resolveRecord(recordId, event, command) || null;
+        try {
+          return source.resolveRecord(recordId, event, command) || null;
+        } catch (_error) {
+          return null;
+        }
       }
       const records = getRecordRegistry(source);
       if (!records || typeof records.get !== 'function' || !recordId) return null;
