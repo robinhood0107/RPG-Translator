@@ -17,7 +17,7 @@ pub use batch::{
     CheckpointFailureDetail, CheckpointWriter, FakeProvider, ProviderBatchItem,
     ProviderBatchRequest, ProviderBatchResponse, ProviderClient, ProviderRequestSpacingConfig,
     ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport,
-    ProviderSpeedBenchmarkRun, ValidatedTranslation,
+    ProviderSpeedBenchmarkRun, ValidatedTranslation, translation_prompt_hash,
 };
 pub use cache_key::{CacheKeyBuilder, CacheKeyParts};
 pub use db::{SchemaMigrationReport, TranslationDb};
@@ -28,12 +28,13 @@ pub use domain::{
 pub use domain::{
     DataFileRecord, DetectedGame, Engine, ExportStatusRecord, ExtractedOccurrence, GameLayoutKind,
     InstallStatusRecord, NewInstallRecord, NewOccurrence, NewProject, NewProviderRun, NewQaFinding,
-    NewSourceText, NewTranslation, OccurrenceContext, OccurrenceSegment, ProjectRecord,
-    ProviderRunStatusRecord, QaFindingRecord, RejectedCandidate, ReviewCounts, ReviewQueueRow,
-    ReviewUpdateRequest, ScanPersistenceReport, ScanPersistenceStats, ScanProgressEvent,
-    ScanReport, SkippedDataFile, SourceTextRecord, TextAnalysis, TranslateProgressEvent,
-    TranslateProgressSnapshot, TranslationJobProgressUpdate, TranslationJobSummary,
-    TranslationRecord, WorkbenchDashboardSummary, WorkbenchSettingsRecord, WorkbenchSettingsUpdate,
+    NewSourceText, NewTranslation, NewTranslationSpeedSample, OccurrenceContext, OccurrenceSegment,
+    ProjectRecord, ProviderRunStatusRecord, QaFindingRecord, RejectedCandidate, ReviewCounts,
+    ReviewQueueRow, ReviewUpdateRequest, ScanPersistenceReport, ScanPersistenceStats,
+    ScanProgressEvent, ScanReport, SkippedDataFile, SourceTextRecord, TextAnalysis,
+    TranslateProgressEvent, TranslateProgressSnapshot, TranslationJobProgressUpdate,
+    TranslationJobSummary, TranslationRecord, TranslationSpeedSample, WorkbenchDashboardSummary,
+    WorkbenchSettingsRecord, WorkbenchSettingsUpdate,
 };
 pub use error::{Error, Result};
 pub use export::{

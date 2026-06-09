@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    Error, NewProviderRun, NewQaFinding, NewTranslation, ProviderTextState, Result,
-    SourceTextRecord, TextCodec, TranslateProgressEvent, TranslateProgressSnapshot, TranslationDb,
-    TranslationJobProgressUpdate,
+    Error, NewProviderRun, NewQaFinding, NewTranslation, NewTranslationSpeedSample,
+    ProviderTextState, Result, SourceTextRecord, TextCodec, TranslateProgressEvent,
+    TranslateProgressSnapshot, TranslationDb, TranslationJobProgressUpdate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,16 @@ enum BatchLane {
     Short,
     PlainBlock,
     Complex,
+}
+
+impl BatchLane {
+    fn as_key(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::PlainBlock => "plain_block",
+            Self::Complex => "complex",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +347,28 @@ pub struct BatchTranslatorConfig {
     pub provider_spacing: ProviderRequestSpacingConfig,
     pub source_text_ids: Option<Vec<i64>>,
     pub include_existing_translations: bool,
+    pub prompt_hash: String,
+}
+
+#[must_use]
+pub fn translation_prompt_hash(
+    source_language: &str,
+    target_language: &str,
+    system_prompt: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rpg-translator:prompt:v1");
+    update_hash_field(&mut hasher, "source_language", source_language);
+    update_hash_field(&mut hasher, "target_language", target_language);
+    update_hash_field(&mut hasher, "system_prompt", system_prompt);
+    hex::encode(hasher.finalize())
+}
+
+fn update_hash_field(hasher: &mut Sha256, name: &str, value: &str) {
+    hasher.update(name.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.as_bytes());
+    hasher.update([0xff]);
 }
 
 impl Default for BatchTranslatorConfig {
@@ -349,6 +382,7 @@ impl Default for BatchTranslatorConfig {
             provider_spacing: ProviderRequestSpacingConfig::stable(),
             source_text_ids: None,
             include_existing_translations: false,
+            prompt_hash: String::default(),
         }
     }
 }
@@ -1179,7 +1213,9 @@ impl BatchProcessor<'_> {
                     Ok(translations) => {
                         self.report.retry_pending_items = 0;
                         self.report.provider_backoff_ms = None;
-                        self.note_successful_provider_batch(elapsed_ms(request_started));
+                        let request_elapsed_ms = elapsed_ms(request_started);
+                        let success_delay_ms =
+                            self.note_successful_provider_batch(request_elapsed_ms);
                         let (translations, censored) =
                             split_censored_translations(batch, translations);
                         persist_translations(
@@ -1199,6 +1235,13 @@ impl BatchProcessor<'_> {
                         if let Some(path) = self.checkpoint_path {
                             CheckpointWriter::write_atomic(path, self.checkpoint)?;
                         }
+                        self.record_speed_sample(
+                            batch,
+                            request_elapsed_ms,
+                            success_delay_ms,
+                            "success",
+                            None,
+                        )?;
                         return Ok(());
                     }
                     Err(error) => {
@@ -1318,7 +1361,9 @@ impl BatchProcessor<'_> {
                     Ok(translations) => {
                         self.report.retry_pending_items = 0;
                         self.report.provider_backoff_ms = None;
-                        self.note_successful_provider_batch(elapsed_ms(request_started));
+                        let request_elapsed_ms = elapsed_ms(request_started);
+                        let success_delay_ms =
+                            self.note_successful_provider_batch(request_elapsed_ms);
                         let (translations, censored) =
                             split_censored_translations(batch, translations);
                         persist_translations(
@@ -1338,6 +1383,13 @@ impl BatchProcessor<'_> {
                         if let Some(path) = self.checkpoint_path {
                             CheckpointWriter::write_atomic(path, self.checkpoint)?;
                         }
+                        self.record_speed_sample(
+                            batch,
+                            request_elapsed_ms,
+                            success_delay_ms,
+                            "success_after_retry",
+                            None,
+                        )?;
                         return Ok(());
                     }
                     Err(error) => {
@@ -1389,7 +1441,7 @@ impl BatchProcessor<'_> {
             .or_insert(0) += source_count;
     }
 
-    fn note_successful_provider_batch(&mut self, request_elapsed_ms: u64) {
+    fn note_successful_provider_batch(&mut self, request_elapsed_ms: u64) -> u64 {
         self.report.provider_backoff_ms = None;
         self.report.success_streak = self.report.success_streak.saturating_add(1);
         self.report.speed_mode = "steady".to_string();
@@ -1439,6 +1491,35 @@ impl BatchProcessor<'_> {
         );
         self.report.next_delay_ms = (delay_ms > 0).then_some(delay_ms);
         sleep_success_delay(delay_ms);
+        delay_ms
+    }
+
+    fn record_speed_sample(
+        &mut self,
+        batch: &[BatchJob],
+        request_elapsed_ms: u64,
+        success_delay_ms: u64,
+        status: &str,
+        failure_type: Option<&str>,
+    ) -> Result<()> {
+        self.db
+            .insert_translation_speed_sample(&NewTranslationSpeedSample {
+                provider_run_id: self.provider_run_id,
+                batch_index: usize_to_i64(self.report.processed_batches.saturating_add(1)),
+                lane: batch_lane_key(batch).to_string(),
+                item_count: usize_to_i64(batch.len()),
+                char_count: usize_to_i64(batch_char_count(batch)),
+                estimated_token_count: usize_to_i64(batch_token_estimate(batch)),
+                request_elapsed_ms: u64_to_i64(request_elapsed_ms),
+                success_delay_ms: u64_to_i64(success_delay_ms),
+                total_elapsed_ms: u64_to_i64(request_elapsed_ms.saturating_add(success_delay_ms)),
+                status: status.to_string(),
+                failure_type: failure_type.map(str::to_string),
+                effective_batch_size: usize_to_i64(self.report.effective_batch_size),
+                model: self.provider.model_name().map(str::to_string),
+                prompt_hash: self.config.prompt_hash.clone(),
+            })?;
+        Ok(())
     }
 
     fn record_final_provider_failure(
@@ -1646,6 +1727,26 @@ fn success_delay_ms(
     computed
         .max(floor)
         .min(config.max_success_spacing_ms.max(floor))
+}
+
+fn batch_lane_key(batch: &[BatchJob]) -> &'static str {
+    batch
+        .iter()
+        .map(|job| job.lane)
+        .max()
+        .unwrap_or(BatchLane::PlainBlock)
+        .as_key()
+}
+
+fn batch_char_count(batch: &[BatchJob]) -> usize {
+    batch
+        .iter()
+        .map(|job| job.provider_text.chars().count())
+        .sum()
+}
+
+fn batch_token_estimate(batch: &[BatchJob]) -> usize {
+    batch.iter().map(|job| job.token_estimate).sum()
 }
 
 fn sleep_success_delay(delay_ms: u64) {

@@ -16,7 +16,7 @@ use rpg_translator_core::{
     LocalOpenAiProvider, LocalProviderTransport, ProviderBatchItem, ProviderBatchRequest,
     ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
     ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result, TextCodec,
-    TranslateProgressEvent, TranslateProgressSnapshot,
+    TranslateProgressEvent, TranslateProgressSnapshot, translation_prompt_hash,
 };
 
 use super::shared::{
@@ -248,6 +248,11 @@ async fn translate_with_local_provider_running(
         ) || source_text_ids.is_some();
         let checkpoint_path =
             translation_checkpoint_path(&request.db_path, &request.target_language);
+        let prompt_hash = translation_prompt_hash(
+            &request.source_language,
+            &request.target_language,
+            &request.system_prompt,
+        );
         let progress_state = state.clone();
         let report = BatchTranslator::run_with_checkpoint_and_progress(
             &mut db,
@@ -260,6 +265,7 @@ async fn translate_with_local_provider_running(
                 retry_attempts: 0,
                 source_text_ids,
                 include_existing_translations,
+                prompt_hash,
                 ..BatchTranslatorConfig::default()
             },
             Some(&checkpoint_path),

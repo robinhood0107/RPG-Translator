@@ -120,6 +120,7 @@ fn fake_provider_success_persists_batch_translations() {
         "ko",
         BatchTranslatorConfig {
             max_items_per_batch: 8,
+            prompt_hash: "prompt-fixture".to_string(),
             ..test_config()
         },
     )
@@ -141,6 +142,23 @@ fn fake_provider_success_persists_batch_translations() {
             .expect("second translation")
             .translated_text,
         "\u{c138}\u{acc4}\\N[1]"
+    );
+    let samples = db
+        .recent_translation_speed_samples(None, Some("prompt-fixture"), 10)
+        .expect("speed samples");
+    assert_eq!(samples.len(), 2);
+    assert!(samples.iter().all(|sample| sample.status == "success"));
+    assert!(samples.iter().all(|sample| sample.item_count == 1));
+    assert!(samples.iter().all(|sample| sample.char_count > 0));
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.lane == "short" && sample.estimated_token_count > 0)
+    );
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.lane == "complex" && sample.estimated_token_count > 0)
     );
 }
 

@@ -11,10 +11,10 @@ use crate::{
     BulkReviewApproveReport, DuplicateProjectCleanupReport, Engine, ExportStatusRecord,
     ExportableTranslationRecord, ExtractedOccurrence, GameSnapshotRecord, InstallRecord,
     InstallStatusRecord, NewInstallRecord, NewOccurrence, NewProject, NewProviderRun, NewQaFinding,
-    NewSourceText, NewTranslation, OccurrenceContext, OccurrenceSegment, ProjectRecord,
-    ProviderRunStatusRecord, QaFindingRecord, Result, ReviewCounts, ReviewQueueRow,
+    NewSourceText, NewTranslation, NewTranslationSpeedSample, OccurrenceContext, OccurrenceSegment,
+    ProjectRecord, ProviderRunStatusRecord, QaFindingRecord, Result, ReviewCounts, ReviewQueueRow,
     ReviewUpdateRequest, ScanPersistenceStats, SourceTextRecord, TextCodec,
-    TranslationJobProgressUpdate, TranslationJobSummary, TranslationRecord,
+    TranslationJobProgressUpdate, TranslationJobSummary, TranslationRecord, TranslationSpeedSample,
     WorkbenchDashboardSummary, WorkbenchSettingsRecord, WorkbenchSettingsUpdate,
 };
 
@@ -256,6 +256,25 @@ impl TranslationDb {
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS translation_speed_samples (
+                id INTEGER PRIMARY KEY,
+                provider_run_id INTEGER NOT NULL REFERENCES provider_runs(id) ON DELETE CASCADE,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                lane TEXT NOT NULL DEFAULT 'unknown',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                estimated_token_count INTEGER NOT NULL DEFAULT 0,
+                request_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                success_delay_ms INTEGER NOT NULL DEFAULT 0,
+                total_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'success',
+                failure_type TEXT,
+                effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                prompt_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS review_drafts (
                 source_text_id INTEGER NOT NULL REFERENCES source_texts(id) ON DELETE CASCADE,
                 target_language TEXT NOT NULL,
@@ -276,6 +295,7 @@ impl TranslationDb {
         self.ensure_qa_findings_columns()?;
         self.normalize_legacy_qa_findings()?;
         self.ensure_translation_jobs_columns()?;
+        self.ensure_translation_speed_samples_table()?;
         self.ensure_review_drafts_table()?;
         self.ensure_required_indexes()?;
         self.cleanup_duplicate_projects()?;
@@ -308,6 +328,9 @@ impl TranslationDb {
                     return Ok(true);
                 }
             }
+        }
+        if !tables.is_empty() && !tables.contains("translation_speed_samples") {
+            return Ok(true);
         }
         if tables.contains("qa_findings") {
             let columns = self.table_columns("qa_findings")?;
@@ -597,6 +620,32 @@ impl TranslationDb {
         Ok(())
     }
 
+    fn ensure_translation_speed_samples_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS translation_speed_samples (
+                id INTEGER PRIMARY KEY,
+                provider_run_id INTEGER NOT NULL REFERENCES provider_runs(id) ON DELETE CASCADE,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                lane TEXT NOT NULL DEFAULT 'unknown',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                estimated_token_count INTEGER NOT NULL DEFAULT 0,
+                request_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                success_delay_ms INTEGER NOT NULL DEFAULT 0,
+                total_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'success',
+                failure_type TEXT,
+                effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                prompt_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
     fn ensure_review_drafts_table(&self) -> Result<()> {
         self.conn.execute_batch(
             "
@@ -744,6 +793,10 @@ impl TranslationDb {
                 ON installs(project_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_translation_jobs_target_latest
                 ON translation_jobs(target_language, updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_translation_speed_samples_run_batch
+                ON translation_speed_samples(provider_run_id, batch_index);
+            CREATE INDEX IF NOT EXISTS idx_translation_speed_samples_model_prompt_latest
+                ON translation_speed_samples(model, prompt_hash, lane, status, created_at DESC);
             ",
         )?;
         Ok(())
@@ -2570,6 +2623,107 @@ impl TranslationDb {
         )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn insert_translation_speed_sample(
+        &mut self,
+        input: &NewTranslationSpeedSample,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "
+            INSERT INTO translation_speed_samples (
+                provider_run_id,
+                batch_index,
+                lane,
+                item_count,
+                char_count,
+                estimated_token_count,
+                request_elapsed_ms,
+                success_delay_ms,
+                total_elapsed_ms,
+                status,
+                failure_type,
+                effective_batch_size,
+                model,
+                prompt_hash
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ",
+            params![
+                input.provider_run_id,
+                input.batch_index,
+                input.lane,
+                input.item_count,
+                input.char_count,
+                input.estimated_token_count,
+                input.request_elapsed_ms,
+                input.success_delay_ms,
+                input.total_elapsed_ms,
+                input.status,
+                input.failure_type,
+                input.effective_batch_size,
+                input.model,
+                input.prompt_hash
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn recent_translation_speed_samples(
+        &self,
+        model: Option<&str>,
+        prompt_hash: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TranslationSpeedSample>> {
+        let limit = limit.clamp(1, 500);
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                id,
+                provider_run_id,
+                batch_index,
+                lane,
+                item_count,
+                char_count,
+                estimated_token_count,
+                request_elapsed_ms,
+                success_delay_ms,
+                total_elapsed_ms,
+                status,
+                failure_type,
+                effective_batch_size,
+                model,
+                prompt_hash,
+                created_at
+            FROM translation_speed_samples
+            WHERE (?1 IS NULL OR model = ?1)
+              AND (?2 IS NULL OR prompt_hash = ?2)
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?3
+            ",
+        )?;
+        let rows = statement.query_map(params![model, prompt_hash, limit], |row| {
+            Ok(TranslationSpeedSample {
+                id: row.get(0)?,
+                provider_run_id: row.get(1)?,
+                batch_index: row.get(2)?,
+                lane: row.get(3)?,
+                item_count: row.get(4)?,
+                char_count: row.get(5)?,
+                estimated_token_count: row.get(6)?,
+                request_elapsed_ms: row.get(7)?,
+                success_delay_ms: row.get(8)?,
+                total_elapsed_ms: row.get(9)?,
+                status: row.get(10)?,
+                failure_type: row.get(11)?,
+                effective_batch_size: row.get(12)?,
+                model: row.get(13)?,
+                prompt_hash: row.get(14)?,
+                created_at: row.get(15)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn latest_translation_job_summary(

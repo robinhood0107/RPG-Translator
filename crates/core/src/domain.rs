@@ -511,6 +511,44 @@ pub struct TranslationJobProgressUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewTranslationSpeedSample {
+    pub provider_run_id: i64,
+    pub batch_index: i64,
+    pub lane: String,
+    pub item_count: i64,
+    pub char_count: i64,
+    pub estimated_token_count: i64,
+    pub request_elapsed_ms: i64,
+    pub success_delay_ms: i64,
+    pub total_elapsed_ms: i64,
+    pub status: String,
+    pub failure_type: Option<String>,
+    pub effective_batch_size: i64,
+    pub model: Option<String>,
+    pub prompt_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationSpeedSample {
+    pub id: i64,
+    pub provider_run_id: i64,
+    pub batch_index: i64,
+    pub lane: String,
+    pub item_count: i64,
+    pub char_count: i64,
+    pub estimated_token_count: i64,
+    pub request_elapsed_ms: i64,
+    pub success_delay_ms: i64,
+    pub total_elapsed_ms: i64,
+    pub status: String,
+    pub failure_type: Option<String>,
+    pub effective_batch_size: i64,
+    pub model: Option<String>,
+    pub prompt_hash: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewCounts {
     pub all: i64,
     pub missing: i64,

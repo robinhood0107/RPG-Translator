@@ -1,7 +1,7 @@
 use rpg_translator_core::{
     CacheKeyBuilder, CacheKeyParts, Engine, ExtractedOccurrence, NewOccurrence, NewProject,
-    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, OccurrenceContext,
-    OccurrenceSegment, Result, ReviewUpdateRequest, TextCodec, TranslationDb,
+    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, NewTranslationSpeedSample,
+    OccurrenceContext, OccurrenceSegment, Result, ReviewUpdateRequest, TextCodec, TranslationDb,
     TranslationJobProgressUpdate, WorkbenchSettingsUpdate,
 };
 use rusqlite::{Connection, OpenFlags, params};
@@ -701,6 +701,68 @@ fn workbench_settings_and_stale_runs_survive_migration() -> Result<()> {
     let latest_provider_run = dashboard.latest_provider_run.expect("provider run");
     assert_eq!(latest_provider_run.id, provider_run_id);
     assert_eq!(latest_provider_run.status, "interrupted");
+
+    Ok(())
+}
+
+#[test]
+fn translation_speed_samples_are_indexed_and_queryable() -> Result<()> {
+    let file = NamedTempFile::new().expect("create temp db");
+    let mut db = TranslationDb::open(file.path())?;
+    db.migrate()?;
+    let provider_run_id = db.start_provider_run(&NewProviderRun {
+        provider: "local-openai-compatible".to_string(),
+        model: Some("gemma".to_string()),
+        request_settings_json: "{}".to_string(),
+    })?;
+
+    db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+        provider_run_id,
+        batch_index: 7,
+        lane: "plain_block".to_string(),
+        item_count: 16,
+        char_count: 512,
+        estimated_token_count: 128,
+        request_elapsed_ms: 3200,
+        success_delay_ms: 750,
+        total_elapsed_ms: 3950,
+        status: "success".to_string(),
+        failure_type: None,
+        effective_batch_size: 16,
+        model: Some("gemma".to_string()),
+        prompt_hash: "prompt-hash".to_string(),
+    })?;
+
+    let samples = db.recent_translation_speed_samples(Some("gemma"), Some("prompt-hash"), 10)?;
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample.provider_run_id, provider_run_id);
+    assert_eq!(sample.batch_index, 7);
+    assert_eq!(sample.lane, "plain_block");
+    assert_eq!(sample.item_count, 16);
+    assert_eq!(sample.char_count, 512);
+    assert_eq!(sample.estimated_token_count, 128);
+    assert_eq!(sample.request_elapsed_ms, 3200);
+    assert_eq!(sample.success_delay_ms, 750);
+    assert_eq!(sample.total_elapsed_ms, 3950);
+    assert_eq!(sample.status, "success");
+    assert_eq!(sample.effective_batch_size, 16);
+
+    let conn = Connection::open(file.path())?;
+    let index_count: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'index'
+          AND name IN (
+              'idx_translation_speed_samples_run_batch',
+              'idx_translation_speed_samples_model_prompt_latest'
+          )
+        ",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(index_count, 2);
 
     Ok(())
 }
