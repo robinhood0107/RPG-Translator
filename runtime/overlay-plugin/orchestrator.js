@@ -86,10 +86,14 @@
         renderStrategy: record.renderStrategy || record.strategy || record.adapter || '',
         state: 'active',
         status: 'detected',
-        priority: null,
-        visible: true,
-        screenState: 'visible',
-        backgrounded: false,
+        priority: Object.prototype.hasOwnProperty.call(record, 'priority')
+          ? normalizePriority(record.priority)
+          : null,
+        visible: Object.prototype.hasOwnProperty.call(record, 'visible')
+          ? record.visible === true
+          : true,
+        screenState: String(record.screenState || (record.visible === false ? 'hidden' : 'visible')),
+        backgrounded: record.backgrounded === true,
         metadata: {},
       };
       this.activeItems.set(item.id, item);
@@ -119,9 +123,12 @@
       item.renderStrategy = record.renderStrategy || record.strategy || item.renderStrategy || '';
       item.state = 'active';
       item.status = 'detected';
-      item.visible = true;
-      item.screenState = 'visible';
-      item.backgrounded = false;
+      if (Object.prototype.hasOwnProperty.call(record, 'priority')) item.priority = normalizePriority(record.priority);
+      item.visible = Object.prototype.hasOwnProperty.call(record, 'visible')
+        ? record.visible === true
+        : true;
+      item.screenState = String(record.screenState || (item.visible ? 'visible' : 'hidden'));
+      item.backgrounded = record.backgrounded === true;
       this.activeItems.set(item.id, item);
       this.slotIndex.set(item.slotId, item.id);
       this.diagnosticState.observed_items += 1;

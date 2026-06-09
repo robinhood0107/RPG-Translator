@@ -445,6 +445,56 @@ test('orchestrator records canonical items and rejects stale render commands', (
   ]);
 });
 
+test('orchestrator preserves adapter visibility and priority on observation refresh', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+
+  orchestrator.observeRecord({
+    adapter: 'pixi-text',
+    kind: 'text-setter',
+    surface,
+    slotKey: 'pixi-visible-state',
+    text: 'Hidden JP',
+    visible: false,
+    screenState: 'hidden',
+    priority: 100,
+    backgrounded: true,
+  });
+
+  let active = orchestrator.diagnostics().active[0];
+  assert.equal(active.visible, false);
+  assert.equal(active.screenState, 'hidden');
+  assert.equal(active.priority, 100);
+  assert.equal(active.backgrounded, true);
+
+  orchestrator.observeRecord({
+    adapter: 'pixi-text',
+    kind: 'text-setter',
+    surface,
+    slotKey: 'pixi-visible-state',
+    text: 'Hidden JP',
+    visible: true,
+    screenState: 'visible',
+    priority: 750,
+    backgrounded: false,
+  });
+
+  active = orchestrator.diagnostics().active[0];
+  assert.equal(active.visible, true);
+  assert.equal(active.screenState, 'visible');
+  assert.equal(active.priority, 750);
+  assert.equal(active.backgrounded, false);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+});
+
 test('orchestrator refreshes same-slot source without duplicating active items', () => {
   const surface = {};
   const lookups = [];
