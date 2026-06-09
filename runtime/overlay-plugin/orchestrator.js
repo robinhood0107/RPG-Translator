@@ -23,6 +23,8 @@
       this.surfaceIds = new WeakMap();
       this.surfaceClaims = new WeakMap();
       this.textClaims = new Map();
+      this.ownershipClaims = new Map();
+      this.nextOwnershipId = 1;
       this.sourceTranslations = new Map();
       this.renderQueue = [];
       this.events = [];
@@ -419,30 +421,46 @@
     }
 
     claimSurface(surface, owner) {
-      if (!surface || (typeof surface !== 'object' && typeof surface !== 'function')) return false;
-      const current = this.surfaceClaims.get(surface);
-      if (current && current !== owner) {
+      const payloadMode = isPlainObject(surface) && owner === undefined;
+      const descriptor = payloadMode
+        ? this.normalizeOwnershipDescriptor(surface, 'surface')
+        : this.normalizeOwnershipDescriptor({ target: surface, owner }, 'surface');
+      if (!descriptor.target || (typeof descriptor.target !== 'object' && typeof descriptor.target !== 'function')) {
+        return payloadMode ? ownershipDenied('missing-target') : false;
+      }
+      const current = this.surfaceClaims.get(descriptor.target);
+      const currentOwner = ownershipClaimOwner(current);
+      if (currentOwner && currentOwner !== descriptor.owner) {
         this.diagnosticState.ownership_conflicts += 1;
         this.emit('ownershipConflict', {
           kind: 'surface',
-          owner,
-          current,
-          surfaceId: this.surfaceId(surface),
+          owner: descriptor.owner,
+          current: currentOwner,
+          surfaceId: this.surfaceId(descriptor.target),
           reason: 'ownership-conflict',
         });
-        return false;
+        return payloadMode ? ownershipDenied('ownership-conflict', current) : false;
       }
       if (!current) this.diagnosticState.surface_claims += 1;
-      this.surfaceClaims.set(surface, owner);
-      return true;
+      if (!payloadMode) {
+        this.surfaceClaims.set(descriptor.target, descriptor.owner);
+        return true;
+      }
+      const claim = this.createOwnershipClaim('surface', descriptor, 'accepted');
+      this.surfaceClaims.set(descriptor.target, claim);
+      return ownershipAccepted('accepted', claim);
     }
 
     releaseSurface(surface, owner) {
-      if (!surface || (typeof surface !== 'object' && typeof surface !== 'function')) return false;
-      const current = this.surfaceClaims.get(surface);
+      const tokenMode = isOwnershipToken(surface, 'surface');
+      const target = tokenMode ? surface.surface : surface;
+      const expectedOwner = tokenMode ? surface.owner : owner;
+      if (!target || (typeof target !== 'object' && typeof target !== 'function')) return false;
+      const current = this.surfaceClaims.get(target);
       if (!current) return false;
-      if (owner && current !== owner) return false;
-      this.surfaceClaims.delete(surface);
+      if (expectedOwner && ownershipClaimOwner(current) !== expectedOwner) return false;
+      this.surfaceClaims.delete(target);
+      if (tokenMode) this.retireOwnershipToken(surface, 'released');
       this.diagnosticState.surface_releases += 1;
       return true;
     }
@@ -455,29 +473,130 @@
     }
 
     claimText(slotId, owner) {
-      const current = this.textClaims.get(slotId);
-      if (current && current !== owner) {
+      const payloadMode = isPlainObject(slotId) && owner === undefined;
+      const descriptor = payloadMode
+        ? this.normalizeOwnershipDescriptor(slotId, 'text')
+        : this.normalizeOwnershipDescriptor({ slotKey: slotId, owner }, 'text');
+      if (!descriptor.slotKey) return payloadMode ? ownershipDenied('missing-slot') : false;
+      const current = this.textClaims.get(descriptor.slotKey);
+      const currentOwner = ownershipClaimOwner(current);
+      if (currentOwner && currentOwner !== descriptor.owner) {
         this.diagnosticState.ownership_conflicts += 1;
         this.emit('ownershipConflict', {
           kind: 'text',
-          owner,
-          current,
-          slotId,
+          owner: descriptor.owner,
+          current: currentOwner,
+          slotId: descriptor.slotKey,
           reason: 'ownership-conflict',
         });
-        return false;
+        return payloadMode ? ownershipDenied('ownership-conflict', current) : false;
       }
       if (!current) this.diagnosticState.text_claims += 1;
-      this.textClaims.set(slotId, owner);
-      return true;
+      if (!payloadMode) {
+        this.textClaims.set(descriptor.slotKey, descriptor.owner);
+        return true;
+      }
+      const claim = this.createOwnershipClaim(
+        'text',
+        descriptor,
+        descriptor.provisional ? 'provisional' : 'accepted',
+      );
+      this.textClaims.set(descriptor.slotKey, claim);
+      return ownershipAccepted(descriptor.provisional ? 'provisional' : 'accepted', claim);
+    }
+
+    finalizeTextClaim(token, input = {}) {
+      if (!isOwnershipToken(token, 'text')) return ownershipDenied('missing-token');
+      const claim = this.ownershipClaims.get(token);
+      if (!claim || claim.active !== true) return ownershipDenied('stale-claim', claim);
+      const descriptor = this.normalizeOwnershipDescriptor(Object.assign({}, claim.descriptor, input || {}, {
+        owner: claim.owner,
+        target: claim.target,
+        slotKey: claim.slotKey,
+      }), 'text');
+      const current = this.textClaims.get(descriptor.slotKey);
+      const currentOwner = ownershipClaimOwner(current);
+      if (currentOwner && currentOwner !== claim.owner) {
+        this.retireOwnershipToken(token, 'ownership-conflict');
+        return ownershipDenied('ownership-conflict', current);
+      }
+      claim.provisional = false;
+      claim.status = 'accepted';
+      claim.updatedAt = this.now();
+      this.textClaims.set(descriptor.slotKey, claim);
+      return ownershipAccepted('accepted', claim);
     }
 
     releaseTextClaim(slotId, owner) {
-      const current = this.textClaims.get(slotId);
+      const tokenMode = isOwnershipToken(slotId, 'text');
+      const key = tokenMode ? slotId.slotKey : slotId;
+      const expectedOwner = tokenMode ? slotId.owner : owner;
+      const current = this.textClaims.get(key);
       if (!current) return false;
-      if (owner && current !== owner) return false;
-      this.textClaims.delete(slotId);
+      if (expectedOwner && ownershipClaimOwner(current) !== expectedOwner) return false;
+      this.textClaims.delete(key);
+      if (tokenMode) this.retireOwnershipToken(slotId, 'released');
       this.diagnosticState.text_releases += 1;
+      return true;
+    }
+
+    normalizeOwnershipDescriptor(input = {}, defaultKind = 'text') {
+      const source = input && typeof input === 'object' ? input : {};
+      const owner = stringValue(
+        source.owner
+        || source.ownerAdapter
+        || source.sourceAdapter
+        || source.adapterId
+        || source.hook
+        || defaultKind
+      );
+      return {
+        owner,
+        sourceAdapter: stringValue(source.sourceAdapter || source.adapterId || owner),
+        target: source.target || source.surface || source.bitmap || source.window || source.windowInstance || source.sprite || null,
+        slotKey: stringValue(source.slotKey || source.slotId || source.id),
+        kind: defaultKind,
+        text: stringValue(source.text || source.visibleText || source.rawText || source.translationSource),
+        priority: normalizePriority(source.priority),
+        provisional: source.provisional === true,
+        metadata: sanitizeDetails(source.metadata),
+      };
+    }
+
+    createOwnershipClaim(kind, descriptor, status) {
+      const token = {
+        id: `own-${this.nextOwnershipId++}`,
+        kind,
+        surface: kind === 'surface' ? descriptor.target : null,
+        target: descriptor.target,
+        slotKey: descriptor.slotKey,
+        owner: descriptor.owner,
+      };
+      const claim = {
+        token,
+        kind,
+        owner: descriptor.owner,
+        target: descriptor.target,
+        slotKey: descriptor.slotKey,
+        priority: descriptor.priority,
+        provisional: status === 'provisional',
+        status,
+        active: true,
+        descriptor,
+        createdAt: this.now(),
+        updatedAt: this.now(),
+      };
+      this.ownershipClaims.set(token, claim);
+      return claim;
+    }
+
+    retireOwnershipToken(token, status) {
+      const claim = this.ownershipClaims.get(token);
+      if (!claim) return false;
+      claim.active = false;
+      claim.status = String(status || 'released');
+      claim.updatedAt = this.now();
+      this.ownershipClaims.delete(token);
       return true;
     }
 
@@ -1059,6 +1178,47 @@
     }
     if (!stillFresh) return 'stale-render';
     return 'render-rejected';
+  }
+
+  function isPlainObject(value) {
+    return !!(value && typeof value === 'object' && !Array.isArray(value));
+  }
+
+  function isOwnershipToken(value, kind) {
+    return !!(value
+      && typeof value === 'object'
+      && value.kind === kind
+      && value.id);
+  }
+
+  function ownershipClaimOwner(value) {
+    if (!value) return '';
+    if (typeof value === 'string') return value;
+    return stringValue(value.owner || value.adapterId || value.sourceAdapter);
+  }
+
+  function ownershipAccepted(status, claim) {
+    const token = claim && claim.token ? claim.token : null;
+    return {
+      status: String(status || 'accepted'),
+      accepted: true,
+      token,
+      ownershipToken: token,
+      claimId: token && token.id ? token.id : '',
+      ownerAdapter: claim && claim.owner ? claim.owner : '',
+    };
+  }
+
+  function ownershipDenied(reason, current) {
+    return {
+      status: 'denied',
+      accepted: false,
+      reason: String(reason || 'denied'),
+      token: null,
+      ownershipToken: null,
+      claimId: '',
+      ownerAdapter: ownershipClaimOwner(current),
+    };
   }
 
   function defaultEventReason(type, source) {

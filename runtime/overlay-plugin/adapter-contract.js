@@ -146,37 +146,31 @@
 
     function claimSurface(payload = {}) {
       if (!hasMethod('claimSurface')) return deniedOwnership('unavailable');
-      const source = normalizePayload(payload);
-      const surface = source.surface || source.target || source.window || source.bitmap || null;
-      const owner = nonEmptyString(source.owner, source.ownerAdapter, source.sourceAdapter, adapterId);
-      const accepted = callGateway('claimSurface', () => gateway.claimSurface(surface, owner) === true);
-      if (!accepted) return deniedOwnership('ownership-conflict');
-      return { status: 'accepted', accepted: true, token: { kind: 'surface', surface, owner } };
+      const result = callGateway('claimSurface', () => gateway.claimSurface(normalizeOwnershipPayload(payload)));
+      return normalizeOwnershipResult(result, 'surface');
     }
 
     function releaseSurface(token, reason = '') {
       if (!token || !hasMethod('releaseSurface')) return false;
-      return callGateway('releaseSurface', () => gateway.releaseSurface(token.surface, token.owner || adapterId, reason) === true) === true;
+      return callGateway('releaseSurface', () => gateway.releaseSurface(token, reason || 'surface released') === true) === true;
     }
 
     function claimText(payload = {}) {
       if (!hasMethod('claimText')) return deniedOwnership('unavailable');
-      const source = normalizePayload(payload);
-      const slotId = nonEmptyString(source.slotId, source.slotKey, source.id);
-      const owner = nonEmptyString(source.owner, source.ownerAdapter, source.sourceAdapter, adapterId);
-      const accepted = callGateway('claimText', () => gateway.claimText(slotId, owner) === true);
-      if (!accepted) return deniedOwnership('ownership-conflict');
-      return { status: 'accepted', accepted: true, token: { kind: 'text', slotId, owner } };
+      const result = callGateway('claimText', () => gateway.claimText(normalizeOwnershipPayload(payload)));
+      return normalizeOwnershipResult(result, 'text');
     }
 
-    function finalizeTextClaim(token) {
+    function finalizeTextClaim(token, payload = {}) {
       if (!token) return deniedOwnership('missing-token');
-      return { status: 'accepted', accepted: true, token };
+      if (!hasMethod('finalizeTextClaim')) return { status: 'accepted', accepted: true, token };
+      const result = callGateway('finalizeTextClaim', () => gateway.finalizeTextClaim(token, normalizeOwnershipPayload(payload)));
+      return normalizeOwnershipResult(result, 'text');
     }
 
     function releaseTextClaim(token, reason = '') {
       if (!token || !hasMethod('releaseTextClaim')) return false;
-      return callGateway('releaseTextClaim', () => gateway.releaseTextClaim(token.slotId, token.owner || adapterId, reason) === true) === true;
+      return callGateway('releaseTextClaim', () => gateway.releaseTextClaim(token, reason || 'text claim released') === true) === true;
     }
 
     function recordSurfaceDraw(payload = {}) {
@@ -252,18 +246,45 @@
       return next;
     }
 
+    function normalizeOwnershipPayload(payload) {
+      return normalizePayload(payload);
+    }
+
+    function normalizeOwnershipResult(result, fallbackKind) {
+      if (result && typeof result === 'object' && result.status) {
+        return result;
+      }
+      if (result === true) {
+        return {
+          status: 'accepted',
+          accepted: true,
+          token: { kind: fallbackKind, owner: adapterId },
+        };
+      }
+      return deniedOwnership('ownership-conflict');
+    }
+
     function callGateway(operation, callback) {
       try {
         return callback();
       } catch (error) {
-        const wrapped = new Error(`[AdapterContract:${adapterId}] ${operation} failed.`);
-        wrapped.name = 'AdapterContractError';
-        wrapped.code = 'RPG_TRANSLATOR_ADAPTER_CONTRACT';
-        wrapped.adapterId = adapterId;
-        wrapped.operation = String(operation || '');
-        try { wrapped.cause = error; } catch (_error) {}
-        throw wrapped;
+        throw createBoundaryError(operation, error);
       }
+    }
+
+    function createBoundaryError(operation, cause) {
+      if (isContractError(cause)) return cause;
+      const wrapped = new Error(`[AdapterContract:${adapterId}] ${operation} failed.`);
+      wrapped.name = 'AdapterContractError';
+      wrapped.code = 'RPG_TRANSLATOR_ADAPTER_CONTRACT';
+      wrapped.adapterId = adapterId;
+      wrapped.operation = String(operation || '');
+      try { wrapped.cause = cause; } catch (_error) {}
+      return wrapped;
+    }
+
+    function isContractError(error) {
+      return isAdapterContractError(error);
     }
 
     function warn(message) {
@@ -515,6 +536,7 @@
       subscribeSurfaceDraws,
       subscribe,
       subscribeRecords,
+      isContractError,
       getRecordStatus,
       isRecordActive,
       isRecordObserved,
@@ -610,7 +632,15 @@
     return nonEmptyString(value, 'id').replace(/[^a-z0-9_-]+/giu, '_').replace(/^_+|_+$/gu, '') || 'id';
   }
 
-  const api = { createAdapterContract };
+  function isAdapterContractError(error) {
+    return !!(error
+      && typeof error === 'object'
+      && (error.name === 'AdapterContractError'
+        || error.code === 'RPG_TRANSLATOR_ADAPTER_CONTRACT'
+        || error.code === 'LIVE_TRANSLATOR_ADAPTER_CONTRACT'));
+  }
+
+  const api = { createAdapterContract, isAdapterContractError };
   root.RPGTranslatorOverlay = Object.assign(root.RPGTranslatorOverlay || {}, api);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

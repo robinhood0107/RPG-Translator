@@ -10,7 +10,7 @@ const { CacheKeyBuilder, LookupIndex } = require('../lookup-index');
 const { CacheLoader } = require('../cache-loader');
 const { MessageAdapter } = require('../message-adapter');
 const { TextOrchestrator } = require('../orchestrator');
-const { createAdapterContract } = require('../adapter-contract');
+const { createAdapterContract, isAdapterContractError } = require('../adapter-contract');
 const { PixiTextAdapter } = require('../pixi-text-adapter');
 const { RenderGuard } = require('../render-guard');
 const { RuntimeEntry } = require('../RPGTranslator');
@@ -1369,6 +1369,73 @@ test('adapter contract wraps cache-only orchestrator lifecycle for adapter recor
   assert.equal(contract.retireItem(record, 'removed').status, 'removed');
   assert.equal(contract.isRecordActive(record), false);
   assert.equal(contract.requestItemTranslation(record), false);
+});
+
+test('adapter contract uses mycode-style ownership payload tokens', () => {
+  const surface = {};
+  const orchestrator = new TextOrchestrator({
+    translate() {
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const contract = createAdapterContract({
+    adapterId: 'sprite-text',
+    defaultHook: 'glyph',
+    orchestratorGateway: orchestrator,
+  });
+  const competingContract = createAdapterContract({
+    adapterId: 'bitmap-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+
+  const surfaceClaim = contract.claimSurface({
+    target: surface,
+    slotKey: 'sprite-surface',
+    priority: 50,
+    metadata: { reason: 'parent run' },
+  });
+  assert.equal(surfaceClaim.status, 'accepted');
+  assert.equal(surfaceClaim.accepted, true);
+  assert.equal(surfaceClaim.token.kind, 'surface');
+  assert.equal(contract.isContractError({ code: 'RPG_TRANSLATOR_ADAPTER_CONTRACT' }), true);
+  assert.equal(isAdapterContractError({ code: 'LIVE_TRANSLATOR_ADAPTER_CONTRACT' }), true);
+
+  const textClaim = contract.claimText({
+    target: surface,
+    slotKey: 'sprite:glyph',
+    text: 'Owned glyph',
+    provisional: true,
+    priority: 50,
+  });
+  assert.equal(textClaim.status, 'provisional');
+  assert.equal(textClaim.accepted, true);
+  assert.equal(textClaim.token.kind, 'text');
+
+  const finalized = contract.finalizeTextClaim(textClaim.token, {
+    target: surface,
+    slotKey: 'sprite:glyph',
+    text: 'Owned glyph',
+  });
+  assert.equal(finalized.status, 'accepted');
+  assert.equal(finalized.accepted, true);
+
+  const competing = competingContract.claimText({
+    target: surface,
+    slotKey: 'sprite:glyph',
+    text: 'Owned glyph',
+    priority: 10,
+  });
+  assert.equal(competing.status, 'denied');
+
+  assert.equal(contract.releaseTextClaim(textClaim.token, 'done'), true);
+  assert.equal(contract.releaseSurface(surfaceClaim.token, 'done'), true);
+  assert.equal(orchestrator.diagnostics().text_releases, 1);
+  assert.equal(orchestrator.diagnostics().surface_releases, 1);
 });
 
 test('adapter contract remembers subscribed render skip and failure events', async () => {
