@@ -1092,6 +1092,16 @@ test('foresight scanner reports unavailable explicit nested-list catalog command
   assert.equal(scan.path_stops[0].stop_reason, 'nested-list-unavailable');
   assert.equal(scan.path_stops[0].code, 902);
   assert.equal(scan.path_stops[0].label, 'Explicit Nested Event');
+  assert.deepEqual(scan.command_actions[0], {
+    code: 902,
+    label: 'Explicit Nested Event',
+    scan_behavior: 'nested-list',
+    staleness_risk: 'external',
+    reason: '',
+    action: 'barrier',
+    stop_reason: 'nested-list-unavailable',
+    nested_list: null,
+  });
 });
 
 test('foresight scanner stops at label jumps with target diagnostics', () => {

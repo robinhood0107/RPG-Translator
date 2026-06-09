@@ -306,8 +306,8 @@
         ? readEmbeddedNestedListCommand(scanner, list, index, command, metadata, frame)
         : null;
       if (nestedRead) {
-        recordCommandAction(diagnostics, metadata);
         if (nestedRead.transparent) {
+          recordCommandAction(diagnostics, metadata, { action: 'nested-list' });
           stack.push({
             list,
             index: index + 1,
@@ -322,6 +322,11 @@
           }
           return;
         }
+        recordCommandAction(diagnostics, metadata, {
+          action: 'barrier',
+          stop_reason: nestedRead.stop_reason,
+          nested_list: nestedRead.nested_list,
+        });
         diagnostics.stop_reason = nestedRead.stop_reason;
         stack.length = 0;
         appendPathStop(diagnostics, {
@@ -1161,7 +1166,7 @@
         label: nonEmptyString(entry.label) || fallback.label,
         scanBehavior: normalizeScanBehavior(entry.scanBehavior) || fallback.scanBehavior,
         stalenessRisk: normalizeStalenessRisk(entry.stalenessRisk) || fallback.stalenessRisk,
-        reason: nonEmptyString(entry.reason) || fallback.reason,
+        reason: nonEmptyString(entry.reason),
         nestedLists: normalizeNestedListSpecs(entry.nestedLists),
       };
     });
@@ -1372,16 +1377,24 @@
     diagnostics.path_stops.push(entry);
   }
 
-  function recordCommandAction(diagnostics, metadata) {
+  function recordCommandAction(diagnostics, metadata, details = {}) {
     if (!diagnostics || !metadata) return;
     if (!Array.isArray(diagnostics.command_actions)) diagnostics.command_actions = [];
-    diagnostics.command_actions.push({
+    const action = {
       code: metadata.code,
       label: metadata.label,
       scan_behavior: metadata.scanBehavior,
       staleness_risk: metadata.stalenessRisk,
       reason: metadata.reason,
-    });
+    };
+    if (details && details.action) action.action = String(details.action);
+    if (details && Object.prototype.hasOwnProperty.call(details, 'stop_reason')) {
+      action.stop_reason = details.stop_reason ? String(details.stop_reason) : '';
+    }
+    if (details && Object.prototype.hasOwnProperty.call(details, 'nested_list')) {
+      action.nested_list = cloneNestedListInfo(details.nested_list);
+    }
+    diagnostics.command_actions.push(action);
     if (metadata.stalenessRisk) diagnostics.staleness_risks += 1;
   }
 
