@@ -363,6 +363,7 @@
       prototype.clear = function clearWithMessageRetire(...args) {
         retireWindowsForMessage(scope, translator, trackedWindows, this, 'game-message-clear');
         clearMessageOrigin(this);
+        clearForesightState(scope, 'game-message-clear');
         return original.apply(this, args);
       };
       prototype.clear.__rpgTranslatorOriginal = original;
@@ -374,6 +375,7 @@
       message.clear = function clearSingletonWithMessageRetire(...args) {
         retireWindowsForMessage(scope, translator, trackedWindows, this, 'game-message-clear');
         clearMessageOrigin(this);
+        clearForesightState(scope, 'game-message-clear');
         return original.apply(this, args);
       };
       message.clear.__rpgTranslatorOriginal = original;

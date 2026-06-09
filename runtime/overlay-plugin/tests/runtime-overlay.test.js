@@ -1006,6 +1006,7 @@ test('message adapter wraps translated blocks when line counts differ', () => {
 });
 
 test('message adapter retires active message item when Game_Message.clear runs', () => {
+  const clearCalls = [];
   function GameMessage() {
     this._texts = ['Message JP'];
     this.cleared = false;
@@ -1015,7 +1016,16 @@ test('message adapter retires active message item when Game_Message.clear runs',
     this._texts = [];
   };
   const root = {
-    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      foresightScanner: {
+        clearSnapshot(reason) {
+          clearCalls.push(reason || '');
+        },
+      },
+    },
     $gameMessage: new GameMessage(),
     Game_Message: GameMessage,
     Window_Message: function WindowMessage() {},
@@ -1060,6 +1070,7 @@ test('message adapter retires active message item when Game_Message.clear runs',
 
   root.$gameMessage.clear();
   assert.equal(root.$gameMessage.cleared, true);
+  assert.deepEqual(clearCalls, ['game-message-clear']);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
   assert.equal(orchestrator.diagnostics().surface_releases, 1);
