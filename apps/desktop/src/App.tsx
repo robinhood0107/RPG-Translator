@@ -3027,10 +3027,33 @@ type CloseableAppWindow = {
 };
 
 async function closeWindowWithFallback(appWindow: CloseableAppWindow, startedAtMs: number) {
-  const remainingMs = Math.max(0, safeCloseTotalTimeoutMs - (Date.now() - startedAtMs));
-  const destroyCompleted = await settleBeforeTimeout(appWindow.destroy(), Math.min(500, remainingMs));
+  const destroyWork = invokeWindowCloseOperation(() => appWindow.destroy());
+  const destroyBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
+  if (destroyBudgetMs <= 0) {
+    void Promise.resolve(destroyWork).catch(() => {});
+    return;
+  }
+  const destroyCompleted = await settleBeforeTimeout(destroyWork, destroyBudgetMs);
   if (!destroyCompleted) {
-    await settleBeforeTimeout(appWindow.close(), 500);
+    const closeWork = invokeWindowCloseOperation(() => appWindow.close());
+    const closeBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
+    if (closeBudgetMs > 0) {
+      await settleBeforeTimeout(closeWork, closeBudgetMs);
+    } else {
+      void Promise.resolve(closeWork).catch(() => {});
+    }
+  }
+}
+
+function remainingSafeCloseBudget(startedAtMs: number) {
+  return Math.max(0, safeCloseTotalTimeoutMs - (Date.now() - startedAtMs));
+}
+
+function invokeWindowCloseOperation(operation: () => Promise<unknown> | unknown) {
+  try {
+    return operation();
+  } catch {
+    return Promise.resolve();
   }
 }
 

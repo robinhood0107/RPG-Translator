@@ -2422,6 +2422,51 @@ test("desktop window close does not wait beyond the total safe close budget", as
   }
 });
 
+test("desktop window close does not spend fallback time after the safe close budget is exhausted", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  appWindowDestroyMock.mockReturnValue(never);
+  appWindowCloseMock.mockReturnValue(never);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    let settled = false;
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+    void closePromise?.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(settled).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("desktop window close falls back when destroy does not settle", async () => {
   (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
   localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
