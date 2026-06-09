@@ -3046,15 +3046,13 @@ async function closeWindowWithFallback(appWindow: CloseableAppWindow, startedAtM
     void Promise.resolve(invokeWindowCloseOperation(() => appWindow.close())).catch(() => {});
     return;
   }
-  const destroyCompleted = await settleBeforeTimeout(destroyWork, destroyBudgetMs);
-  if (!destroyCompleted) {
-    const closeWork = invokeWindowCloseOperation(() => appWindow.close());
-    const closeBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
-    if (closeBudgetMs > 0) {
-      await settleBeforeTimeout(closeWork, closeBudgetMs);
-    } else {
-      void Promise.resolve(closeWork).catch(() => {});
-    }
+  await settleBeforeTimeout(destroyWork, destroyBudgetMs);
+  const closeWork = invokeWindowCloseOperation(() => appWindow.close());
+  const closeBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
+  if (closeBudgetMs > 0) {
+    await settleBeforeTimeout(closeWork, closeBudgetMs);
+  } else {
+    void Promise.resolve(closeWork).catch(() => {});
   }
 }
 

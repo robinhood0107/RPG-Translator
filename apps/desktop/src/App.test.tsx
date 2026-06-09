@@ -2393,8 +2393,39 @@ test("desktop window close destroys the window after bounded safe shutdown attem
   expect(invokeMock).toHaveBeenCalledWith("prepare_safe_shutdown", {
     request: { db_path: testDbPath },
   });
-  expect(appWindowCloseMock).not.toHaveBeenCalled();
   expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+  expect(appWindowCloseMock).toHaveBeenCalledOnce();
+});
+
+test("desktop window close still fires native close fallback after destroy resolves", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return Promise.resolve({ settings: hydratedWorkbench({ active_tab: "scan" }).settings, saved_drafts: 0, saved_at: "1" });
+    }
+    if (name === "prepare_safe_shutdown") {
+      return Promise.resolve({ pause_requested: false, provider_run_id: null, mode: "no-active-run", stale_runs_interrupted: 0 });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  const event = { preventDefault: vi.fn() };
+  await act(async () => {
+    await appWindowHandlers.closeRequested?.(event);
+  });
+
+  expect(event.preventDefault).toHaveBeenCalledOnce();
+  expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+  expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  expect(appWindowDestroyMock.mock.invocationCallOrder[0]).toBeLessThan(appWindowCloseMock.mock.invocationCallOrder[0]);
 });
 
 test("desktop window close does not wait beyond the total safe close budget", async () => {
