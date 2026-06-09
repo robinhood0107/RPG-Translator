@@ -122,10 +122,9 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
         &fs::read_to_string(temp.path().join("manifest.json")).expect("read manifest"),
     )
     .expect("parse manifest");
-    let config: OverlayConfig = serde_json::from_str(
-        &fs::read_to_string(temp.path().join("overlay-config.json")).expect("read config"),
-    )
-    .expect("parse config");
+    let config_text =
+        fs::read_to_string(temp.path().join("overlay-config.json")).expect("read config");
+    let config: OverlayConfig = serde_json::from_str(&config_text).expect("parse config");
 
     assert_eq!(manifest.schema_version, 1);
     assert_eq!(manifest.project_id, project_id);
@@ -138,6 +137,27 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
     assert!(!config.diagnostics_enabled);
     assert!(config.startup_toast_enabled);
     assert_eq!(config.startup_toast_text, "RPG-Translator 작동중");
+    assert!(config_text.contains("\"foresight_command_catalog\""));
+    assert!(config_text.contains("\"schemaVersion\""));
+    assert!(config_text.contains("\"eventCommands\""));
+    assert!(config_text.contains("\"movementRouteCommands\""));
+    assert_eq!(config.foresight_command_catalog.schema_version, 4);
+    assert_eq!(
+        config
+            .foresight_command_catalog
+            .event_commands
+            .get("205")
+            .map(|command| command.scan_behavior.as_str()),
+        Some("movement-route")
+    );
+    assert_eq!(
+        config
+            .foresight_command_catalog
+            .movement_route_commands
+            .get("1")
+            .map(|command| command.scan_behavior.as_str()),
+        Some("advance")
+    );
 
     Ok(())
 }
@@ -212,7 +232,7 @@ fn export_verification_rejects_malformed_runtime_bundle() -> Result<()> {
     .expect("write manifest");
     fs::write(
         temp.path().join("overlay-config.json"),
-        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중"}"#,
+        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중","foresight_command_catalog":{"schemaVersion":4,"eventCommands":{},"movementRouteCommands":{}}}"#,
     )
     .expect("write config");
     fs::write(
@@ -223,6 +243,35 @@ fn export_verification_rejects_malformed_runtime_bundle() -> Result<()> {
 
     let error = ExportBuilder::verify_bundle(temp.path()).expect_err("malformed bundle fails");
     assert!(error.to_string().contains("cache_key"));
+
+    Ok(())
+}
+
+#[test]
+fn export_verification_rejects_wrong_foresight_catalog_schema() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"schema_version":1,"project_id":1,"source_language":"ja","target_language":"ko","created_timestamp":"1","key_schema_version":"v1","cache_files":["cache.jsonl"],"record_count":1}"#,
+    )
+    .expect("write manifest");
+    fs::write(
+        temp.path().join("overlay-config.json"),
+        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중","foresight_command_catalog":{"schemaVersion":3,"eventCommands":{},"movementRouteCommands":{}}}"#,
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join("cache.jsonl"),
+        "{\"cache_key\":\"ck:v1:fixture\",\"cache_aliases\":[\"ck:v1:fixture\"],\"source_text_id\":1,\"source_hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"source_language\":\"ja\",\"target_language\":\"ko\",\"normalized_text\":\"a\",\"visible_text\":\"a\",\"translation\":\"b\",\"control_code_signature\":\"\",\"context_hash\":null}\n",
+    )
+    .expect("write cache");
+
+    let error = ExportBuilder::verify_bundle(temp.path()).expect_err("wrong catalog schema fails");
+    assert!(
+        error
+            .to_string()
+            .contains("foresight command catalog schema")
+    );
 
     Ok(())
 }

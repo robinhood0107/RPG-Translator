@@ -39,8 +39,8 @@ pub use domain::{
 };
 pub use error::{Error, Result};
 pub use export::{
-    ExportBuilder, ExportPolicy, ExportReport, OverlayConfig, RuntimeCacheRecord,
-    RuntimeExportManifest,
+    ExportBuilder, ExportPolicy, ExportReport, ForesightCommandCatalog, ForesightCommandMetadata,
+    OverlayConfig, RuntimeCacheRecord, RuntimeExportManifest,
 };
 pub use install::{
     InstallManifest, InstallOptions, InstallReport, InstalledFileRecord, Installer,

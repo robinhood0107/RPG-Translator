@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,6 +71,7 @@ pub struct OverlayConfig {
     pub diagnostics_enabled: bool,
     pub startup_toast_enabled: bool,
     pub startup_toast_text: String,
+    pub foresight_command_catalog: ForesightCommandCatalog,
 }
 
 impl OverlayConfig {
@@ -80,6 +82,158 @@ impl OverlayConfig {
             diagnostics_enabled: false,
             startup_toast_enabled: true,
             startup_toast_text: STARTUP_TOAST_TEXT.to_string(),
+            foresight_command_catalog: ForesightCommandCatalog::runtime_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForesightCommandCatalog {
+    pub schema_version: u32,
+    pub event_commands: BTreeMap<String, ForesightCommandMetadata>,
+    pub movement_route_commands: BTreeMap<String, ForesightCommandMetadata>,
+}
+
+impl ForesightCommandCatalog {
+    #[must_use]
+    pub fn runtime_default() -> Self {
+        let mut event_commands = BTreeMap::new();
+        event_commands.insert(
+            "0".to_string(),
+            ForesightCommandMetadata::new(
+                "End",
+                "terminal",
+                "control",
+                "frame-end",
+                "",
+                "End of an event command list or nested branch list.",
+            ),
+        );
+        event_commands.insert(
+            "101".to_string(),
+            ForesightCommandMetadata::new(
+                "Show Text",
+                "linear",
+                "message",
+                "message",
+                "",
+                "Opens the message window and displays text.",
+            ),
+        );
+        event_commands.insert(
+            "102".to_string(),
+            ForesightCommandMetadata::new(
+                "Show Choices",
+                "branching",
+                "message",
+                "barrier",
+                "",
+                "Displays choices and branches based on player selection.",
+            ),
+        );
+        event_commands.insert(
+            "117".to_string(),
+            ForesightCommandMetadata::new(
+                "Common Event",
+                "nesting",
+                "flow",
+                "nested-list",
+                "",
+                "Runs another event command list.",
+            ),
+        );
+        event_commands.insert(
+            "205".to_string(),
+            ForesightCommandMetadata::new(
+                "Set Movement Route",
+                "linear",
+                "movement",
+                "movement-route",
+                "state",
+                "Runs a movement route command list.",
+            ),
+        );
+
+        let mut movement_route_commands = BTreeMap::new();
+        movement_route_commands.insert(
+            "0".to_string(),
+            ForesightCommandMetadata::new(
+                "Route End",
+                "terminal",
+                "movement-route",
+                "advance",
+                "",
+                "Ends a movement route command list.",
+            ),
+        );
+        for (code, label) in [
+            ("1", "Move Down"),
+            ("2", "Move Left"),
+            ("3", "Move Right"),
+            ("4", "Move Up"),
+            ("5", "Move Lower Left"),
+            ("6", "Move Lower Right"),
+            ("7", "Move Upper Left"),
+            ("8", "Move Upper Right"),
+            ("9", "Move at Random"),
+            ("10", "Move Toward Player"),
+            ("11", "Move Away from Player"),
+            ("12", "One Step Forward"),
+            ("13", "One Step Backward"),
+        ] {
+            movement_route_commands.insert(
+                code.to_string(),
+                ForesightCommandMetadata::new(
+                    label,
+                    "linear",
+                    "movement-route",
+                    "advance",
+                    "context",
+                    "Moves the event without changing the event command stream.",
+                ),
+            );
+        }
+
+        Self {
+            schema_version: 4,
+            event_commands,
+            movement_route_commands,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForesightCommandMetadata {
+    pub label: String,
+    pub classification: String,
+    pub native: bool,
+    pub category: String,
+    pub scan_behavior: String,
+    pub staleness_risk: String,
+    pub summary: String,
+    pub reason: String,
+}
+
+impl ForesightCommandMetadata {
+    fn new(
+        label: &str,
+        classification: &str,
+        category: &str,
+        scan_behavior: &str,
+        staleness_risk: &str,
+        summary: &str,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            classification: classification.to_string(),
+            native: true,
+            category: category.to_string(),
+            scan_behavior: scan_behavior.to_string(),
+            staleness_risk: staleness_risk.to_string(),
+            summary: summary.to_string(),
+            reason: String::new(),
         }
     }
 }
@@ -189,6 +343,12 @@ impl ExportBuilder {
             return Err(Error::invalid_input(format!(
                 "unsupported overlay config schema version {}",
                 config.schema_version
+            )));
+        }
+        if config.foresight_command_catalog.schema_version != 4 {
+            return Err(Error::invalid_input(format!(
+                "unsupported foresight command catalog schema version {}",
+                config.foresight_command_catalog.schema_version
             )));
         }
 
