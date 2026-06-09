@@ -717,6 +717,62 @@ test('orchestrator archiveItem rejects queued renders and releases slot identity
   ]);
 });
 
+test('orchestrator retireSurface propagates lifecycle reason to archived renders', () => {
+  const surface = {};
+  const otherSurface = {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Surface source') return '서피스 번역';
+      if (request.text === 'Other source') return '다른 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+
+  const first = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface,
+    slotKey: 'surface-slot',
+    text: 'Surface source',
+    renderStrategy: 'window-text',
+  });
+  const second = orchestrator.observeRecord({
+    adapter: 'window-text',
+    kind: 'drawText',
+    surface: otherSurface,
+    slotKey: 'other-slot',
+    text: 'Other source',
+    renderStrategy: 'window-text',
+  });
+
+  assert.equal(orchestrator.retireSurface(surface, 'window destroyed'), 1);
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.active_items, 1);
+  assert.equal(diagnostics.archived_items, 1);
+  assert.equal(diagnostics.active[0].id, second.itemId);
+  assert.equal(diagnostics.archived[0].id, first.itemId);
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.deepEqual(diagnostics.renderQueue.map((entry) => [
+    entry.itemId,
+    entry.sourceText,
+    entry.renderStatus,
+    entry.renderReason,
+  ]), [
+    [first.itemId, 'Surface source', 'rejected', 'window destroyed'],
+    [second.itemId, 'Other source', 'queued', ''],
+  ]);
+  assert.deepEqual(diagnostics.recent_events.slice(-3).map((event) => [event.type, event.reason]), [
+    ['renderRejected', 'window destroyed'],
+    ['item.archived', 'window destroyed'],
+    ['surfaceRetired', 'window destroyed'],
+  ]);
+});
+
 test('orchestrator updates items through cache-only request contract', async () => {
   const surface = {};
   const lookups = [];

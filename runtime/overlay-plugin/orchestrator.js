@@ -472,18 +472,19 @@
 
     retireSurface(surface, reason) {
       if (!surface || (typeof surface !== 'object' && typeof surface !== 'function')) return 0;
+      const message = String(reason || 'surface-retired');
       let retired = 0;
       for (const [itemId, item] of Array.from(this.activeItems.entries())) {
         if (item.surface !== surface) continue;
-        if (this.archiveItem(itemId)) retired += 1;
+        if (this.archiveItem(itemId, message)) retired += 1;
       }
       for (const [itemId, item] of Array.from(this.detachedItems.entries())) {
         if (item.surface !== surface) continue;
-        if (this.archiveItem(itemId)) retired += 1;
+        if (this.archiveItem(itemId, message)) retired += 1;
       }
       if (retired > 0) {
         if (this.guard) this.guard.markSurfaceChanged(surface);
-        this.emit('surfaceRetired', { surfaceId: this.surfaceId(surface), reason: reason || 'surface-retired', retired });
+        this.emit('surfaceRetired', { surfaceId: this.surfaceId(surface), reason: message, retired });
       }
       return retired;
     }
