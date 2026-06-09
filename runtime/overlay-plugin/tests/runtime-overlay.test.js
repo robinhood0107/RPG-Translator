@@ -384,22 +384,28 @@ test('orchestrator records canonical items and rejects stale render commands', (
   assert.equal(orchestrator.acceptRender(command, surface, 'Origin'), true);
   orchestrator.markSurfaceChanged(surface);
   assert.equal(orchestrator.acceptRender(command, surface, 'Origin'), false);
-  assert.deepEqual(orchestrator.diagnostics(), {
-    observed_items: 1,
-    cache_hits: 1,
-    cache_misses: 0,
-    render_accepted: 1,
-    render_rejected: 1,
-    ownership_conflicts: 0,
-    surface_claims: 0,
-    text_claims: 0,
-    surface_releases: 0,
-    text_releases: 0,
-    active_items: 1,
-    detached_items: 0,
-    archived_items: 0,
-    queued_render_commands: 1,
-  });
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.observed_items, 1);
+  assert.equal(diagnostics.cache_hits, 1);
+  assert.equal(diagnostics.cache_misses, 0);
+  assert.equal(diagnostics.render_accepted, 1);
+  assert.equal(diagnostics.render_rejected, 1);
+  assert.equal(diagnostics.ownership_conflicts, 0);
+  assert.equal(diagnostics.surface_claims, 0);
+  assert.equal(diagnostics.text_claims, 0);
+  assert.equal(diagnostics.surface_releases, 0);
+  assert.equal(diagnostics.text_releases, 0);
+  assert.equal(diagnostics.active_items, 1);
+  assert.equal(diagnostics.detached_items, 0);
+  assert.equal(diagnostics.archived_items, 0);
+  assert.equal(diagnostics.queued_render_commands, 1);
+  assert.deepEqual(diagnostics.recent_events.map((event) => [event.type, event.reason]), [
+    ['observed', 'observed'],
+    ['cacheHit', 'cache-hit'],
+    ['renderQueued', 'hit'],
+    ['renderAccepted', 'render-accepted'],
+    ['renderRejected', 'stale-render'],
+  ]);
 });
 
 test('orchestrator routes render commands through record subscriptions', () => {
@@ -3583,11 +3589,16 @@ test('boot exposes runtime diagnostics and records adapter install timing', asyn
 
   const diagnostics = root.RPGTranslatorOverlay.runtimeDiagnostics;
   assert.ok(diagnostics);
-  root.RPGTranslatorOverlay.orchestrator.translateText({
+  const conflictSurface = {};
+  root.RPGTranslatorOverlay.orchestrator.claimSurface(conflictSurface, 'window-text');
+  root.RPGTranslatorOverlay.orchestrator.claimSurface(conflictSurface, 'bitmap-text');
+  const missCommand = root.RPGTranslatorOverlay.orchestrator.observeRecord({
     adapter: 'diagnostics-test',
     kind: 'text',
     text: 'Missing menu text',
+    surface: conflictSurface,
   });
+  root.RPGTranslatorOverlay.orchestrator.acceptRender(missCommand, conflictSurface, 'Missing menu text');
   root.RPGTranslatorOverlay.foresightScanner.collectUpcomingMessageBlocks({
     currentMessageOrigin: {
       list: [
@@ -3612,6 +3623,15 @@ test('boot exposes runtime diagnostics and records adapter install timing', asyn
   assert.equal(snapshot.performance.timings.some((entry) => entry.name === 'hook.install.message.ms'), true);
   assert.equal(snapshot.orchestrator.cache_misses, 1);
   assert.equal(snapshot.orchestrator.active_items, 1);
+  assert.equal(snapshot.orchestrator.ownership_conflicts, 1);
+  assert.equal(snapshot.orchestrator.render_rejected, 1);
+  assert.deepEqual(snapshot.orchestrator.recent_events.map((event) => [event.type, event.reason]), [
+    ['ownershipConflict', 'ownership-conflict'],
+    ['observed', 'observed'],
+    ['cacheMiss', 'cache-miss'],
+    ['renderQueued', 'miss'],
+    ['renderRejected', 'cache-miss'],
+  ]);
   assert.equal(snapshot.foresight.cache_misses, 1);
   assert.equal(snapshot.foresight.recent_scans[0].stop_reason, 'end-of-list');
 });

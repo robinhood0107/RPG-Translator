@@ -1,5 +1,8 @@
 (function attach(root) {
   const { RenderGuard } = loadDependency(root, './render-guard');
+  const DEFAULT_EVENT_LIMIT = 128;
+  const MAX_EVENT_LIMIT = 512;
+  const TEXT_LIMIT = 160;
 
   class TextOrchestrator {
     constructor(index, options = {}) {
@@ -22,6 +25,9 @@
       this.events = [];
       this.listeners = new Set();
       this.surfaceDrawListeners = new Set();
+      this.now = typeof options.now === 'function' ? options.now : () => Date.now();
+      this.eventSequence = 0;
+      this.eventLimit = positiveInteger(options.eventLimit, DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT);
       this.diagnosticState = {
         observed_items: 0,
         cache_hits: 0,
@@ -64,7 +70,7 @@
         reason: 'observed',
         force: true,
       });
-      this.emit('observed', item);
+      this.emit('observed', Object.assign({ reason: 'observed' }, item));
 
       const translatedText = this.measure('cache.lookup.ms', () => this.lookup(item), { domain: 'runtime' });
       if (!translatedText || translatedText === text) {
@@ -78,6 +84,7 @@
           reason: 'cache-miss',
           force: true,
         });
+        this.emit('cacheMiss', Object.assign({ reason: 'cache-miss', status: 'miss' }, item));
         return this.queueRenderCommand(item, text, 'miss');
       }
       this.diagnosticState.cache_hits += 1;
@@ -90,6 +97,7 @@
         reason: 'cache-hit',
         force: true,
       });
+      this.emit('cacheHit', Object.assign({ reason: 'cache-hit', status: 'hit', translatedText }, item));
       return this.queueRenderCommand(item, translatedText, 'hit');
     }
 
@@ -110,11 +118,13 @@
       if (accepted) {
         this.diagnosticState.render_accepted += 1;
         item.lastRenderStatus = 'accepted';
+        command.reason = 'render-accepted';
         this.emit('renderAccepted', command);
         return true;
       }
       this.diagnosticState.render_rejected += 1;
       if (item) item.lastRenderStatus = 'rejected';
+      command.reason = renderRejectionReason(item, command, stillFresh);
       this.emit('renderRejected', command);
       return false;
     }
@@ -161,7 +171,13 @@
       const current = this.surfaceClaims.get(surface);
       if (current && current !== owner) {
         this.diagnosticState.ownership_conflicts += 1;
-        this.emit('ownershipConflict', { kind: 'surface', owner, current, surfaceId: this.surfaceId(surface) });
+        this.emit('ownershipConflict', {
+          kind: 'surface',
+          owner,
+          current,
+          surfaceId: this.surfaceId(surface),
+          reason: 'ownership-conflict',
+        });
         return false;
       }
       if (!current) this.diagnosticState.surface_claims += 1;
@@ -183,7 +199,13 @@
       const current = this.textClaims.get(slotId);
       if (current && current !== owner) {
         this.diagnosticState.ownership_conflicts += 1;
-        this.emit('ownershipConflict', { kind: 'text', owner, current, slotId });
+        this.emit('ownershipConflict', {
+          kind: 'text',
+          owner,
+          current,
+          slotId,
+          reason: 'ownership-conflict',
+        });
         return false;
       }
       if (!current) this.diagnosticState.text_claims += 1;
@@ -210,6 +232,7 @@
         detached_items: this.detachedItems.size,
         archived_items: this.archivedItems.size,
         queued_render_commands: this.renderQueue.length,
+        recent_events: this.events.slice(),
       });
       if (this.runtimeDiagnostics && typeof this.runtimeDiagnostics.snapshot === 'function') {
         diagnostics.runtime_diagnostics = this.runtimeDiagnostics.snapshot({ detailView: false });
@@ -302,6 +325,7 @@
         sourceText: item.sourceText,
         translatedText: String(translatedText ?? ''),
         status,
+        reason: status,
         strategy: item.renderStrategy || '',
         generation: item.generation,
         renderToken: this.guard ? this.guard.capture(item.surface, item.sourceText) : null,
@@ -434,8 +458,8 @@
 
     emit(type, payload) {
       const event = { type, payload };
-      this.events.push(event);
-      if (this.events.length > 128) this.events.shift();
+      this.events.push(this.toDiagnosticEvent(type, payload));
+      while (this.events.length > this.eventLimit) this.events.shift();
       for (const listener of this.listeners) {
         try {
           listener(event);
@@ -443,6 +467,27 @@
           // Listener failures must not break game rendering.
         }
       }
+    }
+
+    toDiagnosticEvent(type, payload) {
+      const source = payload && typeof payload === 'object' ? payload : {};
+      return {
+        seq: ++this.eventSequence,
+        at: this.now(),
+        type: String(type || 'event'),
+        itemId: stringValue(source.itemId || source.id),
+        surfaceId: stringValue(source.surfaceId),
+        slotId: stringValue(source.slotId),
+        adapter: stringValue(source.adapter || source.sourceAdapter),
+        kind: stringValue(source.kind),
+        status: stringValue(source.status),
+        reason: stringValue(source.reason || defaultEventReason(type, source)),
+        sourceText: limitText(source.sourceText || source.text),
+        translatedText: limitText(source.translatedText),
+        owner: stringValue(source.owner),
+        current: stringValue(source.current),
+        ownershipKind: type === 'ownershipConflict' ? stringValue(source.kind) : '',
+      };
     }
   }
 
@@ -458,6 +503,43 @@
   function numberOrDefault(value, fallback) {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function positiveInteger(value, fallback, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+    return Math.min(Math.floor(numeric), max);
+  }
+
+  function renderRejectionReason(item, command, stillFresh) {
+    if (!item) return 'missing-item';
+    if (!command || command.status !== 'hit') {
+      return command && command.status === 'miss' ? 'cache-miss' : 'not-cache-hit';
+    }
+    if (!stillFresh) return 'stale-render';
+    return 'render-rejected';
+  }
+
+  function defaultEventReason(type, source) {
+    if (type === 'renderQueued') return source.status || 'queued';
+    if (type === 'observed') return 'observed';
+    if (type === 'cacheHit') return 'cache-hit';
+    if (type === 'cacheMiss') return 'cache-miss';
+    if (type === 'renderAccepted') return 'render-accepted';
+    if (type === 'renderRejected') return 'render-rejected';
+    if (type === 'ownershipConflict') return 'ownership-conflict';
+    return '';
+  }
+
+  function stringValue(value) {
+    if (value === null || typeof value === 'undefined') return '';
+    return String(value);
+  }
+
+  function limitText(value) {
+    const text = stringValue(value);
+    if (text.length <= TEXT_LIMIT) return text;
+    return `${text.slice(0, TEXT_LIMIT)}...`;
   }
 
   function normalizeSurfaceDrawDecision(input) {
