@@ -18,6 +18,7 @@
       this.domainTimings = new Map();
       this.adapterStatuses = [];
       this.frames = [];
+      this.orchestratorSnapshotProvider = null;
       this.foresightSnapshotProvider = null;
       this.frameTotals = {
         total: 0,
@@ -136,6 +137,10 @@
       this.foresightSnapshotProvider = typeof provider === 'function' ? provider : null;
     }
 
+    setOrchestratorSnapshotProvider(provider) {
+      this.orchestratorSnapshotProvider = typeof provider === 'function' ? provider : null;
+    }
+
     snapshot(options = {}) {
       const detailView = options.detailView !== false && options.includeDetails !== false;
       const drawEvents = detailView ? this.drawEvents.slice() : [];
@@ -158,6 +163,7 @@
           summary: summarizeEvents(this.drawEvents),
           events: drawEvents,
         },
+        orchestrator: this.orchestratorSnapshot(),
         foresight: this.foresightSnapshot(),
       };
     }
@@ -175,6 +181,18 @@
       this.adapterStatuses.length = 0;
       this.frames.length = 0;
       this.frameTotals = { total: 0, slow: 0, dropped: 0 };
+    }
+
+    orchestratorSnapshot() {
+      if (!this.orchestratorSnapshotProvider) return null;
+      try {
+        const snapshot = this.orchestratorSnapshotProvider();
+        return snapshot && typeof snapshot === 'object' ? sanitize(snapshot, 4) : null;
+      } catch (_) {
+        return {
+          status: 'unavailable',
+        };
+      }
     }
 
     foresightSnapshot() {

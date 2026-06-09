@@ -3583,6 +3583,11 @@ test('boot exposes runtime diagnostics and records adapter install timing', asyn
 
   const diagnostics = root.RPGTranslatorOverlay.runtimeDiagnostics;
   assert.ok(diagnostics);
+  root.RPGTranslatorOverlay.orchestrator.translateText({
+    adapter: 'diagnostics-test',
+    kind: 'text',
+    text: 'Missing menu text',
+  });
   root.RPGTranslatorOverlay.foresightScanner.collectUpcomingMessageBlocks({
     currentMessageOrigin: {
       list: [
@@ -3605,6 +3610,8 @@ test('boot exposes runtime diagnostics and records adapter install timing', asyn
     'pixi-text',
   ]);
   assert.equal(snapshot.performance.timings.some((entry) => entry.name === 'hook.install.message.ms'), true);
+  assert.equal(snapshot.orchestrator.cache_misses, 1);
+  assert.equal(snapshot.orchestrator.active_items, 1);
   assert.equal(snapshot.foresight.cache_misses, 1);
   assert.equal(snapshot.foresight.recent_scans[0].stop_reason, 'end-of-list');
 });

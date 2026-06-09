@@ -48,6 +48,16 @@
         })
         : null;
       if (runtimeDiagnostics
+        && orchestrator
+        && typeof orchestrator.diagnostics === 'function'
+        && typeof runtimeDiagnostics.setOrchestratorSnapshotProvider === 'function') {
+        runtimeDiagnostics.setOrchestratorSnapshotProvider(() => {
+          const snapshot = Object.assign({}, orchestrator.diagnostics());
+          delete snapshot.runtime_diagnostics;
+          return snapshot;
+        });
+      }
+      if (runtimeDiagnostics
         && foresightScanner
         && typeof runtimeDiagnostics.setForesightSnapshotProvider === 'function') {
         runtimeDiagnostics.setForesightSnapshotProvider(() => foresightScanner.getSnapshot());
