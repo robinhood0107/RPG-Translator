@@ -6,7 +6,7 @@ use rpg_translator_core::{
     NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse, ProviderClient,
     ProviderRequestSpacingConfig, ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, TextCodec,
     TranslateProgressEvent, TranslationDb, TranslationSpeedSample,
-    adaptive_translation_tuning_from_samples,
+    adaptive_translation_tuning_from_samples, adaptive_translation_tuning_from_samples_for_lanes,
 };
 use tempfile::tempdir;
 
@@ -182,6 +182,59 @@ fn adaptive_tuning_uses_real_prompt_benchmark_samples() {
     assert_eq!(tuning.max_items_per_batch, 32);
     assert_eq!(tuning.provider_spacing.base_success_spacing_ms, 1250);
     assert!(tuning.decision_reason.contains("accelerating"));
+}
+
+#[test]
+fn adaptive_tuning_filters_history_to_current_lanes() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let mut fast_short = vec![
+        speed_sample("success", 16, 2_000),
+        speed_sample("success", 16, 2_500),
+        speed_sample("success", 16, 3_000),
+    ];
+    for sample in &mut fast_short {
+        sample.lane = "short".to_string();
+    }
+    let mut failing_complex = vec![
+        speed_sample("recoverable_provider", 16, 1_000),
+        speed_sample("parse_failed", 16, 1_000),
+        speed_sample("final_failed", 16, 1_000),
+    ];
+    for sample in &mut failing_complex {
+        sample.lane = "complex".to_string();
+    }
+    let mut samples = fast_short;
+    samples.extend(failing_complex);
+
+    let short_tuning = adaptive_translation_tuning_from_samples_for_lanes(
+        &samples,
+        &["short"],
+        8,
+        4096,
+        spacing.clone(),
+    );
+    assert_eq!(short_tuning.max_items_per_batch, 32);
+    assert_eq!(short_tuning.provider_spacing.base_success_spacing_ms, 1250);
+    assert!(short_tuning.decision_reason.contains("accelerating"));
+    assert!(short_tuning.decision_reason.contains("lanes=short"));
+    assert!(short_tuning.decision_reason.contains("lane_samples=3/6"));
+
+    let complex_tuning = adaptive_translation_tuning_from_samples_for_lanes(
+        &samples,
+        &["complex"],
+        16,
+        4096,
+        spacing,
+    );
+    assert_eq!(complex_tuning.max_items_per_batch, 8);
+    assert_eq!(complex_tuning.input_token_budget, 2048);
+    assert_eq!(
+        complex_tuning.provider_spacing.base_success_spacing_ms,
+        1500
+    );
+    assert!(complex_tuning.decision_reason.contains("conservative"));
+    assert!(complex_tuning.decision_reason.contains("lanes=complex"));
+    assert!(complex_tuning.decision_reason.contains("lane_samples=3/6"));
 }
 
 #[test]

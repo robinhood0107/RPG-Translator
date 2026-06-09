@@ -119,6 +119,13 @@ impl BatchLane {
     }
 }
 
+impl BatchJob {
+    #[must_use]
+    pub fn lane_key(&self) -> &'static str {
+        self.lane.as_key()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchPlan {
     pub jobs: Vec<BatchJob>,
@@ -501,6 +508,64 @@ pub fn adaptive_translation_tuning_from_samples(
             spacing.base_success_spacing_ms
         ),
     }
+}
+
+#[must_use]
+pub fn adaptive_translation_tuning_from_samples_for_lanes(
+    samples: &[TranslationSpeedSample],
+    target_lanes: &[&str],
+    requested_batch_size: usize,
+    default_token_budget: usize,
+    default_spacing: ProviderRequestSpacingConfig,
+) -> AdaptiveTranslationTuning {
+    let lanes = target_lanes
+        .iter()
+        .map(|lane| lane.trim())
+        .filter(|lane| !lane.is_empty())
+        .collect::<BTreeSet<_>>();
+    if lanes.is_empty() {
+        return adaptive_translation_tuning_from_samples(
+            samples,
+            requested_batch_size,
+            default_token_budget,
+            default_spacing,
+        );
+    }
+
+    let matching_samples = samples
+        .iter()
+        .filter(|sample| lanes.contains(sample.lane.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let matched_count = matching_samples.len();
+    let (samples_for_tuning, used_fallback) = if matching_samples.is_empty() && !samples.is_empty()
+    {
+        (samples.to_vec(), true)
+    } else {
+        (matching_samples, false)
+    };
+
+    let mut tuning = adaptive_translation_tuning_from_samples(
+        &samples_for_tuning,
+        requested_batch_size,
+        default_token_budget,
+        default_spacing,
+    );
+    let lane_list = lanes.iter().copied().collect::<Vec<_>>().join(",");
+    if used_fallback {
+        tuning.decision_reason = format!(
+            "{}; lanes={lane_list}; lane_samples=0/{}; lane_fallback=all",
+            tuning.decision_reason,
+            samples.len()
+        );
+    } else {
+        tuning.decision_reason = format!(
+            "{}; lanes={lane_list}; lane_samples={matched_count}/{}",
+            tuning.decision_reason,
+            samples.len()
+        );
+    }
+    tuning
 }
 
 fn is_success_speed_sample(sample: &TranslationSpeedSample) -> bool {

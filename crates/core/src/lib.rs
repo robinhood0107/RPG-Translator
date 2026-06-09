@@ -18,7 +18,8 @@ pub use batch::{
     ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse, ProviderClient,
     ProviderRequestSpacingConfig, ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig,
     ProviderSpeedBenchmarkReport, ProviderSpeedBenchmarkRun, ValidatedTranslation,
-    adaptive_translation_tuning_from_samples, translation_prompt_hash,
+    adaptive_translation_tuning_from_samples, adaptive_translation_tuning_from_samples_for_lanes,
+    translation_prompt_hash,
 };
 pub use cache_key::{CacheKeyBuilder, CacheKeyParts};
 pub use db::{SchemaMigrationReport, TranslationDb};

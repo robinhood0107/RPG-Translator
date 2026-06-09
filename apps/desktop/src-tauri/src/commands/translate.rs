@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -12,12 +12,13 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use rpg_translator_core::{
-    BatchFailureDetail, BatchTranslator, BatchTranslatorConfig, Error, LocalOpenAiConfig,
-    LocalOpenAiProvider, LocalProviderTransport, NewProviderRun, NewTranslationSpeedSample,
-    ProviderBatchItem, ProviderBatchRequest, ProviderClient, ProviderRequestSpacingConfig,
-    ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result,
-    TextCodec, TranslateProgressEvent, TranslateProgressSnapshot,
-    adaptive_translation_tuning_from_samples, translation_prompt_hash,
+    BatchFailureDetail, BatchPlanner, BatchPlannerConfig, BatchTranslator, BatchTranslatorConfig,
+    CheckpointWriter, Error, LocalOpenAiConfig, LocalOpenAiProvider, LocalProviderTransport,
+    NewProviderRun, NewTranslationSpeedSample, ProviderBatchItem, ProviderBatchRequest,
+    ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
+    ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result, TextCodec,
+    TranslateProgressEvent, TranslateProgressSnapshot,
+    adaptive_translation_tuning_from_samples_for_lanes, translation_prompt_hash,
 };
 
 use super::shared::{
@@ -255,12 +256,52 @@ async fn translate_with_local_provider_running(
             &request.system_prompt,
         );
         let requested_batch_size = request.batch_size.unwrap_or(16);
+        let default_token_budget = BatchTranslatorConfig::default().input_token_budget;
+        let mut preview_completed_source_text_ids = CheckpointWriter::read(&checkpoint_path)?
+            .map(|checkpoint| {
+                if checkpoint.target_language != request.target_language {
+                    return Err(Error::invalid_input(format!(
+                        "checkpoint target language {} does not match {}",
+                        checkpoint.target_language, request.target_language
+                    )));
+                }
+                Ok(checkpoint
+                    .completed_source_text_ids
+                    .into_iter()
+                    .collect::<BTreeSet<_>>())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if include_existing_translations && let Some(source_text_ids) = source_text_ids.as_ref() {
+            for source_text_id in source_text_ids {
+                preview_completed_source_text_ids.remove(source_text_id);
+            }
+        }
+        let preview_plan = BatchPlanner::plan_with_completed(
+            &db,
+            &request.target_language,
+            BatchPlannerConfig {
+                max_items_per_batch: requested_batch_size,
+                input_token_budget: default_token_budget,
+                source_text_ids: source_text_ids
+                    .as_ref()
+                    .map(|ids| ids.iter().copied().collect::<BTreeSet<_>>()),
+                include_existing_translations,
+            },
+            &preview_completed_source_text_ids,
+        )?;
+        let target_lanes = preview_plan
+            .jobs
+            .iter()
+            .map(rpg_translator_core::BatchJob::lane_key)
+            .collect::<Vec<_>>();
         let prior_speed_samples =
             db.recent_translation_speed_samples(provider.model_name(), Some(&prompt_hash), 96)?;
-        let adaptive_tuning = adaptive_translation_tuning_from_samples(
+        let adaptive_tuning = adaptive_translation_tuning_from_samples_for_lanes(
             &prior_speed_samples,
+            &target_lanes,
             requested_batch_size,
-            BatchTranslatorConfig::default().input_token_budget,
+            default_token_budget,
             ProviderRequestSpacingConfig::stable(),
         );
         let progress_state = state.clone();

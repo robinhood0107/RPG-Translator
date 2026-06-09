@@ -1385,7 +1385,7 @@ fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
                 db.insert_translation_speed_sample(&NewTranslationSpeedSample {
                     provider_run_id,
                     batch_index,
-                    lane: "plain_block".to_string(),
+                    lane: "short".to_string(),
                     item_count: 16,
                     char_count: 640,
                     estimated_token_count: 160,
@@ -1400,6 +1400,26 @@ fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
                     prompt_hash: prompt_hash.clone(),
                 })
                 .expect("insert speed sample");
+            }
+            for batch_index in 4..=6 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "complex".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 1_000,
+                    success_delay_ms: 0,
+                    total_elapsed_ms: 1_000,
+                    status: "parse_failed".to_string(),
+                    failure_type: Some("provider-json-parse".to_string()),
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture complex failure".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert complex speed sample");
             }
         }
         let provider = spawn_local_provider_expect(
@@ -1429,6 +1449,125 @@ fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
         assert_eq!(response.accepted_count, 2);
         assert_eq!(response.effective_batch_size, 32);
         assert!(response.adaptive_decision_reason.contains("accelerating"));
+        assert!(response.adaptive_decision_reason.contains("lanes=short"));
+        assert!(
+            response
+                .adaptive_decision_reason
+                .contains("lane_samples=3/6")
+        );
+    });
+}
+
+#[test]
+fn translate_command_tunes_from_pending_checkpoint_lanes_only() {
+    tauri::async_runtime::block_on(async {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("workbench.sqlite");
+        let prompt = "Custom RPG prompt";
+        let completed_complex_id;
+        {
+            let mut db = TranslationDb::open(&db_path).expect("open db");
+            db.migrate().expect("migrate db");
+            let completed_complex = source_text_fixture("en", "\\C[2]Completed");
+            completed_complex_id = db
+                .upsert_source_text(&completed_complex)
+                .expect("insert completed complex source");
+            db.upsert_source_text(&source_text_fixture("en", "Pending short"))
+                .expect("insert pending short source");
+            let provider_run_id = db
+                .start_provider_run(&rpg_translator_core::NewProviderRun {
+                    provider: "local-openai-compatible".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    request_settings_json: "{}".to_string(),
+                })
+                .expect("start provider run");
+            let prompt_hash = translation_prompt_hash("en", "ko", prompt);
+            for batch_index in 1..=3 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "short".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 2_000,
+                    success_delay_ms: 750,
+                    total_elapsed_ms: 2_750,
+                    status: "success".to_string(),
+                    failure_type: None,
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture short success".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert short speed sample");
+            }
+            for batch_index in 4..=6 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "complex".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 1_000,
+                    success_delay_ms: 0,
+                    total_elapsed_ms: 1_000,
+                    status: "parse_failed".to_string(),
+                    failure_type: Some("provider-json-parse".to_string()),
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture complex failure".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert complex speed sample");
+            }
+        }
+        let checkpoint_path = translate::translation_checkpoint_path(&path_string(&db_path), "ko");
+        CheckpointWriter::write_atomic(
+            &checkpoint_path,
+            &BatchCheckpoint {
+                provider_run_id: 99,
+                target_language: "ko".to_string(),
+                completed_source_text_ids: vec![completed_complex_id],
+                failed_source_text_ids: Vec::new(),
+                failure_details: Vec::new(),
+            },
+        )
+        .expect("write checkpoint");
+        let provider = spawn_local_provider_expect(
+            r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"대기\"}"}}]}"#,
+            "from English to Korean",
+        );
+
+        let response = translate::translate_with_local_provider_for_test(TranslateRequest {
+            db_path: path_string(&db_path),
+            project_id: None,
+            source_language: "en".to_string(),
+            target_language: "ko".to_string(),
+            batch_size: Some(4),
+            base_url: provider.base_url.clone(),
+            model: "fixture-model".to_string(),
+            system_prompt: prompt.to_string(),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            source_text_ids: None,
+            issue_filter: None,
+            retranslate_mode: None,
+        })
+        .await
+        .expect("translate with checkpoint lane-aware adaptive samples");
+
+        assert_eq!(response.accepted_count, 1);
+        assert_eq!(response.effective_batch_size, 32);
+        assert!(response.adaptive_decision_reason.contains("accelerating"));
+        assert!(response.adaptive_decision_reason.contains("lanes=short"));
+        assert!(
+            response
+                .adaptive_decision_reason
+                .contains("lane_samples=3/6")
+        );
     });
 }
 
