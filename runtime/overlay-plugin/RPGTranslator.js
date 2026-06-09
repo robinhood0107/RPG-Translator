@@ -8,6 +8,7 @@
     'wrapping.js',
     'runtime-diagnostics.js',
     'orchestrator.js',
+    'adapter-contract.js',
     'foresight-scanner.js',
     'cache-loader.js',
     'message-adapter.js',

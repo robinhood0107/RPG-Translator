@@ -10,6 +10,7 @@ const { CacheKeyBuilder, LookupIndex } = require('../lookup-index');
 const { CacheLoader } = require('../cache-loader');
 const { MessageAdapter } = require('../message-adapter');
 const { TextOrchestrator } = require('../orchestrator');
+const { createAdapterContract } = require('../adapter-contract');
 const { PixiTextAdapter } = require('../pixi-text-adapter');
 const { RenderGuard } = require('../render-guard');
 const { RuntimeEntry } = require('../RPGTranslator');
@@ -1296,6 +1297,78 @@ test('orchestrator remembers record-backed events on adapter records', async () 
   assert.equal(records.get(failedCommand.itemId).status, 'failed');
   assert.equal(records.get(failedCommand.itemId).lastEventType, 'item.failed');
   assert.equal(records.get(failedCommand.itemId).lastEventReason, 'adapter failed');
+});
+
+test('adapter contract wraps cache-only orchestrator lifecycle for adapter records', async () => {
+  const surface = {};
+  const records = new Map();
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'Contract source') return '계약 번역';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const contract = createAdapterContract({
+    adapterId: 'window-text',
+    defaultHook: 'drawText',
+    orchestratorGateway: orchestrator,
+  });
+  const record = {
+    name: 'contract-record',
+  };
+
+  const observed = contract.observeRecord(record, {
+    kind: 'drawText',
+    surface,
+    slotKey: 'contract-record',
+    text: 'Old contract source',
+    renderStrategy: 'window-text',
+  }, {}, {
+    records,
+  });
+
+  assert.equal(observed.itemId.startsWith('item-'), true);
+  assert.equal(record.recordId, observed.itemId);
+  assert.equal(records.get(observed.itemId), record);
+  assert.equal(contract.isRecordObserved(record), true);
+  assert.equal(contract.getRecordStatus(record), 'detected');
+
+  const updated = contract.updateItem(record, {
+    sourceText: 'Contract source',
+    renderStrategy: 'window-text',
+  }, {
+    eventType: 'item.updated',
+    message: 'contract source changed',
+  });
+  assert.equal(updated.id, observed.itemId);
+  assert.equal(contract.requestItemTranslation(record, {
+    renderStrategy: 'window-text',
+    sourceHint: 'cache-only',
+  }), true);
+  assert.equal(contract.getRecordStatus(record), 'pending');
+  assert.equal(contract.isRecordRequestActive(record), true);
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.active[0].translation, '계약 번역');
+  assert.equal(diagnostics.renderQueue.at(-1).translatedText, '계약 번역');
+
+  assert.equal(contract.retireItem(record, 'disappeared', {
+    message: 'window removed',
+    recordDetached: true,
+  }).status, 'disappeared');
+  assert.equal(contract.getRecordStatus(record), 'disappeared');
+  assert.equal(contract.isRecordActive(record), false);
+  assert.equal(contract.updateItem(record, {
+    metadata: { detached: true },
+  }).id, observed.itemId);
+
+  assert.equal(contract.retireItem(record, 'removed').status, 'removed');
+  assert.equal(contract.isRecordActive(record), false);
+  assert.equal(contract.requestItemTranslation(record), false);
 });
 
 test('orchestrator exposes cache-only adapter lifecycle and eligibility APIs', () => {
@@ -4842,6 +4915,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}wrapping.js`,
     `${baseUrl}runtime-diagnostics.js`,
     `${baseUrl}orchestrator.js`,
+    `${baseUrl}adapter-contract.js`,
     `${baseUrl}foresight-scanner.js`,
     `${baseUrl}cache-loader.js`,
     `${baseUrl}message-adapter.js`,
