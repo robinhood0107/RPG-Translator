@@ -188,6 +188,42 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
 }
 
 #[test]
+fn installer_rejects_runtime_contract_mismatch_before_mutating_game() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let export = temp.path().join("export");
+    let original_plugins =
+        r#"var $plugins = [{"name":"Existing","status":true,"description":"","parameters":{}}];"#;
+    make_direct_game(&game, original_plugins);
+    make_export_bundle(&export);
+
+    let mut config = OverlayConfig::runtime_default();
+    config.runtime_load_contract.plugin_entry_file = "WrongTranslator.js".to_string();
+    write_text(
+        &export.join("overlay-config.json"),
+        &serde_json::to_string(&config).expect("encode broken config"),
+    );
+
+    let error = Installer::install(&install_options(game.clone(), export))
+        .expect_err("runtime contract mismatch should stop install");
+
+    assert!(
+        error
+            .to_string()
+            .contains("runtime load contract plugin_entry_file"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read plugins"),
+        original_plugins
+    );
+    assert!(!game.join("js/plugins/RPGTranslator.js").exists());
+    assert!(!game.join("js/plugins/rpg-translator").exists());
+
+    Ok(())
+}
+
+#[test]
 fn rollback_rejects_modified_backup_before_mutating_game() -> Result<()> {
     let temp = tempdir().expect("create temp dir");
     let game = temp.path().join("game");
