@@ -484,6 +484,7 @@ export const text = {
     savedDraft: "Draft saved",
     saveFailed: "Save failed",
     safeStopping: "Safe stopping...",
+    staleRunsRecovered: "Recovered interrupted translation jobs: {count}",
     refreshDiagnostics: "Refresh diagnostics",
     rejected: "Rejected",
     parseFailed: "JSON parse errors",
@@ -879,6 +880,7 @@ export const text = {
     savedDraft: "수정 초안 저장됨",
     saveFailed: "저장 실패",
     safeStopping: "안전 정지 중...",
+    staleRunsRecovered: "중단된 번역 작업 복구: {count}",
     refreshDiagnostics: "진단 새로고침",
     rejected: "거부됨",
     parseFailed: "JSON 파싱 오류",
@@ -1650,6 +1652,20 @@ export default function App() {
     }
   }
 
+  function showTransientSaveStatus(status: SaveStatus, message: string, timeoutMs = 1800) {
+    if (saveStatusTimerRef.current !== null) {
+      window.clearTimeout(saveStatusTimerRef.current);
+      saveStatusTimerRef.current = null;
+    }
+    setSaveStatus(status);
+    setSaveMessage(message);
+    saveStatusTimerRef.current = window.setTimeout(() => {
+      setSaveStatus("idle");
+      setSaveMessage("");
+      saveStatusTimerRef.current = null;
+    }, timeoutMs);
+  }
+
   function openContextMenuAtPoint(x: number, y: number, items: AppContextMenuItem[]) {
     if (items.length === 0) {
       setContextMenu(null);
@@ -1984,6 +2000,13 @@ export default function App() {
     const restoredProgress = progressFromHydration(response);
     if (restoredProgress) {
       setTranslateProgress(restoredProgress);
+    }
+    if ((response.stale_runs_interrupted ?? 0) > 0) {
+      showTransientSaveStatus(
+        "saved",
+        t.staleRunsRecovered.replace("{count}", response.stale_runs_interrupted.toLocaleString()),
+        4000,
+      );
     }
   }
 

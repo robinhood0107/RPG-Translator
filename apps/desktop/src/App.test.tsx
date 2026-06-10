@@ -2191,6 +2191,27 @@ test("scan completion releases the UI even when post-scan hydration is still pen
   await waitFor(() => expect(screen.getByRole("tab", { name: "Review" })).toHaveAttribute("aria-selected", "true"));
 });
 
+test("hydrate reports stale translation recovery in desktop status", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({
+        active_tab: "translate",
+        stale_runs_interrupted: 3,
+      }));
+    }
+    if (name === "review_queue") {
+      return Promise.resolve({ rows: [], total_count: 0, next_offset: null });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  expect(await screen.findByText("Recovered interrupted translation jobs: 3")).toBeInTheDocument();
+});
+
 test("desktop translate progress events update progress and pause resumes later", async () => {
   (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
   localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
@@ -2685,6 +2706,7 @@ function hydratedWorkbench(overrides: {
   review_counts?: ReviewCounts | null;
   latest_job?: TranslationJobSummary | null;
   checkpoint?: CheckpointSummary | null;
+  stale_runs_interrupted?: number;
 } = {}) {
   const project = overrides.project ?? testProject();
   const workspace = overrides.workspace ?? testWorkspace({
@@ -2711,7 +2733,7 @@ function hydratedWorkbench(overrides: {
     review_counts: overrides.review_counts ?? testReviewCounts(),
     checkpoint: overrides.checkpoint ?? null,
     latest_job: overrides.latest_job ?? null,
-    stale_runs_interrupted: 0,
+    stale_runs_interrupted: overrides.stale_runs_interrupted ?? 0,
   };
 }
 
