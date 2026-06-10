@@ -143,6 +143,9 @@ type TranslateProgressSnapshot = {
   batchEtaMs?: number | null;
   lastBatchElapsedMs?: number | null;
   avgBatchElapsedMs?: number | null;
+  recentP50BatchElapsedMs?: number | null;
+  recentP95BatchElapsedMs?: number | null;
+  bestItemsPerMinute?: number | null;
   currentBatchItems: number;
   startedCompletedItems: number;
   parseFailedItems: number;
@@ -154,11 +157,14 @@ type TranslateProgressSnapshot = {
   finalFailedItems: number;
   providerBackoffMs?: number | null;
   effectiveBatchSize: number;
+  nextExperimentBatchSize: number;
+  inputTokenBudget: number;
   speedMode: string;
   successStreak: number;
   successDelayFloorMs: number;
   nextDelayMs?: number | null;
   failureReasonCounts: Record<string, number>;
+  adaptiveDecisionReason: string;
   legacyCheckpointOnly: boolean;
   phase: TranslateProgressPhase;
 };
@@ -178,6 +184,9 @@ type TranslateProgressEventData = {
   batch_eta_ms?: number | null;
   last_batch_elapsed_ms?: number | null;
   avg_batch_elapsed_ms?: number | null;
+  recent_p50_batch_elapsed_ms?: number | null;
+  recent_p95_batch_elapsed_ms?: number | null;
+  best_items_per_minute?: number | null;
   current_batch_items?: number;
   started_completed_items?: number;
   parse_failed_items?: number;
@@ -189,11 +198,14 @@ type TranslateProgressEventData = {
   final_failed_items?: number;
   provider_backoff_ms?: number | null;
   effective_batch_size?: number;
+  next_experiment_batch_size?: number;
+  input_token_budget?: number;
   speed_mode?: string;
   success_streak?: number;
   success_delay_floor_ms?: number;
   next_delay_ms?: number | null;
   failure_reason_counts?: Record<string, number>;
+  adaptive_decision_reason?: string;
   legacy_checkpoint_only?: boolean;
 };
 type TranslateProgressEventPayload =
@@ -273,7 +285,7 @@ const defaultTargetLanguage: TargetLanguageCode = "ko";
 const defaultProviderModel = "auto";
 const customTargetLanguageValue: TargetLanguageSelection = "custom";
 const defaultReviewPageSize = 200;
-const safeCloseStepTimeoutMs = 2500;
+const safeCloseTotalTimeoutMs = 2000;
 const reviewPageSizeOptions = [50, 100, 200, 500];
 const languageStorageKey = "rpg-translator-language";
 const sourceLanguageStorageKey = "rpg-translator-source-language";
@@ -362,7 +374,13 @@ export const text = {
     successStreak: "Success streak",
     successDelayFloor: "Success wait floor",
     nextDelay: "Next wait",
+    nextExperimentBatch: "Next experiment batch",
+    inputTokenBudget: "Input token budget",
     recentAverageSpeed: "Recent average speed",
+    recentP50Batch: "Recent p50 batch",
+    recentP95Batch: "Recent p95 batch",
+    bestItemsPerMinute: "Best speed",
+    adaptiveDecisionReason: "Speed tuning reason",
     failureReasons: "Recent failure reasons",
     batchHistoryUnavailable: "Batch history unavailable",
     legacyRetryNotice: "Previous run failures are retry targets. Resume will retry them.",
@@ -466,6 +484,7 @@ export const text = {
     savedDraft: "Draft saved",
     saveFailed: "Save failed",
     safeStopping: "Safe stopping...",
+    staleRunsRecovered: "Recovered interrupted translation jobs: {count}",
     refreshDiagnostics: "Refresh diagnostics",
     rejected: "Rejected",
     parseFailed: "JSON parse errors",
@@ -751,7 +770,13 @@ export const text = {
     successStreak: "연속 성공",
     successDelayFloor: "성공 후 최소 대기",
     nextDelay: "다음 대기",
+    nextExperimentBatch: "다음 실험 배치",
+    inputTokenBudget: "입력 토큰 예산",
     recentAverageSpeed: "최근 평균 속도",
+    recentP50Batch: "최근 p50 배치",
+    recentP95Batch: "최근 p95 배치",
+    bestItemsPerMinute: "최고 속도",
+    adaptiveDecisionReason: "속도 조정 사유",
     failureReasons: "최근 실패 원인",
     batchHistoryUnavailable: "배치 기록 없음",
     legacyRetryNotice: "이전 실행 실패는 이어하기 대상입니다. 이어하기를 누르면 다시 시도합니다.",
@@ -855,6 +880,7 @@ export const text = {
     savedDraft: "수정 초안 저장됨",
     saveFailed: "저장 실패",
     safeStopping: "안전 정지 중...",
+    staleRunsRecovered: "중단된 번역 작업 복구: {count}",
     refreshDiagnostics: "진단 새로고침",
     rejected: "거부됨",
     parseFailed: "JSON 파싱 오류",
@@ -1332,18 +1358,16 @@ export default function App() {
           safeCloseArmedRef.current = true;
           setSaveStatus("safe_stopping");
           setSaveMessage(t.safeStopping);
-          await boundedCloseStep(flushWorkbenchState({
+          const closeStartedAt = Date.now();
+          const flushWork = flushWorkbenchState({
             drafts: Object.values(reviewDraftSaves),
             visible: true,
-          }));
-          await boundedCloseStep(callCommand("prepare_safe_shutdown", {
+          });
+          const shutdownWork = callCommand("prepare_safe_shutdown", {
             db_path: activeDbPath || null,
-          }));
-          try {
-            await appWindow.destroy();
-          } catch {
-            await appWindow.close();
-          }
+          });
+          await boundedCloseWork([flushWork, shutdownWork], closeStartedAt);
+          await closeWindowWithFallback(appWindow, closeStartedAt);
         });
       })
       .then((listener) => {
@@ -1626,6 +1650,20 @@ export default function App() {
       setSaveMessage(userFacingCommandError(caught, t));
       return false;
     }
+  }
+
+  function showTransientSaveStatus(status: SaveStatus, message: string, timeoutMs = 1800) {
+    if (saveStatusTimerRef.current !== null) {
+      window.clearTimeout(saveStatusTimerRef.current);
+      saveStatusTimerRef.current = null;
+    }
+    setSaveStatus(status);
+    setSaveMessage(message);
+    saveStatusTimerRef.current = window.setTimeout(() => {
+      setSaveStatus("idle");
+      setSaveMessage("");
+      saveStatusTimerRef.current = null;
+    }, timeoutMs);
   }
 
   function openContextMenuAtPoint(x: number, y: number, items: AppContextMenuItem[]) {
@@ -1962,6 +2000,13 @@ export default function App() {
     const restoredProgress = progressFromHydration(response);
     if (restoredProgress) {
       setTranslateProgress(restoredProgress);
+    }
+    if ((response.stale_runs_interrupted ?? 0) > 0) {
+      showTransientSaveStatus(
+        "saved",
+        t.staleRunsRecovered.replace("{count}", response.stale_runs_interrupted.toLocaleString()),
+        4000,
+      );
     }
   }
 
@@ -3001,13 +3046,66 @@ function readRecentProjectFilePath() {
   return normalizeWindowsUserPath(localStorage.getItem(recentProjectFileStorageKey)?.trim() ?? "");
 }
 
-async function boundedCloseStep(work: Promise<unknown>) {
+async function boundedCloseWork(work: Array<Promise<unknown>>, startedAtMs: number) {
+  const remainingMs = Math.max(0, safeCloseTotalTimeoutMs - (Date.now() - startedAtMs));
   await Promise.race([
-    work.catch(() => undefined),
+    Promise.allSettled(work),
     new Promise<void>((resolve) => {
-      window.setTimeout(resolve, safeCloseStepTimeoutMs);
+      window.setTimeout(resolve, remainingMs);
     }),
   ]);
+}
+
+type CloseableAppWindow = {
+  destroy: () => Promise<unknown> | unknown;
+  close: () => Promise<unknown> | unknown;
+};
+
+async function closeWindowWithFallback(appWindow: CloseableAppWindow, startedAtMs: number) {
+  const destroyWork = invokeWindowCloseOperation(() => appWindow.destroy());
+  const destroyBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
+  if (destroyBudgetMs <= 0) {
+    void Promise.resolve(destroyWork).catch(() => {});
+    void Promise.resolve(invokeWindowCloseOperation(() => appWindow.close())).catch(() => {});
+    return;
+  }
+  await settleBeforeTimeout(destroyWork, destroyBudgetMs);
+  const closeWork = invokeWindowCloseOperation(() => appWindow.close());
+  const closeBudgetMs = Math.min(500, remainingSafeCloseBudget(startedAtMs));
+  if (closeBudgetMs > 0) {
+    await settleBeforeTimeout(closeWork, closeBudgetMs);
+  } else {
+    void Promise.resolve(closeWork).catch(() => {});
+  }
+}
+
+function remainingSafeCloseBudget(startedAtMs: number) {
+  return Math.max(0, safeCloseTotalTimeoutMs - (Date.now() - startedAtMs));
+}
+
+function invokeWindowCloseOperation(operation: () => Promise<unknown> | unknown) {
+  try {
+    return operation();
+  } catch {
+    return Promise.resolve();
+  }
+}
+
+async function settleBeforeTimeout(work: Promise<unknown> | unknown, timeoutMs: number) {
+  let settled = false;
+  await Promise.race([
+    Promise.resolve(work)
+      .then(() => {
+        settled = true;
+      })
+      .catch(() => {
+        settled = false;
+      }),
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, Math.max(0, timeoutMs));
+    }),
+  ]);
+  return settled;
 }
 
 function displayPath(value: string | null | undefined, fallback: string) {
@@ -3323,6 +3421,9 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
       batchEtaMs: job.batch_eta_ms ?? null,
       lastBatchElapsedMs: job.last_batch_elapsed_ms ?? null,
       avgBatchElapsedMs: job.avg_batch_elapsed_ms ?? null,
+      recentP50BatchElapsedMs: job.recent_p50_batch_elapsed_ms ?? null,
+      recentP95BatchElapsedMs: job.recent_p95_batch_elapsed_ms ?? null,
+      bestItemsPerMinute: job.best_items_per_minute ?? null,
       currentBatchItems: job.current_batch_items,
       startedCompletedItems: 0,
       parseFailedItems: Math.max(job.parse_failed_items, checkpointParseFailures),
@@ -3334,11 +3435,14 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
       finalFailedItems: Math.max(jobFinalFailures, checkpointFinalFailures),
       providerBackoffMs: job.provider_backoff_ms ?? null,
       effectiveBatchSize: job.effective_batch_size ?? 0,
+      nextExperimentBatchSize: job.next_experiment_batch_size ?? job.effective_batch_size ?? 0,
+      inputTokenBudget: job.input_token_budget ?? 4096,
       speedMode: job.speed_mode ?? "steady",
       successStreak: job.success_streak ?? 0,
       successDelayFloorMs: job.success_delay_floor_ms ?? 1500,
       nextDelayMs: job.next_delay_ms ?? null,
       failureReasonCounts: parseFailureReasonCounts(job.failure_reason_counts_json),
+      adaptiveDecisionReason: job.adaptive_decision_reason ?? "",
       legacyCheckpointOnly,
       phase: job.status === "completed" || job.status === "completed_with_failures" ? "completed" : "paused",
     };
@@ -3364,6 +3468,9 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
     batchEtaMs: null,
     lastBatchElapsedMs: null,
     avgBatchElapsedMs: null,
+    recentP50BatchElapsedMs: null,
+    recentP95BatchElapsedMs: null,
+    bestItemsPerMinute: null,
     currentBatchItems: 0,
     startedCompletedItems: response.checkpoint.completed_count,
     parseFailedItems: 0,
@@ -3375,11 +3482,14 @@ function progressFromHydration(response: HydrateWorkbenchResponse): TranslatePro
     finalFailedItems: 0,
     providerBackoffMs: null,
     effectiveBatchSize: 0,
+    nextExperimentBatchSize: 0,
+    inputTokenBudget: 4096,
     speedMode: "steady",
     successStreak: 0,
     successDelayFloorMs: 1500,
     nextDelayMs: null,
     failureReasonCounts: {},
+    adaptiveDecisionReason: "adaptive: legacy checkpoint only",
     legacyCheckpointOnly: true,
     phase: "paused",
   };
@@ -3527,6 +3637,9 @@ function progressFromTranslateResponse(
     batchEtaMs: response.batch_eta_ms ?? null,
     lastBatchElapsedMs: response.last_batch_elapsed_ms ?? null,
     avgBatchElapsedMs: response.avg_batch_elapsed_ms ?? null,
+    recentP50BatchElapsedMs: response.recent_p50_batch_elapsed_ms ?? null,
+    recentP95BatchElapsedMs: response.recent_p95_batch_elapsed_ms ?? null,
+    bestItemsPerMinute: response.best_items_per_minute ?? null,
     currentBatchItems: response.current_batch_items ?? 0,
     startedCompletedItems: response.started_completed_items ?? 0,
     parseFailedItems: response.parse_failed_items ?? 0,
@@ -3538,11 +3651,14 @@ function progressFromTranslateResponse(
     finalFailedItems: response.final_failed_items ?? response.failed_items,
     providerBackoffMs: response.provider_backoff_ms ?? null,
     effectiveBatchSize: response.effective_batch_size ?? 0,
+    nextExperimentBatchSize: response.next_experiment_batch_size ?? response.effective_batch_size ?? 0,
+    inputTokenBudget: response.input_token_budget ?? 4096,
     speedMode: response.speed_mode ?? "steady",
     successStreak: response.success_streak ?? 0,
     successDelayFloorMs: response.success_delay_floor_ms ?? 1500,
     nextDelayMs: response.next_delay_ms ?? null,
     failureReasonCounts: response.failure_reason_counts ?? {},
+    adaptiveDecisionReason: response.adaptive_decision_reason ?? "",
     legacyCheckpointOnly: response.legacy_checkpoint_only ?? false,
     phase: response.status === "paused" ? "paused" : "completed",
   };
@@ -3568,6 +3684,9 @@ function translateProgressFromEvent(
     batchEtaMs: event.batch_eta_ms ?? null,
     lastBatchElapsedMs: event.last_batch_elapsed_ms ?? null,
     avgBatchElapsedMs: event.avg_batch_elapsed_ms ?? null,
+    recentP50BatchElapsedMs: event.recent_p50_batch_elapsed_ms ?? null,
+    recentP95BatchElapsedMs: event.recent_p95_batch_elapsed_ms ?? null,
+    bestItemsPerMinute: event.best_items_per_minute ?? null,
     currentBatchItems: event.current_batch_items ?? 0,
     startedCompletedItems: event.started_completed_items ?? 0,
     parseFailedItems: event.parse_failed_items ?? 0,
@@ -3579,11 +3698,14 @@ function translateProgressFromEvent(
     finalFailedItems: event.final_failed_items ?? event.failed_items,
     providerBackoffMs: event.provider_backoff_ms ?? null,
     effectiveBatchSize: event.effective_batch_size ?? 0,
+    nextExperimentBatchSize: event.next_experiment_batch_size ?? event.effective_batch_size ?? 0,
+    inputTokenBudget: event.input_token_budget ?? 4096,
     speedMode: event.speed_mode ?? "steady",
     successStreak: event.success_streak ?? 0,
     successDelayFloorMs: event.success_delay_floor_ms ?? 1500,
     nextDelayMs: event.next_delay_ms ?? null,
     failureReasonCounts: event.failure_reason_counts ?? {},
+    adaptiveDecisionReason: event.adaptive_decision_reason ?? "",
     legacyCheckpointOnly: event.legacy_checkpoint_only ?? false,
     phase,
   };
@@ -4391,17 +4513,29 @@ function TranslateProgressView({
         <span>{t.successStreak}: {progress.successStreak.toLocaleString()}</span>
         <span>{t.successDelayFloor}: {formatMaybeDuration(progress.successDelayFloorMs)}</span>
         <span>{t.nextDelay}: {formatMaybeDuration(progress.nextDelayMs)}</span>
+        <span>{t.adaptiveDecisionReason}: {progress.adaptiveDecisionReason || "--"}</span>
         {hasBatchHistory ? (
           <>
             <span>{t.lastBatch} {progress.lastBatchElapsedMs === null || progress.lastBatchElapsedMs === undefined ? "--:--:--" : formatDuration(progress.lastBatchElapsedMs)}</span>
             <span>{t.avgBatch} {progress.avgBatchElapsedMs === null || progress.avgBatchElapsedMs === undefined ? "--:--:--" : formatDuration(progress.avgBatchElapsedMs)}</span>
             <span>{t.recentAverageSpeed}: {progress.avgBatchElapsedMs ? formatMaybeNumber(progress.currentBatchItems * 60000 / progress.avgBatchElapsedMs) : "--"} {t.benchmarkItemsPerMinute}</span>
+            {progress.recentP50BatchElapsedMs === null || progress.recentP50BatchElapsedMs === undefined ? null : (
+              <span>{t.recentP50Batch} {formatDuration(progress.recentP50BatchElapsedMs)}</span>
+            )}
+            {progress.recentP95BatchElapsedMs === null || progress.recentP95BatchElapsedMs === undefined ? null : (
+              <span>{t.recentP95Batch} {formatDuration(progress.recentP95BatchElapsedMs)}</span>
+            )}
+            {progress.bestItemsPerMinute === null || progress.bestItemsPerMinute === undefined ? null : (
+              <span>{t.bestItemsPerMinute}: {formatMaybeNumber(progress.bestItemsPerMinute)} {t.benchmarkItemsPerMinute}</span>
+            )}
           </>
         ) : null}
         <span>{t.retryPending}: {progress.retryPendingItems.toLocaleString()}</span>
         <span>{t.recoverableProviderFailures}: {progress.recoverableProviderFailures.toLocaleString()}</span>
         <span>{t.finalFailed}: {progress.finalFailedItems.toLocaleString()}</span>
         <span>{t.effectiveBatch}: {progress.effectiveBatchSize.toLocaleString()}</span>
+        <span>{t.nextExperimentBatch}: {progress.nextExperimentBatchSize.toLocaleString()}</span>
+        <span>{t.inputTokenBudget}: {progress.inputTokenBudget.toLocaleString()}</span>
         <span>{t.providerBackoff}: {progress.providerBackoffMs === null || progress.providerBackoffMs === undefined ? "--:--:--" : formatDuration(progress.providerBackoffMs)}</span>
         <span>{t.parseFailed}: {progress.parseFailedItems.toLocaleString()}</span>
         <span>{t.validationFailed}: {progress.validationFailedItems.toLocaleString()}</span>

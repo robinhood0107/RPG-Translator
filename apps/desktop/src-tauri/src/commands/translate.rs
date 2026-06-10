@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -8,15 +8,17 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, State};
 
 use rpg_translator_core::{
-    BatchFailureDetail, BatchTranslator, BatchTranslatorConfig, Error, LocalOpenAiConfig,
-    LocalOpenAiProvider, LocalProviderTransport, ProviderBatchItem, ProviderBatchRequest,
+    BatchFailureDetail, BatchPlanner, BatchPlannerConfig, BatchTranslator, BatchTranslatorConfig,
+    CheckpointWriter, Error, LocalOpenAiConfig, LocalOpenAiProvider, LocalProviderTransport,
+    NewProviderRun, NewTranslationSpeedSample, ProviderBatchItem, ProviderBatchRequest,
     ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
     ProviderSpeedBenchmarkConfig, ProviderSpeedBenchmarkReport, Result, TextCodec,
     TranslateProgressEvent, TranslateProgressSnapshot,
+    adaptive_translation_tuning_from_samples_for_lanes, translation_prompt_hash,
 };
 
 use super::shared::{
@@ -248,6 +250,60 @@ async fn translate_with_local_provider_running(
         ) || source_text_ids.is_some();
         let checkpoint_path =
             translation_checkpoint_path(&request.db_path, &request.target_language);
+        let prompt_hash = translation_prompt_hash(
+            &request.source_language,
+            &request.target_language,
+            &request.system_prompt,
+        );
+        let requested_batch_size = request.batch_size.unwrap_or(16);
+        let default_token_budget = BatchTranslatorConfig::default().input_token_budget;
+        let mut preview_completed_source_text_ids = CheckpointWriter::read(&checkpoint_path)?
+            .map(|checkpoint| {
+                if checkpoint.target_language != request.target_language {
+                    return Err(Error::invalid_input(format!(
+                        "checkpoint target language {} does not match {}",
+                        checkpoint.target_language, request.target_language
+                    )));
+                }
+                Ok(checkpoint
+                    .completed_source_text_ids
+                    .into_iter()
+                    .collect::<BTreeSet<_>>())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if include_existing_translations && let Some(source_text_ids) = source_text_ids.as_ref() {
+            for source_text_id in source_text_ids {
+                preview_completed_source_text_ids.remove(source_text_id);
+            }
+        }
+        let preview_plan = BatchPlanner::plan_with_completed(
+            &db,
+            &request.target_language,
+            BatchPlannerConfig {
+                max_items_per_batch: requested_batch_size,
+                input_token_budget: default_token_budget,
+                source_text_ids: source_text_ids
+                    .as_ref()
+                    .map(|ids| ids.iter().copied().collect::<BTreeSet<_>>()),
+                include_existing_translations,
+            },
+            &preview_completed_source_text_ids,
+        )?;
+        let target_lanes = preview_plan
+            .jobs
+            .iter()
+            .map(rpg_translator_core::BatchJob::lane_key)
+            .collect::<Vec<_>>();
+        let prior_speed_samples =
+            db.recent_translation_speed_samples(provider.model_name(), Some(&prompt_hash), 96)?;
+        let adaptive_tuning = adaptive_translation_tuning_from_samples_for_lanes(
+            &prior_speed_samples,
+            &target_lanes,
+            requested_batch_size,
+            default_token_budget,
+            ProviderRequestSpacingConfig::stable(),
+        );
         let progress_state = state.clone();
         let report = BatchTranslator::run_with_checkpoint_and_progress(
             &mut db,
@@ -256,11 +312,14 @@ async fn translate_with_local_provider_running(
             BatchTranslatorConfig {
                 project_id: request.project_id,
                 source_language: request.source_language.clone(),
-                max_items_per_batch: request.batch_size.unwrap_or(16),
+                max_items_per_batch: adaptive_tuning.max_items_per_batch,
+                input_token_budget: adaptive_tuning.input_token_budget,
                 retry_attempts: 0,
+                provider_spacing: adaptive_tuning.provider_spacing,
                 source_text_ids,
                 include_existing_translations,
-                ..BatchTranslatorConfig::default()
+                prompt_hash,
+                adaptive_decision_reason: adaptive_tuning.decision_reason,
             },
             Some(&checkpoint_path),
             move |event| {
@@ -295,6 +354,9 @@ async fn translate_with_local_provider_running(
             batch_eta_ms: report.batch_eta_ms,
             last_batch_elapsed_ms: report.last_batch_elapsed_ms,
             avg_batch_elapsed_ms: report.avg_batch_elapsed_ms,
+            recent_p50_batch_elapsed_ms: report.recent_p50_batch_elapsed_ms,
+            recent_p95_batch_elapsed_ms: report.recent_p95_batch_elapsed_ms,
+            best_items_per_minute: report.best_items_per_minute,
             current_batch_items: report.current_batch_items,
             started_completed_items: report.initial_completed_source_text_count,
             parse_failed_items: report.parse_failed_items,
@@ -306,11 +368,14 @@ async fn translate_with_local_provider_running(
             final_failed_items: report.final_failed_items,
             provider_backoff_ms: report.provider_backoff_ms,
             effective_batch_size: report.effective_batch_size,
+            next_experiment_batch_size: report.next_experiment_batch_size,
+            input_token_budget: report.input_token_budget,
             speed_mode: report.speed_mode,
             success_streak: report.success_streak,
             success_delay_floor_ms: report.success_delay_floor_ms,
             next_delay_ms: report.next_delay_ms,
             failure_reason_counts: report.failure_reason_counts,
+            adaptive_decision_reason: report.adaptive_decision_reason,
             legacy_checkpoint_only: report.legacy_checkpoint_only,
             model: provider.model_name().map(str::to_string),
         })
@@ -415,40 +480,163 @@ pub async fn benchmark_provider_translation_speed(
     request: ProviderSpeedBenchmarkRequest,
 ) -> CommandResult<ProviderSpeedBenchmarkReport> {
     run_blocking(move || {
-        let db = open_db_existing(&request.db_path)?;
+        let mut db = open_db_existing(&request.db_path)?;
+        let source_language = request.source_language.clone();
+        let target_language = request.target_language.clone();
+        let system_prompt = request.system_prompt.clone();
+        let requested_batch_size = request.batch_size.unwrap_or(16).max(1);
         let items = benchmark_provider_items(
             &db,
             request.project_id,
-            &request.source_language,
-            request.batch_size.unwrap_or(16),
+            &source_language,
+            requested_batch_size,
         )?;
         let mut provider = LocalOpenAiProvider::new(
             LocalOpenAiConfig {
                 base_url: request.base_url,
                 model: request.model,
-                source_language: request.source_language,
-                target_language: request.target_language,
-                system_prompt: request.system_prompt,
+                source_language: source_language.clone(),
+                target_language: target_language.clone(),
+                system_prompt: system_prompt.clone(),
                 temperature: request.temperature.or(Some(0.0)),
                 top_p: request.top_p,
                 max_output_tokens: request.max_output_tokens,
             },
             ReqwestTransport::default(),
         )?;
-        Ok(ProviderSpeedBenchmark::run(
+        let resolved_model = provider.model_name().map(str::to_string);
+        let prompt_hash =
+            translation_prompt_hash(&source_language, &target_language, &system_prompt);
+        let provider_run_id = db.start_provider_run(&NewProviderRun {
+            provider: "local-openai-compatible-benchmark".to_string(),
+            model: resolved_model.clone(),
+            request_settings_json: json!({
+                "mode": "real_prompt_benchmark",
+                "source_language": source_language,
+                "target_language": target_language,
+                "batch_size": requested_batch_size,
+                "warmup_runs": request.warmup_runs.unwrap_or(1),
+                "measured_runs": request.measured_runs.unwrap_or(5),
+            })
+            .to_string(),
+        })?;
+        let spacing = ProviderRequestSpacingConfig::stable();
+        let benchmark_result = ProviderSpeedBenchmark::run(
             &mut provider,
             &ProviderBatchRequest {
-                items,
+                items: items.clone(),
                 instruction: None,
             },
             ProviderSpeedBenchmarkConfig {
                 warmup_runs: request.warmup_runs.unwrap_or(1),
                 measured_runs: request.measured_runs.unwrap_or(5),
             },
-            &ProviderRequestSpacingConfig::stable(),
-        )?)
+            &spacing,
+        );
+        match benchmark_result {
+            Ok(report) => {
+                if let Err(error) = persist_benchmark_speed_samples(
+                    provider_run_id,
+                    &mut db,
+                    BenchmarkSpeedSamplePersistence {
+                        report: &report,
+                        items: &items,
+                        prompt_hash: &prompt_hash,
+                        model: resolved_model.as_deref(),
+                        effective_batch_size: requested_batch_size,
+                        spacing: &spacing,
+                    },
+                ) {
+                    let failure_detail = error.to_string();
+                    let _ =
+                        db.finish_provider_run(provider_run_id, "failed", Some(&failure_detail));
+                    return Err(error.into());
+                }
+                db.finish_provider_run(provider_run_id, "completed", None)?;
+                Ok(report)
+            }
+            Err(error) => {
+                let failure_detail = error.to_string();
+                let _ = db.finish_provider_run(provider_run_id, "failed", Some(&failure_detail));
+                Err(error.into())
+            }
+        }
     })
     .await
+}
+
+struct BenchmarkSpeedSamplePersistence<'a> {
+    report: &'a ProviderSpeedBenchmarkReport,
+    items: &'a [ProviderBatchItem],
+    prompt_hash: &'a str,
+    model: Option<&'a str>,
+    effective_batch_size: usize,
+    spacing: &'a ProviderRequestSpacingConfig,
+}
+
+fn persist_benchmark_speed_samples(
+    provider_run_id: i64,
+    db: &mut rpg_translator_core::TranslationDb,
+    context: BenchmarkSpeedSamplePersistence<'_>,
+) -> Result<()> {
+    let estimated_token_count = context
+        .items
+        .iter()
+        .map(|item| estimate_provider_tokens(&item.text))
+        .sum::<usize>();
+    for run in &context.report.runs {
+        let success_delay_ms = benchmark_success_delay_ms(run.latency_ms, context.spacing);
+        db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+            provider_run_id,
+            batch_index: usize_to_i64(run.run_index),
+            lane: "benchmark".to_string(),
+            item_count: usize_to_i64(run.item_count),
+            char_count: usize_to_i64(run.char_count),
+            estimated_token_count: usize_to_i64(estimated_token_count),
+            request_elapsed_ms: u64_to_i64(run.latency_ms),
+            success_delay_ms: u64_to_i64(success_delay_ms),
+            total_elapsed_ms: u64_to_i64(run.latency_ms.saturating_add(success_delay_ms)),
+            status: "benchmark".to_string(),
+            failure_type: None,
+            effective_batch_size: usize_to_i64(context.effective_batch_size),
+            adaptive_decision_reason: format!(
+                "adaptive: real prompt benchmark run {} seeded speed history",
+                run.run_index
+            ),
+            model: context.model.map(str::to_string),
+            prompt_hash: context.prompt_hash.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+fn benchmark_success_delay_ms(
+    request_elapsed_ms: u64,
+    spacing: &ProviderRequestSpacingConfig,
+) -> u64 {
+    if spacing.base_success_spacing_ms == 0 && spacing.min_success_spacing_ms == 0 {
+        return 0;
+    }
+    let floor = spacing
+        .base_success_spacing_ms
+        .max(spacing.min_success_spacing_ms);
+    request_elapsed_ms
+        .saturating_mul(20)
+        .saturating_div(100)
+        .max(floor)
+        .min(spacing.max_success_spacing_ms.max(floor))
+}
+
+fn estimate_provider_tokens(text: &str) -> usize {
+    ((text.chars().count() as f64) * 1.15).ceil() as usize
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
 }
 
 fn benchmark_provider_items(
@@ -492,6 +680,9 @@ pub struct TranslateResponse {
     pub batch_eta_ms: Option<u64>,
     pub last_batch_elapsed_ms: Option<u64>,
     pub avg_batch_elapsed_ms: Option<u64>,
+    pub recent_p50_batch_elapsed_ms: Option<u64>,
+    pub recent_p95_batch_elapsed_ms: Option<u64>,
+    pub best_items_per_minute: Option<u64>,
     pub current_batch_items: usize,
     pub started_completed_items: usize,
     pub parse_failed_items: usize,
@@ -503,11 +694,14 @@ pub struct TranslateResponse {
     pub final_failed_items: usize,
     pub provider_backoff_ms: Option<u64>,
     pub effective_batch_size: usize,
+    pub next_experiment_batch_size: usize,
+    pub input_token_budget: usize,
     pub speed_mode: String,
     pub success_streak: usize,
     pub success_delay_floor_ms: u64,
     pub next_delay_ms: Option<u64>,
     pub failure_reason_counts: BTreeMap<String, usize>,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
     pub model: Option<String>,
 }
@@ -666,7 +860,7 @@ fn translate_log_env_override(value: &str) -> Option<bool> {
 pub fn format_translate_progress_event(event: &TranslateProgressEvent) -> String {
     let (name, parts) = translate_progress_parts(event);
     format!(
-        "[RPG-Translator][translate] {name} run={run} batch={batch_done}/{batch_total} text={items_done}/{items_total} retry_pending={retry_pending} provider_failures={provider_failures} final_failed={final_failed} parse_failed={parse_failed} validation_failed={validation_failed} skipped={skipped} censored_retry={censored_retry} split={split} speed_mode={speed_mode} success_streak={success_streak} success_floor={success_floor} next_delay={next_delay} effective_batch={effective_batch} backoff={backoff} reasons={reasons} current_items={current_items} last_batch={last_batch} avg_batch={avg_batch} elapsed={elapsed} eta_text={eta_text} eta_batch={eta_batch} model={model} target={target}",
+        "[RPG-Translator][translate] {name} run={run} batch={batch_done}/{batch_total} text={items_done}/{items_total} retry_pending={retry_pending} provider_failures={provider_failures} final_failed={final_failed} parse_failed={parse_failed} validation_failed={validation_failed} skipped={skipped} censored_retry={censored_retry} split={split} speed_mode={speed_mode} success_streak={success_streak} success_floor={success_floor} next_delay={next_delay} effective_batch={effective_batch} next_experiment_batch={next_experiment_batch} token_budget={token_budget} backoff={backoff} reasons={reasons} adaptive=\"{adaptive}\" current_items={current_items} last_batch={last_batch} avg_batch={avg_batch} elapsed={elapsed} eta_text={eta_text} eta_batch={eta_batch} model={model} target={target}",
         name = name,
         run = parts.provider_run_id,
         batch_done = parts.processed_batches,
@@ -689,11 +883,14 @@ pub fn format_translate_progress_event(event: &TranslateProgressEvent) -> String
             .map(format_duration)
             .unwrap_or_else(|| "--:--:--".to_string()),
         effective_batch = parts.effective_batch_size,
+        next_experiment_batch = parts.next_experiment_batch_size,
+        token_budget = parts.input_token_budget,
         backoff = parts
             .provider_backoff_ms
             .map(format_duration)
             .unwrap_or_else(|| "--:--:--".to_string()),
         reasons = format_failure_reasons(&parts.failure_reason_counts),
+        adaptive = parts.adaptive_decision_reason,
         current_items = parts.current_batch_items,
         last_batch = parts
             .last_batch_elapsed_ms

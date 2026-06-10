@@ -1,7 +1,7 @@
 use rpg_translator_core::{
     CacheKeyBuilder, CacheKeyParts, Engine, ExtractedOccurrence, NewOccurrence, NewProject,
-    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, OccurrenceContext,
-    OccurrenceSegment, Result, ReviewUpdateRequest, TextCodec, TranslationDb,
+    NewProviderRun, NewQaFinding, NewSourceText, NewTranslation, NewTranslationSpeedSample,
+    OccurrenceContext, OccurrenceSegment, Result, ReviewUpdateRequest, TextCodec, TranslationDb,
     TranslationJobProgressUpdate, WorkbenchSettingsUpdate,
 };
 use rusqlite::{Connection, OpenFlags, params};
@@ -706,6 +706,218 @@ fn workbench_settings_and_stale_runs_survive_migration() -> Result<()> {
 }
 
 #[test]
+fn translation_speed_samples_are_indexed_and_queryable() -> Result<()> {
+    let file = NamedTempFile::new().expect("create temp db");
+    let mut db = TranslationDb::open(file.path())?;
+    db.migrate()?;
+    let provider_run_id = db.start_provider_run(&NewProviderRun {
+        provider: "local-openai-compatible".to_string(),
+        model: Some("gemma".to_string()),
+        request_settings_json: "{}".to_string(),
+    })?;
+
+    db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+        provider_run_id,
+        batch_index: 7,
+        lane: "plain_block".to_string(),
+        item_count: 16,
+        char_count: 512,
+        estimated_token_count: 128,
+        request_elapsed_ms: 3200,
+        success_delay_ms: 750,
+        total_elapsed_ms: 3950,
+        status: "success".to_string(),
+        failure_type: None,
+        effective_batch_size: 16,
+        adaptive_decision_reason: "adaptive: accelerating from test".to_string(),
+        model: Some("gemma".to_string()),
+        prompt_hash: "prompt-hash".to_string(),
+    })?;
+
+    let samples = db.recent_translation_speed_samples(Some("gemma"), Some("prompt-hash"), 10)?;
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample.provider_run_id, provider_run_id);
+    assert_eq!(sample.batch_index, 7);
+    assert_eq!(sample.lane, "plain_block");
+    assert_eq!(sample.item_count, 16);
+    assert_eq!(sample.char_count, 512);
+    assert_eq!(sample.estimated_token_count, 128);
+    assert_eq!(sample.request_elapsed_ms, 3200);
+    assert_eq!(sample.success_delay_ms, 750);
+    assert_eq!(sample.total_elapsed_ms, 3950);
+    assert_eq!(sample.status, "success");
+    assert_eq!(sample.effective_batch_size, 16);
+    assert_eq!(
+        sample.adaptive_decision_reason,
+        "adaptive: accelerating from test"
+    );
+
+    let conn = Connection::open(file.path())?;
+    let index_count: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'index'
+          AND name IN (
+              'idx_translation_speed_samples_run_batch',
+              'idx_translation_speed_samples_model_prompt_latest'
+          )
+        ",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(index_count, 2);
+
+    Ok(())
+}
+
+#[test]
+fn latest_translation_job_summary_restores_recent_speed_sample_metrics() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let provider_run_id = db.start_provider_run(&NewProviderRun {
+        provider: "local-openai-compatible".to_string(),
+        model: Some("gemma".to_string()),
+        request_settings_json: "{}".to_string(),
+    })?;
+    db.upsert_translation_job_progress(&TranslationJobProgressUpdate {
+        provider_run_id,
+        project_id: None,
+        source_language: "en".to_string(),
+        target_language: "ko".to_string(),
+        checkpoint_path: "translation-ko.checkpoint.json".to_string(),
+        status: "running".to_string(),
+        completed_items: 48,
+        failed_items: 0,
+        total_items: 96,
+        processed_batches: 3,
+        total_batches: 6,
+        split_batches: 0,
+        parse_failed_items: 0,
+        validation_failed_items: 0,
+        skipped_items: 0,
+        censored_retry_count: 0,
+        item_eta_ms: Some(9_000),
+        batch_eta_ms: Some(9_000),
+        last_batch_elapsed_ms: Some(3_000),
+        avg_batch_elapsed_ms: Some(3_000),
+        current_batch_items: 16,
+        elapsed_ms: 9_000,
+        model: Some("gemma".to_string()),
+        retry_pending_items: 0,
+        recoverable_provider_failures: 0,
+        final_failed_items: 0,
+        provider_backoff_ms: None,
+        effective_batch_size: 16,
+        next_experiment_batch_size: 16,
+        input_token_budget: 4096,
+        speed_mode: "steady".to_string(),
+        success_streak: 3,
+        success_delay_floor_ms: 750,
+        next_delay_ms: Some(750),
+        failure_reason_counts_json: "{}".to_string(),
+        adaptive_decision_reason: "adaptive: steady from samples".to_string(),
+        legacy_checkpoint_only: false,
+    })?;
+
+    for (batch_index, elapsed_ms) in [(1, 4_000), (2, 2_000), (3, 3_000)] {
+        db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+            provider_run_id,
+            batch_index,
+            lane: "message_block".to_string(),
+            item_count: 16,
+            char_count: 640,
+            estimated_token_count: 160,
+            request_elapsed_ms: elapsed_ms - 750,
+            success_delay_ms: 750,
+            total_elapsed_ms: elapsed_ms,
+            status: "success".to_string(),
+            failure_type: None,
+            effective_batch_size: 16,
+            adaptive_decision_reason: "adaptive: steady from samples".to_string(),
+            model: Some("gemma".to_string()),
+            prompt_hash: "prompt-hash".to_string(),
+        })?;
+    }
+    db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+        provider_run_id,
+        batch_index: 4,
+        lane: "message_block".to_string(),
+        item_count: 16,
+        char_count: 640,
+        estimated_token_count: 160,
+        request_elapsed_ms: 1,
+        success_delay_ms: 0,
+        total_elapsed_ms: 1,
+        status: "provider_failure".to_string(),
+        failure_type: Some("connection".to_string()),
+        effective_batch_size: 8,
+        adaptive_decision_reason: "adaptive: backoff from failure".to_string(),
+        model: Some("gemma".to_string()),
+        prompt_hash: "prompt-hash".to_string(),
+    })?;
+
+    let latest = db
+        .latest_translation_job_summary(Some("ko"))?
+        .expect("latest job");
+
+    assert_eq!(latest.recent_p50_batch_elapsed_ms, Some(3_000));
+    assert_eq!(latest.recent_p95_batch_elapsed_ms, Some(4_000));
+    assert_eq!(latest.best_items_per_minute, Some(480));
+
+    Ok(())
+}
+
+#[test]
+fn migrate_adds_adaptive_reason_to_legacy_speed_samples() -> Result<()> {
+    let file = NamedTempFile::new().expect("create temp db");
+    {
+        let conn = Connection::open(file.path())?;
+        conn.execute_batch(
+            "
+            CREATE TABLE translation_speed_samples (
+                id INTEGER PRIMARY KEY,
+                provider_run_id INTEGER NOT NULL,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                lane TEXT NOT NULL DEFAULT 'unknown',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                estimated_token_count INTEGER NOT NULL DEFAULT 0,
+                request_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                success_delay_ms INTEGER NOT NULL DEFAULT 0,
+                total_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'success',
+                failure_type TEXT,
+                effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                prompt_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+    }
+
+    let mut db = TranslationDb::open(file.path())?;
+    assert!(db.needs_schema_upgrade()?);
+    db.migrate()?;
+    assert!(!db.needs_schema_upgrade()?);
+
+    let conn = Connection::open(file.path())?;
+    let column_count: i64 = conn.query_row(
+        "
+        SELECT COUNT(*)
+        FROM pragma_table_info('translation_speed_samples')
+        WHERE name = 'adaptive_decision_reason'
+        ",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(column_count, 1);
+    Ok(())
+}
+
+#[test]
 fn migration_backfills_speed_columns_and_review_drafts_for_existing_db() -> Result<()> {
     let file = NamedTempFile::new().expect("create temp db");
     let conn = Connection::open(file.path())?;
@@ -754,6 +966,8 @@ fn migration_backfills_speed_columns_and_review_drafts_for_existing_db() -> Resu
     assert_eq!(latest.completed_items, 10);
     assert_eq!(latest.failed_items, 2);
     assert_eq!(latest.effective_batch_size, 8);
+    assert_eq!(latest.next_experiment_batch_size, 8);
+    assert_eq!(latest.input_token_budget, 4096);
     assert_eq!(latest.success_delay_floor_ms, 1500);
     assert_eq!(latest.next_delay_ms, Some(10_000));
     assert_eq!(latest.speed_mode, "backoff");
@@ -1089,11 +1303,14 @@ fn stale_running_translation_jobs_become_terminal_on_hydrate_repair() -> Result<
         final_failed_items: 2,
         provider_backoff_ms: None,
         effective_batch_size: 8,
+        next_experiment_batch_size: 8,
+        input_token_budget: 4096,
         speed_mode: "steady".to_string(),
         success_streak: 0,
         success_delay_floor_ms: 1500,
         next_delay_ms: None,
         failure_reason_counts_json: "{}".to_string(),
+        adaptive_decision_reason: "adaptive: test".to_string(),
         legacy_checkpoint_only: false,
     })?;
 
@@ -1295,6 +1512,101 @@ fn review_update_resolves_findings_only_after_machine_validation_passes() -> Res
             .iter()
             .all(|finding| finding.status == "resolved")
     );
+
+    Ok(())
+}
+
+#[test]
+fn review_update_rejects_line_local_control_code_drift() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let source = "Hello \\V[1]\nWorld";
+    let analysis = TextCodec::analyze(source);
+    let source_id = db.upsert_source_text(&source_text_with_signature(
+        "en",
+        &analysis.normalized_text,
+        &analysis.visible_text,
+        &analysis.control_code_signature,
+    ))?;
+
+    let invalid = db.update_review_row(&ReviewUpdateRequest {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text: "안녕\n세계 \\V[1]".to_string(),
+        provider: "manual-review".to_string(),
+        model: None,
+        review_state: "accepted".to_string(),
+        qa_state: "passed".to_string(),
+        expected_updated_at: None,
+    })?;
+
+    assert_eq!(invalid.review_state, "pending");
+    assert_eq!(invalid.qa_state, "needs-review");
+    let messages = db
+        .qa_findings_for_source(source_id)?
+        .into_iter()
+        .map(|finding| finding.message)
+        .collect::<Vec<_>>();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("줄별 제어코드 수가 원문과 다릅니다")),
+        "expected line-local control-code finding, got {messages:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn review_update_allows_message_block_line_break_changes_for_runtime_wrapping() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let mut source = source_text("Line one\nLine two");
+    source.unit_kind = "message_block".to_string();
+    let source_id = db.upsert_source_text(&source)?;
+
+    let updated = db.update_review_row(&ReviewUpdateRequest {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text: "런타임에서 감쌀 긴 한 줄 번역".to_string(),
+        provider: "manual-review".to_string(),
+        model: None,
+        review_state: "accepted".to_string(),
+        qa_state: "passed".to_string(),
+        expected_updated_at: None,
+    })?;
+
+    assert_eq!(updated.review_state, "accepted");
+    assert_eq!(updated.qa_state, "passed");
+    assert_eq!(updated.qa_finding_count, 0);
+    assert!(db.qa_findings_for_source(source_id)?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn review_update_allows_scroll_block_line_break_changes_for_runtime_wrapping() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let mut source = source_text("Line one\nLine two");
+    source.unit_kind = "scroll_block".to_string();
+    let source_id = db.upsert_source_text(&source)?;
+
+    let updated = db.update_review_row(&ReviewUpdateRequest {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text: "런타임에서 감쌀 스크롤 번역".to_string(),
+        provider: "manual-review".to_string(),
+        model: None,
+        review_state: "accepted".to_string(),
+        qa_state: "passed".to_string(),
+        expected_updated_at: None,
+    })?;
+
+    assert_eq!(updated.review_state, "accepted");
+    assert_eq!(updated.qa_state, "passed");
+    assert_eq!(updated.qa_finding_count, 0);
+    assert!(db.qa_findings_for_source(source_id)?.is_empty());
 
     Ok(())
 }

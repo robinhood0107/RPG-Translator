@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use rpg_translator_core::{
     BatchCheckpoint, CheckpointWriter, Engine, GameLayoutKind, NewOccurrence, NewProject,
-    NewSourceText, NewTranslation, ScanProgressEvent, TextCodec, TranslateProgressEvent,
-    TranslateProgressSnapshot, TranslationDb, WorkbenchSettingsUpdate,
+    NewSourceText, NewTranslation, NewTranslationSpeedSample, OverlayConfig, ScanProgressEvent,
+    TextCodec, TranslateProgressEvent, TranslateProgressSnapshot, TranslationDb,
+    WorkbenchSettingsUpdate, translation_prompt_hash,
 };
 use rpg_translator_desktop::commands::{
     diagnostics::{self, DiagnosticsRequest},
@@ -156,7 +157,7 @@ fn make_export_bundle(root: &Path) {
     );
     write_text(
         &root.join("overlay-config.json"),
-        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중"}"#,
+        &serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
     );
     write_text(
         &root.join("cache.jsonl"),
@@ -373,6 +374,8 @@ fn hydrate_migrates_legacy_speed_columns_with_schema_backup() {
         assert_eq!(latest_job.success_delay_floor_ms, 1500);
         assert_eq!(latest_job.next_delay_ms, None);
         assert_eq!(latest_job.effective_batch_size, 8);
+        assert_eq!(latest_job.next_experiment_batch_size, 8);
+        assert_eq!(latest_job.input_token_budget, 4096);
         assert_eq!(hydrated.stale_runs_interrupted, 1);
 
         let backups_dir = temp.path().join("backups");
@@ -402,13 +405,13 @@ fn hydrate_migrates_legacy_speed_columns_with_schema_backup() {
                 "
                 SELECT COUNT(*)
                 FROM pragma_table_info('translation_jobs')
-                WHERE name IN ('speed_mode', 'success_streak', 'success_delay_floor_ms', 'next_delay_ms')
+                WHERE name IN ('speed_mode', 'success_streak', 'success_delay_floor_ms', 'next_delay_ms', 'next_experiment_batch_size', 'input_token_budget')
                 ",
                 [],
                 |row| row.get(0),
             )
             .expect("query speed columns");
-        assert_eq!(speed_columns, 4);
+        assert_eq!(speed_columns, 6);
     });
 }
 
@@ -1043,6 +1046,9 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             batch_eta_ms: Some(20_377_000),
             last_batch_elapsed_ms: Some(1_484),
             avg_batch_elapsed_ms: Some(15_833),
+            recent_p50_batch_elapsed_ms: Some(15_833),
+            recent_p95_batch_elapsed_ms: Some(21_000),
+            best_items_per_minute: Some(1_180),
             current_batch_items: 16,
             started_completed_items: 0,
             parse_failed_items: 3,
@@ -1054,17 +1060,20 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             final_failed_items: 0,
             provider_backoff_ms: Some(5_000),
             effective_batch_size: 8,
+            next_experiment_batch_size: 8,
+            input_token_budget: 6144,
             speed_mode: "backoff".to_string(),
             success_streak: 0,
             success_delay_floor_ms: 1500,
             next_delay_ms: Some(5_000),
             failure_reason_counts: reason_counts,
+            adaptive_decision_reason: "adaptive: conservative from history".to_string(),
             legacy_checkpoint_only: false,
         },
     ));
     assert_eq!(
         line,
-        "[RPG-Translator][translate] batch_done run=9 batch=12/1299 text=192/20774 retry_pending=16 provider_failures=16 final_failed=0 parse_failed=3 validation_failed=5 skipped=7 censored_retry=1 split=0 speed_mode=backoff success_streak=0 success_floor=00:00:01 next_delay=00:00:05 effective_batch=8 backoff=00:00:05 reasons=provider-503:16 current_items=16 last_batch=00:00:01 avg_batch=00:00:15 elapsed=00:03:10 eta_text=05:21:44 eta_batch=05:39:37 model=gemma.gguf target=ko"
+        "[RPG-Translator][translate] batch_done run=9 batch=12/1299 text=192/20774 retry_pending=16 provider_failures=16 final_failed=0 parse_failed=3 validation_failed=5 skipped=7 censored_retry=1 split=0 speed_mode=backoff success_streak=0 success_floor=00:00:01 next_delay=00:00:05 effective_batch=8 next_experiment_batch=8 token_budget=6144 backoff=00:00:05 reasons=provider-503:16 adaptive=\"adaptive: conservative from history\" current_items=16 last_batch=00:00:01 avg_batch=00:00:15 elapsed=00:03:10 eta_text=05:21:44 eta_batch=05:39:37 model=gemma.gguf target=ko"
     );
 
     let paused = translate::format_translate_progress_event(&TranslateProgressEvent::Paused(
@@ -1084,6 +1093,9 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             batch_eta_ms: Some(20_377_000),
             last_batch_elapsed_ms: None,
             avg_batch_elapsed_ms: None,
+            recent_p50_batch_elapsed_ms: None,
+            recent_p95_batch_elapsed_ms: None,
+            best_items_per_minute: None,
             current_batch_items: 0,
             started_completed_items: 0,
             parse_failed_items: 0,
@@ -1095,11 +1107,14 @@ fn translate_command_formats_progress_logs_for_cmd_output() {
             final_failed_items: 0,
             provider_backoff_ms: None,
             effective_batch_size: 16,
+            next_experiment_batch_size: 16,
+            input_token_budget: 4096,
             speed_mode: "steady".to_string(),
             success_streak: 3,
             success_delay_floor_ms: 1500,
             next_delay_ms: None,
             failure_reason_counts: BTreeMap::new(),
+            adaptive_decision_reason: "adaptive: no speed history loaded".to_string(),
             legacy_checkpoint_only: false,
         },
     ));
@@ -1324,6 +1339,235 @@ fn provider_benchmark_uses_real_prompt_and_does_not_write_translation_state() {
                 .expect("job lookup")
                 .is_none()
         );
+        let prompt_hash = translation_prompt_hash("en", "ko", "Custom RPG prompt");
+        let samples = db
+            .recent_translation_speed_samples(Some("fixture-model"), Some(&prompt_hash), 10)
+            .expect("benchmark speed samples");
+        assert_eq!(
+            samples.len(),
+            5,
+            "only measured benchmark runs should seed adaptive speed history"
+        );
+        assert!(samples.iter().all(|sample| sample.status == "benchmark"));
+        assert!(samples.iter().all(|sample| sample.lane == "benchmark"));
+        assert!(samples.iter().all(|sample| sample.provider_run_id > 0));
+        assert!(samples.iter().all(|sample| sample.item_count == 1));
+        assert!(samples.iter().all(|sample| {
+            sample
+                .adaptive_decision_reason
+                .contains("real prompt benchmark")
+        }));
+    });
+}
+
+#[test]
+fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
+    tauri::async_runtime::block_on(async {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("workbench.sqlite");
+        let prompt = "Custom RPG prompt";
+        {
+            let mut db = TranslationDb::open(&db_path).expect("open db");
+            db.migrate().expect("migrate db");
+            db.upsert_source_text(&source_text_fixture("en", "Alpha"))
+                .expect("insert alpha");
+            db.upsert_source_text(&source_text_fixture("en", "Beta"))
+                .expect("insert beta");
+            let provider_run_id = db
+                .start_provider_run(&rpg_translator_core::NewProviderRun {
+                    provider: "local-openai-compatible".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    request_settings_json: "{}".to_string(),
+                })
+                .expect("start provider run");
+            let prompt_hash = translation_prompt_hash("en", "ko", prompt);
+            for batch_index in 1..=3 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "short".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 2_000,
+                    success_delay_ms: 750,
+                    total_elapsed_ms: 2_750,
+                    status: "success".to_string(),
+                    failure_type: None,
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert speed sample");
+            }
+            for batch_index in 4..=6 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "complex".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 1_000,
+                    success_delay_ms: 0,
+                    total_elapsed_ms: 1_000,
+                    status: "parse_failed".to_string(),
+                    failure_type: Some("provider-json-parse".to_string()),
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture complex failure".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert complex speed sample");
+            }
+        }
+        let provider = spawn_local_provider_expect(
+            r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"알파\"}\n{\"id\":2,\"translation\":\"베타\"}"}}]}"#,
+            "from English to Korean",
+        );
+
+        let response = translate::translate_with_local_provider_for_test(TranslateRequest {
+            db_path: path_string(&db_path),
+            project_id: None,
+            source_language: "en".to_string(),
+            target_language: "ko".to_string(),
+            batch_size: Some(4),
+            base_url: provider.base_url.clone(),
+            model: "fixture-model".to_string(),
+            system_prompt: prompt.to_string(),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            source_text_ids: None,
+            issue_filter: None,
+            retranslate_mode: None,
+        })
+        .await
+        .expect("translate with adaptive speed samples");
+
+        assert_eq!(response.accepted_count, 2);
+        assert_eq!(response.effective_batch_size, 32);
+        assert!(response.adaptive_decision_reason.contains("accelerating"));
+        assert!(response.adaptive_decision_reason.contains("lanes=short"));
+        assert!(
+            response
+                .adaptive_decision_reason
+                .contains("lane_samples=3/6")
+        );
+    });
+}
+
+#[test]
+fn translate_command_tunes_from_pending_checkpoint_lanes_only() {
+    tauri::async_runtime::block_on(async {
+        let temp = tempdir().expect("create temp dir");
+        let db_path = temp.path().join("workbench.sqlite");
+        let prompt = "Custom RPG prompt";
+        let completed_complex_id;
+        {
+            let mut db = TranslationDb::open(&db_path).expect("open db");
+            db.migrate().expect("migrate db");
+            let completed_complex = source_text_fixture("en", "\\C[2]Completed");
+            completed_complex_id = db
+                .upsert_source_text(&completed_complex)
+                .expect("insert completed complex source");
+            db.upsert_source_text(&source_text_fixture("en", "Pending short"))
+                .expect("insert pending short source");
+            let provider_run_id = db
+                .start_provider_run(&rpg_translator_core::NewProviderRun {
+                    provider: "local-openai-compatible".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    request_settings_json: "{}".to_string(),
+                })
+                .expect("start provider run");
+            let prompt_hash = translation_prompt_hash("en", "ko", prompt);
+            for batch_index in 1..=3 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "short".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 2_000,
+                    success_delay_ms: 750,
+                    total_elapsed_ms: 2_750,
+                    status: "success".to_string(),
+                    failure_type: None,
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture short success".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert short speed sample");
+            }
+            for batch_index in 4..=6 {
+                db.insert_translation_speed_sample(&NewTranslationSpeedSample {
+                    provider_run_id,
+                    batch_index,
+                    lane: "complex".to_string(),
+                    item_count: 16,
+                    char_count: 640,
+                    estimated_token_count: 160,
+                    request_elapsed_ms: 1_000,
+                    success_delay_ms: 0,
+                    total_elapsed_ms: 1_000,
+                    status: "parse_failed".to_string(),
+                    failure_type: Some("provider-json-parse".to_string()),
+                    effective_batch_size: 16,
+                    adaptive_decision_reason: "adaptive: fixture complex failure".to_string(),
+                    model: Some("fixture-model".to_string()),
+                    prompt_hash: prompt_hash.clone(),
+                })
+                .expect("insert complex speed sample");
+            }
+        }
+        let checkpoint_path = translate::translation_checkpoint_path(&path_string(&db_path), "ko");
+        CheckpointWriter::write_atomic(
+            &checkpoint_path,
+            &BatchCheckpoint {
+                provider_run_id: 99,
+                target_language: "ko".to_string(),
+                completed_source_text_ids: vec![completed_complex_id],
+                failed_source_text_ids: Vec::new(),
+                failure_details: Vec::new(),
+            },
+        )
+        .expect("write checkpoint");
+        let provider = spawn_local_provider_expect(
+            r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"대기\"}"}}]}"#,
+            "from English to Korean",
+        );
+
+        let response = translate::translate_with_local_provider_for_test(TranslateRequest {
+            db_path: path_string(&db_path),
+            project_id: None,
+            source_language: "en".to_string(),
+            target_language: "ko".to_string(),
+            batch_size: Some(4),
+            base_url: provider.base_url.clone(),
+            model: "fixture-model".to_string(),
+            system_prompt: prompt.to_string(),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            source_text_ids: None,
+            issue_filter: None,
+            retranslate_mode: None,
+        })
+        .await
+        .expect("translate with checkpoint lane-aware adaptive samples");
+
+        assert_eq!(response.accepted_count, 1);
+        assert_eq!(response.effective_batch_size, 32);
+        assert!(response.adaptive_decision_reason.contains("accelerating"));
+        assert!(response.adaptive_decision_reason.contains("lanes=short"));
+        assert!(
+            response
+                .adaptive_decision_reason
+                .contains("lane_samples=3/6")
+        );
     });
 }
 
@@ -1355,7 +1599,7 @@ fn local_provider_commands_allow_empty_and_custom_prompts() {
     tauri::async_runtime::block_on(async {
         let empty_prompt_provider = spawn_local_provider_expect(
             r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"안녕\"}"}}]}"#,
-            "Format: JSON Lines",
+            "Return JSON Lines only",
         );
         let empty = translate::test_local_provider(ProviderTestRequest {
             base_url: empty_prompt_provider.base_url.clone(),

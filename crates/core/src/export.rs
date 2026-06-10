@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,6 +71,9 @@ pub struct OverlayConfig {
     pub diagnostics_enabled: bool,
     pub startup_toast_enabled: bool,
     pub startup_toast_text: String,
+    #[serde(default)]
+    pub runtime_load_contract: RuntimeLoadContract,
+    pub foresight_command_catalog: ForesightCommandCatalog,
 }
 
 impl OverlayConfig {
@@ -80,6 +84,187 @@ impl OverlayConfig {
             diagnostics_enabled: false,
             startup_toast_enabled: true,
             startup_toast_text: STARTUP_TOAST_TEXT.to_string(),
+            runtime_load_contract: RuntimeLoadContract::runtime_default(),
+            foresight_command_catalog: ForesightCommandCatalog::runtime_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeLoadContract {
+    pub schema_version: u32,
+    pub support_directory: String,
+    pub plugin_entry_file: String,
+    pub script_load_order: Vec<String>,
+    pub required_runtime_files: Vec<String>,
+}
+
+impl RuntimeLoadContract {
+    #[must_use]
+    pub fn runtime_default() -> Self {
+        let mut required_runtime_files = vec![crate::install::PLUGIN_ENTRY_FILE.to_string()];
+        required_runtime_files.extend(
+            crate::install::RUNTIME_SUPPORT_FILES
+                .iter()
+                .map(|file| (*file).to_string()),
+        );
+        Self {
+            schema_version: EXPORT_SCHEMA_VERSION,
+            support_directory: crate::install::SUPPORT_DIRECTORY.to_string(),
+            plugin_entry_file: crate::install::PLUGIN_ENTRY_FILE.to_string(),
+            script_load_order: string_vec(crate::install::RUNTIME_SCRIPT_LOAD_ORDER),
+            required_runtime_files,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForesightCommandCatalog {
+    pub schema_version: u32,
+    pub event_commands: BTreeMap<String, ForesightCommandMetadata>,
+    pub movement_route_commands: BTreeMap<String, ForesightCommandMetadata>,
+}
+
+impl ForesightCommandCatalog {
+    #[must_use]
+    pub fn runtime_default() -> Self {
+        let mut event_commands = BTreeMap::new();
+        event_commands.insert(
+            "0".to_string(),
+            ForesightCommandMetadata::new(
+                "End",
+                "terminal",
+                "control",
+                "frame-end",
+                "",
+                "End of an event command list or nested branch list.",
+            ),
+        );
+        event_commands.insert(
+            "101".to_string(),
+            ForesightCommandMetadata::new(
+                "Show Text",
+                "linear",
+                "message",
+                "message",
+                "",
+                "Opens the message window and displays text.",
+            ),
+        );
+        event_commands.insert(
+            "102".to_string(),
+            ForesightCommandMetadata::new(
+                "Show Choices",
+                "branching",
+                "message",
+                "barrier",
+                "",
+                "Displays choices and branches based on player selection.",
+            ),
+        );
+        event_commands.insert(
+            "117".to_string(),
+            ForesightCommandMetadata::new(
+                "Common Event",
+                "nesting",
+                "flow",
+                "nested-list",
+                "",
+                "Runs another event command list.",
+            ),
+        );
+        event_commands.insert(
+            "205".to_string(),
+            ForesightCommandMetadata::new(
+                "Set Movement Route",
+                "linear",
+                "movement",
+                "movement-route",
+                "state",
+                "Runs a movement route command list.",
+            ),
+        );
+
+        let mut movement_route_commands = BTreeMap::new();
+        movement_route_commands.insert(
+            "0".to_string(),
+            ForesightCommandMetadata::new(
+                "Route End",
+                "terminal",
+                "movement-route",
+                "advance",
+                "",
+                "Ends a movement route command list.",
+            ),
+        );
+        for (code, label) in [
+            ("1", "Move Down"),
+            ("2", "Move Left"),
+            ("3", "Move Right"),
+            ("4", "Move Up"),
+            ("5", "Move Lower Left"),
+            ("6", "Move Lower Right"),
+            ("7", "Move Upper Left"),
+            ("8", "Move Upper Right"),
+            ("9", "Move at Random"),
+            ("10", "Move Toward Player"),
+            ("11", "Move Away from Player"),
+            ("12", "One Step Forward"),
+            ("13", "One Step Backward"),
+        ] {
+            movement_route_commands.insert(
+                code.to_string(),
+                ForesightCommandMetadata::new(
+                    label,
+                    "linear",
+                    "movement-route",
+                    "advance",
+                    "context",
+                    "Moves the event without changing the event command stream.",
+                ),
+            );
+        }
+
+        Self {
+            schema_version: 4,
+            event_commands,
+            movement_route_commands,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForesightCommandMetadata {
+    pub label: String,
+    pub classification: String,
+    pub native: bool,
+    pub category: String,
+    pub scan_behavior: String,
+    pub staleness_risk: String,
+    pub summary: String,
+    pub reason: String,
+}
+
+impl ForesightCommandMetadata {
+    fn new(
+        label: &str,
+        classification: &str,
+        category: &str,
+        scan_behavior: &str,
+        staleness_risk: &str,
+        summary: &str,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            classification: classification.to_string(),
+            native: true,
+            category: category.to_string(),
+            scan_behavior: scan_behavior.to_string(),
+            staleness_risk: staleness_risk.to_string(),
+            summary: summary.to_string(),
+            reason: String::new(),
         }
     }
 }
@@ -191,9 +376,17 @@ impl ExportBuilder {
                 config.schema_version
             )));
         }
+        validate_runtime_load_contract(&config.runtime_load_contract)?;
+        if config.foresight_command_catalog.schema_version != 4 {
+            return Err(Error::invalid_input(format!(
+                "unsupported foresight command catalog schema version {}",
+                config.foresight_command_catalog.schema_version
+            )));
+        }
 
         let mut record_count = 0usize;
         for cache_file in &manifest.cache_files {
+            validate_cache_file_name(cache_file)?;
             let path = output_dir.join(cache_file);
             let text = fs::read_to_string(&path).map_err(|error| {
                 Error::invalid_input(format!(
@@ -237,6 +430,45 @@ impl ExportBuilder {
             manifest_hash: sha256_hex(manifest_text.as_bytes()),
         })
     }
+}
+
+fn validate_runtime_load_contract(contract: &RuntimeLoadContract) -> Result<()> {
+    if contract.schema_version != EXPORT_SCHEMA_VERSION {
+        return Err(Error::invalid_input(format!(
+            "runtime load contract schema version {} is unsupported",
+            contract.schema_version
+        )));
+    }
+    if contract.support_directory != crate::install::SUPPORT_DIRECTORY {
+        return Err(Error::invalid_input(format!(
+            "runtime load contract support_directory must be {}",
+            crate::install::SUPPORT_DIRECTORY
+        )));
+    }
+    if contract.plugin_entry_file != crate::install::PLUGIN_ENTRY_FILE {
+        return Err(Error::invalid_input(format!(
+            "runtime load contract plugin_entry_file must be {}",
+            crate::install::PLUGIN_ENTRY_FILE
+        )));
+    }
+    let expected_load_order = string_vec(crate::install::RUNTIME_SCRIPT_LOAD_ORDER);
+    if contract.script_load_order != expected_load_order {
+        return Err(Error::invalid_input(
+            "runtime load contract script_load_order does not match the cache-only runtime",
+        ));
+    }
+    let mut expected_required_files = vec![crate::install::PLUGIN_ENTRY_FILE.to_string()];
+    expected_required_files.extend(
+        crate::install::RUNTIME_SUPPORT_FILES
+            .iter()
+            .map(|file| (*file).to_string()),
+    );
+    if contract.required_runtime_files != expected_required_files {
+        return Err(Error::invalid_input(
+            "runtime load contract required_runtime_files does not match the cache-only runtime",
+        ));
+    }
+    Ok(())
 }
 
 fn runtime_cache_record(
@@ -334,6 +566,22 @@ fn single_source_language(rows: &[ExportableTranslationRecord]) -> Result<String
     Ok(first.source_language.clone())
 }
 
+fn validate_cache_file_name(cache_file: &str) -> Result<()> {
+    if cache_file.contains('/') || cache_file.contains('\\') {
+        return Err(Error::invalid_input(format!(
+            "unsupported export cache file {cache_file}"
+        )));
+    }
+    if !(cache_file == CACHE_FILE
+        || (cache_file.starts_with("cache-") && cache_file.ends_with(".jsonl")))
+    {
+        return Err(Error::invalid_input(format!(
+            "unsupported export cache file {cache_file}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_cache_record(record: &RuntimeCacheRecord) -> Result<()> {
     if !record.cache_key.starts_with("ck:v1:") {
         return Err(Error::invalid_input("cache_key must use ck:v1 schema"));
@@ -402,4 +650,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+fn string_vec(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }

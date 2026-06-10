@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rpg_translator_core::{InstallOptions, Installer, Result, RollbackManager, RollbackOptions};
+use rpg_translator_core::{
+    InstallOptions, Installer, OverlayConfig, Result, RollbackManager, RollbackOptions,
+};
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -32,7 +34,7 @@ fn make_export_bundle(root: &Path) {
     );
     write_text(
         &root.join("overlay-config.json"),
-        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중"}"#,
+        &serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
     );
     write_text(
         &root.join("cache.jsonl"),
@@ -65,11 +67,36 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
     assert!(game.join("js/plugins/RPGTranslator.js").is_file());
     assert!(game.join("js/plugins/rpg-translator/boot.js").is_file());
     assert!(
+        game.join("js/plugins/rpg-translator/orchestrator.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/foresight-scanner.js")
+            .is_file()
+    );
+    assert!(game.join("js/plugins/rpg-translator/wrapping.js").is_file());
+    assert!(
+        game.join("js/plugins/rpg-translator/bitmap-text-adapter.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/sprite-text-adapter.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/pixi-text-adapter.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/adapter-contract.js")
+            .is_file()
+    );
+    assert!(
         game.join("js/plugins/rpg-translator/manifest.json")
             .is_file()
     );
     assert!(report.install_manifest_path.is_file());
-    assert_eq!(report.installed_files.len(), 13);
+    assert_eq!(report.installed_files.len(), 21);
 
     let plugins = fs::read_to_string(game.join("js/plugins.js")).expect("read plugins");
     assert_eq!(plugins.matches("\"name\": \"RPGTranslator\"").count(), 1);
@@ -80,7 +107,35 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
     )
     .expect("parse install manifest");
     assert_eq!(manifest["export_id"], 42);
+    assert_eq!(manifest["support_directory"], "rpg-translator");
+    assert_eq!(manifest["plugin_entry_file"], "RPGTranslator.js");
     assert_eq!(manifest["plugin_entry_status"], true);
+    assert_eq!(
+        manifest["runtime_script_load_order"],
+        serde_json::json!([
+            "text-codec.js",
+            "runtime-miss-logger.js",
+            "lookup-index.js",
+            "render-guard.js",
+            "wrapping.js",
+            "runtime-diagnostics.js",
+            "orchestrator.js",
+            "adapter-contract.js",
+            "foresight-scanner.js",
+            "cache-loader.js",
+            "message-adapter.js",
+            "window-text-adapter.js",
+            "bitmap-text-adapter.js",
+            "sprite-text-adapter.js",
+            "pixi-text-adapter.js",
+            "startup-toast.js",
+            "boot.js"
+        ])
+    );
+    assert_eq!(
+        manifest["required_asset_files"],
+        serde_json::json!(["manifest.json", "overlay-config.json", "cache.jsonl"])
+    );
     assert_eq!(
         manifest["plugins_backup_sha256"]
             .as_str()
@@ -128,6 +183,42 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .iter()
             .any(|path| path.ends_with("RPGTranslator.js"))
     );
+
+    Ok(())
+}
+
+#[test]
+fn installer_rejects_runtime_contract_mismatch_before_mutating_game() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let export = temp.path().join("export");
+    let original_plugins =
+        r#"var $plugins = [{"name":"Existing","status":true,"description":"","parameters":{}}];"#;
+    make_direct_game(&game, original_plugins);
+    make_export_bundle(&export);
+
+    let mut config = OverlayConfig::runtime_default();
+    config.runtime_load_contract.plugin_entry_file = "WrongTranslator.js".to_string();
+    write_text(
+        &export.join("overlay-config.json"),
+        &serde_json::to_string(&config).expect("encode broken config"),
+    );
+
+    let error = Installer::install(&install_options(game.clone(), export))
+        .expect_err("runtime contract mismatch should stop install");
+
+    assert!(
+        error
+            .to_string()
+            .contains("runtime load contract plugin_entry_file"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read plugins"),
+        original_plugins
+    );
+    assert!(!game.join("js/plugins/RPGTranslator.js").exists());
+    assert!(!game.join("js/plugins/rpg-translator").exists());
 
     Ok(())
 }
@@ -262,6 +353,45 @@ fn installer_rejects_malformed_plugins_before_mutating_files() {
         .expect_err("malformed plugins fails");
 
     assert!(error.to_string().contains("plugins.js"));
+    assert!(!game.join("js/plugins/RPGTranslator.js").exists());
+    assert!(!game.join("js/plugins/rpg-translator").exists());
+}
+
+#[test]
+fn installer_rejects_missing_runtime_support_file_before_mutating_game() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let export = temp.path().join("export");
+    let runtime = temp.path().join("runtime");
+    make_direct_game(&game, "var $plugins = [];");
+    make_export_bundle(&export);
+    for file in [
+        "RPGTranslator.js",
+        "text-codec.js",
+        "runtime-miss-logger.js",
+        "lookup-index.js",
+        "render-guard.js",
+        "wrapping.js",
+        "runtime-diagnostics.js",
+        "orchestrator.js",
+        "adapter-contract.js",
+        "foresight-scanner.js",
+        "cache-loader.js",
+        "message-adapter.js",
+        "window-text-adapter.js",
+        "bitmap-text-adapter.js",
+        "sprite-text-adapter.js",
+        "startup-toast.js",
+        "boot.js",
+    ] {
+        write_text(&runtime.join(file), "// fixture");
+    }
+
+    let mut options = install_options(game.clone(), export);
+    options.runtime_dir = Some(runtime);
+    let error = Installer::install(&options).expect_err("missing pixi adapter fails");
+
+    assert!(error.to_string().contains("pixi-text-adapter.js"));
     assert!(!game.join("js/plugins/RPGTranslator.js").exists());
     assert!(!game.join("js/plugins/rpg-translator").exists());
 }

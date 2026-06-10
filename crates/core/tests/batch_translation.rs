@@ -2,10 +2,12 @@ use std::{collections::VecDeque, fs, thread, time::Duration};
 
 use rpg_translator_core::{
     BatchPlanner, BatchPlannerConfig, BatchRunStatus, BatchTranslator, BatchTranslatorConfig,
-    BatchValidator, CheckpointWriter, Engine, Error, FakeProvider, NewProject, NewQaFinding,
-    NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse, ProviderClient,
-    ProviderRequestSpacingConfig, ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, TextCodec,
-    TranslateProgressEvent, TranslationDb,
+    BatchValidator, CheckpointWriter, Engine, Error, FakeProvider, NewOccurrence, NewProject,
+    NewQaFinding, NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse,
+    ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
+    ProviderSpeedBenchmarkConfig, TextCodec, TranslateProgressEvent, TranslationDb,
+    TranslationSpeedSample, adaptive_translation_tuning_from_samples,
+    adaptive_translation_tuning_from_samples_for_lanes,
 };
 use tempfile::tempdir;
 
@@ -103,6 +105,139 @@ fn stable_test_spacing() -> ProviderRequestSpacingConfig {
     }
 }
 
+fn speed_sample(status: &str, batch_size: i64, total_elapsed_ms: i64) -> TranslationSpeedSample {
+    TranslationSpeedSample {
+        id: 0,
+        provider_run_id: 1,
+        batch_index: 1,
+        lane: "plain_block".to_string(),
+        item_count: batch_size,
+        char_count: batch_size * 40,
+        estimated_token_count: batch_size * 10,
+        request_elapsed_ms: total_elapsed_ms.saturating_sub(750),
+        success_delay_ms: 750,
+        total_elapsed_ms,
+        status: status.to_string(),
+        failure_type: None,
+        effective_batch_size: batch_size,
+        adaptive_decision_reason: "adaptive: fixture".to_string(),
+        model: Some("gemma".to_string()),
+        prompt_hash: "prompt".to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn adaptive_tuning_uses_speed_history_for_initial_batch_and_delay() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let fast_samples = vec![
+        speed_sample("success", 16, 2_000),
+        speed_sample("success", 16, 2_500),
+        speed_sample("success", 16, 3_000),
+    ];
+    let fast = adaptive_translation_tuning_from_samples(&fast_samples, 8, 4096, spacing.clone());
+    assert_eq!(fast.max_items_per_batch, 32);
+    assert!(fast.input_token_budget >= 1024);
+    assert_eq!(fast.provider_spacing.base_success_spacing_ms, 1250);
+    assert!(fast.decision_reason.contains("accelerating"));
+
+    let slow_samples = vec![
+        speed_sample("success", 16, 22_000),
+        speed_sample("final_failed", 16, 25_000),
+    ];
+    let slow = adaptive_translation_tuning_from_samples(&slow_samples, 16, 4096, spacing);
+    assert_eq!(slow.max_items_per_batch, 8);
+    assert_eq!(slow.provider_spacing.base_success_spacing_ms, 1500);
+    assert!(slow.decision_reason.contains("conservative"));
+}
+
+#[test]
+fn adaptive_tuning_uses_failure_only_history_conservatively() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let failure_samples = vec![
+        speed_sample("recoverable_provider", 16, 1_000),
+        speed_sample("parse_failed", 16, 1_000),
+        speed_sample("final_failed", 16, 1_000),
+    ];
+
+    let tuning = adaptive_translation_tuning_from_samples(&failure_samples, 16, 4096, spacing);
+
+    assert_eq!(tuning.max_items_per_batch, 8);
+    assert_eq!(tuning.input_token_budget, 2048);
+    assert_eq!(tuning.provider_spacing.base_success_spacing_ms, 1500);
+    assert!(tuning.decision_reason.contains("conservative"));
+    assert!(tuning.decision_reason.contains("failure_rate=100%"));
+}
+
+#[test]
+fn adaptive_tuning_uses_real_prompt_benchmark_samples() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let benchmark_samples = vec![
+        speed_sample("benchmark", 16, 2_000),
+        speed_sample("benchmark", 16, 2_500),
+        speed_sample("benchmark", 16, 3_000),
+    ];
+
+    let tuning = adaptive_translation_tuning_from_samples(&benchmark_samples, 8, 4096, spacing);
+
+    assert_eq!(tuning.max_items_per_batch, 32);
+    assert_eq!(tuning.provider_spacing.base_success_spacing_ms, 1250);
+    assert!(tuning.decision_reason.contains("accelerating"));
+}
+
+#[test]
+fn adaptive_tuning_filters_history_to_current_lanes() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let mut fast_short = vec![
+        speed_sample("success", 16, 2_000),
+        speed_sample("success", 16, 2_500),
+        speed_sample("success", 16, 3_000),
+    ];
+    for sample in &mut fast_short {
+        sample.lane = "short".to_string();
+    }
+    let mut failing_complex = vec![
+        speed_sample("recoverable_provider", 16, 1_000),
+        speed_sample("parse_failed", 16, 1_000),
+        speed_sample("final_failed", 16, 1_000),
+    ];
+    for sample in &mut failing_complex {
+        sample.lane = "complex".to_string();
+    }
+    let mut samples = fast_short;
+    samples.extend(failing_complex);
+
+    let short_tuning = adaptive_translation_tuning_from_samples_for_lanes(
+        &samples,
+        &["short"],
+        8,
+        4096,
+        spacing.clone(),
+    );
+    assert_eq!(short_tuning.max_items_per_batch, 32);
+    assert_eq!(short_tuning.provider_spacing.base_success_spacing_ms, 1250);
+    assert!(short_tuning.decision_reason.contains("accelerating"));
+    assert!(short_tuning.decision_reason.contains("lanes=short"));
+    assert!(short_tuning.decision_reason.contains("lane_samples=3/6"));
+
+    let complex_tuning = adaptive_translation_tuning_from_samples_for_lanes(
+        &samples,
+        &["complex"],
+        16,
+        4096,
+        spacing,
+    );
+    assert_eq!(complex_tuning.max_items_per_batch, 8);
+    assert_eq!(complex_tuning.input_token_budget, 2048);
+    assert_eq!(
+        complex_tuning.provider_spacing.base_success_spacing_ms,
+        1500
+    );
+    assert!(complex_tuning.decision_reason.contains("conservative"));
+    assert!(complex_tuning.decision_reason.contains("lanes=complex"));
+    assert!(complex_tuning.decision_reason.contains("lane_samples=3/6"));
+}
+
 #[test]
 fn fake_provider_success_persists_batch_translations() {
     let mut db = TranslationDb::open_in_memory().expect("open db");
@@ -120,6 +255,7 @@ fn fake_provider_success_persists_batch_translations() {
         "ko",
         BatchTranslatorConfig {
             max_items_per_batch: 8,
+            prompt_hash: "prompt-fixture".to_string(),
             ..test_config()
         },
     )
@@ -141,6 +277,47 @@ fn fake_provider_success_persists_batch_translations() {
             .expect("second translation")
             .translated_text,
         "\u{c138}\u{acc4}\\N[1]"
+    );
+    let samples = db
+        .recent_translation_speed_samples(None, Some("prompt-fixture"), 10)
+        .expect("speed samples");
+    assert_eq!(samples.len(), 2);
+    assert!(samples.iter().all(|sample| sample.status == "success"));
+    assert!(samples.iter().all(|sample| sample.item_count == 1));
+    assert!(samples.iter().all(|sample| sample.char_count > 0));
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.provider_run_id == report.provider_run_id)
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.effective_batch_size == report.effective_batch_size as i64)
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.prompt_hash == "prompt-fixture")
+    );
+    assert!(
+        samples.iter().all(|sample| sample.batch_index >= 1
+            && sample.batch_index <= report.processed_batches as i64)
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.adaptive_decision_reason.starts_with("adaptive:"))
+    );
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.lane == "short" && sample.estimated_token_count > 0)
+    );
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.lane == "complex" && sample.estimated_token_count > 0)
     );
 }
 
@@ -213,6 +390,61 @@ fn planner_deduplicates_same_normalized_text_and_signature() {
 }
 
 #[test]
+fn planner_deduplicates_block_units_with_multiple_occurrences() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let project_id = db
+        .upsert_project(&NewProject {
+            game_root: "/synthetic/game".to_string(),
+            display_name: "Synthetic Game".to_string(),
+            engine: Engine::Mz,
+        })
+        .expect("insert project");
+    let source_id = seed_source_with_kind(&mut db, "en", "Line one\nLine two", "message_block");
+
+    for (index, path) in [
+        "$.events[1].pages[0].list[2]",
+        "$.events[7].pages[0].list[9]",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        db.insert_project_occurrence(
+            project_id,
+            &NewOccurrence {
+                project_id: Some(project_id),
+                source_text_id: source_id,
+                file_path: "data/Map001.json".to_string(),
+                json_path: path.to_string(),
+                entity_type: "event_command".to_string(),
+                event_id: Some((index + 1) as i64),
+                page_index: Some(0),
+                command_index: Some(index as i64),
+                command_code: Some(101),
+                parameter_index: None,
+                object_key: None,
+                extraction_rule_id: "event.message.block".to_string(),
+            },
+        )
+        .expect("insert occurrence");
+    }
+
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    assert_eq!(plan.jobs.len(), 1);
+    assert_eq!(plan.jobs[0].source_text_ids, vec![source_id]);
+    assert_eq!(plan.jobs[0].provider_text, "Line one\nLine two");
+}
+
+#[test]
 fn planner_separates_short_block_and_complex_lanes() {
     let mut db = TranslationDb::open_in_memory().expect("open db");
     db.migrate().expect("migrate db");
@@ -266,17 +498,84 @@ fn validator_rejects_bad_model_output_shapes() {
 }
 
 #[test]
-fn validator_rejects_message_block_line_break_mismatch() {
+fn validator_rejects_line_local_placeholder_drift() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "Line \u{00a4}\nSecond line".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    let error = BatchValidator::validate(r#"{"id":1,"translation":"첫 줄\n둘째 줄¤"}"#, &jobs)
+        .expect_err("placeholder moved to another line should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("line-local placeholder mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validator_preserves_converted_escape_codes() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source(&mut db, "en", "Hello \u{1b}C[1]Emma\u{1b}C[0]");
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    let validated = BatchValidator::validate(r#"{"id":1,"translation":"안녕 ¤엠마¤"}"#, &plan.jobs)
+        .expect("converted escape placeholders should restore");
+
+    assert_eq!(
+        validated[0].translated_text,
+        "안녕 \u{1b}C[1]엠마\u{1b}C[0]"
+    );
+}
+
+#[test]
+fn validator_preserves_angle_and_bracket_params() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source(&mut db, "en", "\\N[1] found \\Quest<main>");
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    let validated =
+        BatchValidator::validate(r#"{"id":1,"translation":"¤이 ¤를 찾았다"}"#, &plan.jobs)
+            .expect("angle and bracket parameter placeholders should restore");
+
+    assert_eq!(
+        validated[0].translated_text,
+        "\\N[1]이 \\Quest<main>를 찾았다"
+    );
+}
+
+#[test]
+fn validator_allows_message_block_line_break_mismatch_for_runtime_wrapping() {
     let item = ProviderBatchItem {
         id: 1,
         text: "Line one\nLine two".to_string(),
     };
     let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
 
-    assert!(
-        BatchValidator::validate(r#"{"id":1,"translation":"한 줄로 합침"}"#, &jobs).is_err(),
-        "message and scroll block translations must preserve hard newline count"
-    );
+    let validated = BatchValidator::validate(r#"{"id":1,"translation":"한 줄로 합침"}"#, &jobs)
+        .expect("runtime wrapping handles line count changes");
+    assert_eq!(validated[0].translated_text, "한 줄로 합침");
 }
 
 #[test]
@@ -379,6 +678,47 @@ fn json_parse_failure_is_preserved_in_db_and_checkpoint_details() {
     );
     assert_eq!(findings[0].finding_type, "provider-json-parse");
     assert_eq!(findings[0].status, "open");
+    let samples = db
+        .recent_translation_speed_samples(None, None, 10)
+        .expect("speed samples");
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].status, "parse_failed");
+    assert_eq!(
+        samples[0].failure_type.as_deref(),
+        Some("provider-json-parse")
+    );
+    assert_eq!(samples[0].item_count, 1);
+}
+
+#[test]
+fn translator_rejects_unchanged_provider_output() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let source = seed_source(&mut db, "en", "Hello");
+    let mut provider = FakeProvider::from_outputs(vec![output(&[(1, "Hello")])]);
+
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 1,
+            retry_attempts: 0,
+            ..test_config()
+        },
+    )
+    .expect("translate unchanged output");
+
+    assert_eq!(report.completed_source_text_ids, Vec::<i64>::new());
+    assert_eq!(report.failed_source_text_ids, vec![source]);
+    assert!(db.get_translation(source, "ko").expect("lookup").is_none());
+    let findings = db.qa_findings_for_source(source).expect("findings");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.message.contains("unchanged provider output")),
+        "expected unchanged provider output finding, got {findings:?}"
+    );
 }
 
 #[test]
@@ -551,6 +891,22 @@ fn provider_503_is_retry_pending_until_retry_succeeds() {
             .iter()
             .any(|event| matches!(event, TranslateProgressEvent::ProviderBackoff(snapshot) if snapshot.provider_backoff_ms == Some(0)))
     );
+    let samples = db
+        .recent_translation_speed_samples(None, None, 10)
+        .expect("speed samples");
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.status == "recoverable_provider"
+                && sample.failure_type.as_deref() == Some("provider-503")),
+        "recoverable provider failures should seed adaptive failure-rate history"
+    );
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.status == "success_after_retry"),
+        "retry success should still seed adaptive throughput history"
+    );
 }
 
 #[test]
@@ -600,7 +956,37 @@ fn connection_failures_backoff_and_only_then_become_final_failures() {
             .copied(),
         Some(6)
     );
+    assert!(
+        report
+            .adaptive_decision_reason
+            .contains("provider-connection"),
+        "runtime adaptive reductions should explain the provider failure reason"
+    );
+    assert!(
+        report.adaptive_decision_reason.contains("batch"),
+        "runtime adaptive reductions should explain the batch-size decision"
+    );
     assert_eq!(db.qa_finding_count().expect("qa count"), 2);
+    let samples = db
+        .recent_translation_speed_samples(None, None, 10)
+        .expect("speed samples");
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample.status == "recoverable_provider"
+                && sample.failure_type.as_deref() == Some("provider-connection")
+                && sample
+                    .adaptive_decision_reason
+                    .contains("provider-connection")
+                && sample.adaptive_decision_reason.contains("batch")),
+        "recoverable provider samples should carry the adaptive reduction reason"
+    );
+    assert!(
+        samples.iter().any(|sample| sample.status == "final_failed"
+            && sample.failure_type.as_deref() == Some("provider-connection")
+            && sample.item_count == 2),
+        "final provider failures should seed adaptive failure-rate history"
+    );
 }
 
 #[test]
@@ -639,6 +1025,9 @@ fn progress_reports_item_and_batch_eta_separately() {
         TranslateProgressEvent::BatchFinished(snapshot) => {
             snapshot.current_batch_items == 1
                 && snapshot.started_completed_items == 0
+                && snapshot.recent_p50_batch_elapsed_ms.is_some()
+                && snapshot.recent_p95_batch_elapsed_ms.is_some()
+                && snapshot.best_items_per_minute.is_some()
                 && (snapshot.item_eta_ms.is_some() || snapshot.batch_eta_ms.is_some())
         }
         _ => false,

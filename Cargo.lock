@@ -2623,7 +2623,9 @@ dependencies = [
 name = "rpg-translator-cli"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
  "rpg-translator-core",
+ "serde_json",
  "tempfile",
 ]
 

@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    Error, NewProviderRun, NewQaFinding, NewTranslation, ProviderTextState, Result,
-    SourceTextRecord, TextCodec, TranslateProgressEvent, TranslateProgressSnapshot, TranslationDb,
-    TranslationJobProgressUpdate,
+    Error, NewProviderRun, NewQaFinding, NewTranslation, NewTranslationSpeedSample,
+    ProviderTextState, Result, SourceTextRecord, TextCodec, TranslateProgressEvent,
+    TranslateProgressSnapshot, TranslationDb, TranslationJobProgressUpdate, TranslationSpeedSample,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,23 @@ enum BatchLane {
     Short,
     PlainBlock,
     Complex,
+}
+
+impl BatchLane {
+    fn as_key(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::PlainBlock => "plain_block",
+            Self::Complex => "complex",
+        }
+    }
+}
+
+impl BatchJob {
+    #[must_use]
+    pub fn lane_key(&self) -> &'static str {
+        self.lane.as_key()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,13 +266,12 @@ impl BatchValidator {
                     "provider returned empty translation for id {id}"
                 )));
             }
-            let expected_line_breaks = job.provider_state.provider_text.matches('\n').count();
-            let actual_line_breaks = translation.matches('\n').count();
-            if expected_line_breaks != actual_line_breaks {
+            if is_unchanged_provider_output(&job.provider_text, translation) {
                 return Err(Error::invalid_input(format!(
-                    "provider row {id} line-break mismatch: expected {expected_line_breaks}, got {actual_line_breaks}"
+                    "provider returned unchanged provider output for id {id}"
                 )));
             }
+            validate_line_local_placeholders(id, &job.provider_text, translation)?;
             let restored =
                 TextCodec::restore_provider_translation(translation, &job.provider_state)?;
             validated.push(ValidatedTranslation {
@@ -272,6 +289,39 @@ impl BatchValidator {
 
         Ok(validated)
     }
+}
+
+fn validate_line_local_placeholders(id: i64, source: &str, translation: &str) -> Result<()> {
+    let source_lines = source.split('\n').collect::<Vec<_>>();
+    let translation_lines = translation.split('\n').collect::<Vec<_>>();
+    if source_lines.len() != translation_lines.len() {
+        return Ok(());
+    }
+    for (index, (source_line, translation_line)) in source_lines
+        .iter()
+        .zip(translation_lines.iter())
+        .enumerate()
+    {
+        let expected = placeholder_count(source_line);
+        let actual = placeholder_count(translation_line);
+        if expected != actual {
+            return Err(Error::invalid_input(format!(
+                "line-local placeholder mismatch for id {id} line {}: expected {expected}, got {actual}",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_unchanged_provider_output(source: &str, translation: &str) -> bool {
+    let source = source.trim();
+    let translation = translation.trim();
+    !source.is_empty() && !translation.is_empty() && source == translation
+}
+
+fn placeholder_count(input: &str) -> usize {
+    input.chars().filter(|ch| *ch == '\u{00a4}').count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +386,29 @@ pub struct BatchTranslatorConfig {
     pub provider_spacing: ProviderRequestSpacingConfig,
     pub source_text_ids: Option<Vec<i64>>,
     pub include_existing_translations: bool,
+    pub prompt_hash: String,
+    pub adaptive_decision_reason: String,
+}
+
+#[must_use]
+pub fn translation_prompt_hash(
+    source_language: &str,
+    target_language: &str,
+    system_prompt: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rpg-translator:prompt:v1");
+    update_hash_field(&mut hasher, "source_language", source_language);
+    update_hash_field(&mut hasher, "target_language", target_language);
+    update_hash_field(&mut hasher, "system_prompt", system_prompt);
+    hex::encode(hasher.finalize())
+}
+
+fn update_hash_field(hasher: &mut Sha256, name: &str, value: &str) {
+    hasher.update(name.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.as_bytes());
+    hasher.update([0xff]);
 }
 
 impl Default for BatchTranslatorConfig {
@@ -349,6 +422,8 @@ impl Default for BatchTranslatorConfig {
             provider_spacing: ProviderRequestSpacingConfig::stable(),
             source_text_ids: None,
             include_existing_translations: false,
+            prompt_hash: String::default(),
+            adaptive_decision_reason: "adaptive: no speed history loaded".to_string(),
         }
     }
 }
@@ -365,6 +440,198 @@ impl BatchTranslatorConfig {
             include_existing_translations: self.include_existing_translations,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveTranslationTuning {
+    pub max_items_per_batch: usize,
+    pub input_token_budget: usize,
+    pub provider_spacing: ProviderRequestSpacingConfig,
+    pub decision_reason: String,
+}
+
+#[must_use]
+pub fn adaptive_translation_tuning_from_samples(
+    samples: &[TranslationSpeedSample],
+    requested_batch_size: usize,
+    default_token_budget: usize,
+    default_spacing: ProviderRequestSpacingConfig,
+) -> AdaptiveTranslationTuning {
+    let requested_batch_size = requested_batch_size.max(1);
+    let default_token_budget = default_token_budget.max(1);
+    let mut spacing = default_spacing;
+    let success_samples = samples
+        .iter()
+        .filter(|sample| is_success_speed_sample(sample) && sample.total_elapsed_ms > 0)
+        .collect::<Vec<_>>();
+    if success_samples.is_empty() {
+        if !samples.is_empty() {
+            let suggested_batch = (requested_batch_size / 2).max(1);
+            let token_budget = (default_token_budget / 2).clamp(1024, default_token_budget);
+            spacing.base_success_spacing_ms = spacing.base_success_spacing_ms.max(1_500);
+            return AdaptiveTranslationTuning {
+                max_items_per_batch: suggested_batch,
+                input_token_budget: token_budget,
+                provider_spacing: spacing.clone(),
+                decision_reason: format!(
+                    "adaptive: conservative from {} samples; failure_rate=100%; p95=unavailable; batch={suggested_batch}; token_budget={token_budget}; success_floor={}ms",
+                    samples.len(),
+                    spacing.base_success_spacing_ms
+                ),
+            };
+        }
+        let success_floor_ms = spacing.base_success_spacing_ms;
+        return AdaptiveTranslationTuning {
+            max_items_per_batch: requested_batch_size,
+            input_token_budget: default_token_budget,
+            provider_spacing: spacing,
+            decision_reason: format!(
+                "adaptive: no prior speed samples; using requested batch={requested_batch_size}, token_budget={default_token_budget}, success_floor={}ms",
+                success_floor_ms
+            ),
+        };
+    }
+
+    let failure_count = samples
+        .iter()
+        .filter(|sample| !is_success_speed_sample(sample))
+        .count();
+    let failure_rate = failure_count as f64 / samples.len().max(1) as f64;
+    let p95_ms = percentile_i64(
+        &success_samples
+            .iter()
+            .map(|sample| sample.total_elapsed_ms)
+            .collect::<Vec<_>>(),
+        95,
+    )
+    .unwrap_or(0);
+    let median_effective_batch = median_i64(
+        &success_samples
+            .iter()
+            .map(|sample| sample.effective_batch_size.max(1))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or(requested_batch_size as i64)
+    .clamp(1, 64) as usize;
+    let mut suggested_batch = median_effective_batch.max(requested_batch_size);
+    let mode = if failure_rate >= 0.10 || p95_ms >= 15_000 {
+        suggested_batch = (suggested_batch / 2).max(1);
+        spacing.base_success_spacing_ms = spacing.base_success_spacing_ms.max(1_500);
+        "conservative"
+    } else if failure_rate == 0.0 && p95_ms <= 5_000 {
+        suggested_batch = suggested_batch.saturating_mul(2).clamp(1, 64);
+        spacing.base_success_spacing_ms = spacing
+            .base_success_spacing_ms
+            .saturating_sub(spacing.success_spacing_step_ms)
+            .max(spacing.min_success_spacing_ms);
+        "accelerating"
+    } else {
+        "steady"
+    };
+
+    let token_budget = suggested_token_budget(&success_samples, suggested_batch)
+        .unwrap_or(default_token_budget)
+        .max(default_token_budget.min(1024))
+        .clamp(1024, 8192);
+    AdaptiveTranslationTuning {
+        max_items_per_batch: suggested_batch,
+        input_token_budget: token_budget,
+        provider_spacing: spacing.clone(),
+        decision_reason: format!(
+            "adaptive: {mode} from {} samples; failure_rate={:.0}%; p95={}ms; batch={}; token_budget={}; success_floor={}ms",
+            samples.len(),
+            failure_rate * 100.0,
+            p95_ms,
+            suggested_batch,
+            token_budget,
+            spacing.base_success_spacing_ms
+        ),
+    }
+}
+
+#[must_use]
+pub fn adaptive_translation_tuning_from_samples_for_lanes(
+    samples: &[TranslationSpeedSample],
+    target_lanes: &[&str],
+    requested_batch_size: usize,
+    default_token_budget: usize,
+    default_spacing: ProviderRequestSpacingConfig,
+) -> AdaptiveTranslationTuning {
+    let lanes = target_lanes
+        .iter()
+        .map(|lane| lane.trim())
+        .filter(|lane| !lane.is_empty())
+        .collect::<BTreeSet<_>>();
+    if lanes.is_empty() {
+        return adaptive_translation_tuning_from_samples(
+            samples,
+            requested_batch_size,
+            default_token_budget,
+            default_spacing,
+        );
+    }
+
+    let matching_samples = samples
+        .iter()
+        .filter(|sample| lanes.contains(sample.lane.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let matched_count = matching_samples.len();
+    let (samples_for_tuning, used_fallback) = if matching_samples.is_empty() && !samples.is_empty()
+    {
+        (samples.to_vec(), true)
+    } else {
+        (matching_samples, false)
+    };
+
+    let mut tuning = adaptive_translation_tuning_from_samples(
+        &samples_for_tuning,
+        requested_batch_size,
+        default_token_budget,
+        default_spacing,
+    );
+    let lane_list = lanes.iter().copied().collect::<Vec<_>>().join(",");
+    if used_fallback {
+        tuning.decision_reason = format!(
+            "{}; lanes={lane_list}; lane_samples=0/{}; lane_fallback=all",
+            tuning.decision_reason,
+            samples.len()
+        );
+    } else {
+        tuning.decision_reason = format!(
+            "{}; lanes={lane_list}; lane_samples={matched_count}/{}",
+            tuning.decision_reason,
+            samples.len()
+        );
+    }
+    tuning
+}
+
+fn is_success_speed_sample(sample: &TranslationSpeedSample) -> bool {
+    sample.status.starts_with("success") || sample.status == "benchmark"
+}
+
+fn suggested_token_budget(
+    samples: &[&TranslationSpeedSample],
+    suggested_batch: usize,
+) -> Option<usize> {
+    let total_items = samples
+        .iter()
+        .map(|sample| sample.item_count.max(0) as usize)
+        .sum::<usize>();
+    if total_items == 0 {
+        return None;
+    }
+    let total_tokens = samples
+        .iter()
+        .map(|sample| sample.estimated_token_count.max(0) as usize)
+        .sum::<usize>();
+    let tokens_per_item = total_tokens.div_ceil(total_items).max(1);
+    Some(
+        tokens_per_item
+            .saturating_mul(suggested_batch)
+            .saturating_mul(2),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +652,9 @@ pub struct BatchRunReport {
     pub batch_eta_ms: Option<u64>,
     pub last_batch_elapsed_ms: Option<u64>,
     pub avg_batch_elapsed_ms: Option<u64>,
+    pub recent_p50_batch_elapsed_ms: Option<u64>,
+    pub recent_p95_batch_elapsed_ms: Option<u64>,
+    pub best_items_per_minute: Option<u64>,
     pub current_batch_items: usize,
     pub parse_failed_items: usize,
     pub validation_failed_items: usize,
@@ -395,11 +665,14 @@ pub struct BatchRunReport {
     pub final_failed_items: usize,
     pub provider_backoff_ms: Option<u64>,
     pub effective_batch_size: usize,
+    pub next_experiment_batch_size: usize,
+    pub input_token_budget: usize,
     pub speed_mode: String,
     pub success_streak: usize,
     pub success_delay_floor_ms: u64,
     pub next_delay_ms: Option<u64>,
     pub failure_reason_counts: BTreeMap<String, usize>,
+    pub adaptive_decision_reason: String,
     pub legacy_checkpoint_only: bool,
 }
 
@@ -651,6 +924,9 @@ impl BatchTranslator {
             batch_eta_ms: None,
             last_batch_elapsed_ms: None,
             avg_batch_elapsed_ms: None,
+            recent_p50_batch_elapsed_ms: None,
+            recent_p95_batch_elapsed_ms: None,
+            best_items_per_minute: None,
             current_batch_items: 0,
             parse_failed_items: 0,
             validation_failed_items: 0,
@@ -661,11 +937,14 @@ impl BatchTranslator {
             final_failed_items: 0,
             provider_backoff_ms: None,
             effective_batch_size: config.max_items_per_batch.max(1),
+            next_experiment_batch_size: config.max_items_per_batch.max(1),
+            input_token_budget: config.input_token_budget.max(1),
             speed_mode: "steady".to_string(),
             success_streak: 0,
             success_delay_floor_ms: config.provider_spacing.base_success_spacing_ms,
             next_delay_ms: None,
             failure_reason_counts: BTreeMap::new(),
+            adaptive_decision_reason: config.adaptive_decision_reason.clone(),
             legacy_checkpoint_only: false,
         };
         persist_translation_job_progress(
@@ -700,6 +979,7 @@ impl BatchTranslator {
                 should_pause: &mut should_pause,
                 started,
                 recent_success_batch_elapsed_ms: VecDeque::new(),
+                recent_success_batch_samples: VecDeque::new(),
             };
             let mut total_batch_elapsed_ms = 0u64;
             for batch in &plan.batches {
@@ -884,6 +1164,9 @@ fn emit_batch_progress<F>(
         ),
         last_batch_elapsed_ms: report.last_batch_elapsed_ms,
         avg_batch_elapsed_ms: report.avg_batch_elapsed_ms,
+        recent_p50_batch_elapsed_ms: report.recent_p50_batch_elapsed_ms,
+        recent_p95_batch_elapsed_ms: report.recent_p95_batch_elapsed_ms,
+        best_items_per_minute: report.best_items_per_minute,
         current_batch_items: report.current_batch_items,
         started_completed_items: report.initial_completed_source_text_count,
         parse_failed_items: report.parse_failed_items,
@@ -895,11 +1178,14 @@ fn emit_batch_progress<F>(
         final_failed_items: report.final_failed_items,
         provider_backoff_ms: report.provider_backoff_ms,
         effective_batch_size: report.effective_batch_size,
+        next_experiment_batch_size: report.next_experiment_batch_size,
+        input_token_budget: report.input_token_budget,
         speed_mode: report.speed_mode.clone(),
         success_streak: report.success_streak,
         success_delay_floor_ms: report.success_delay_floor_ms,
         next_delay_ms: report.next_delay_ms,
         failure_reason_counts: report.failure_reason_counts.clone(),
+        adaptive_decision_reason: report.adaptive_decision_reason.clone(),
         legacy_checkpoint_only: report.legacy_checkpoint_only,
     };
     let event = progress_event_from_snapshot(kind, snapshot);
@@ -963,12 +1249,15 @@ fn persist_translation_job_progress(
         final_failed_items: usize_to_i64(report.final_failed_items),
         provider_backoff_ms: report.provider_backoff_ms.map(u64_to_i64),
         effective_batch_size: usize_to_i64(report.effective_batch_size),
+        next_experiment_batch_size: usize_to_i64(report.next_experiment_batch_size),
+        input_token_budget: usize_to_i64(report.input_token_budget),
         speed_mode: report.speed_mode.clone(),
         success_streak: usize_to_i64(report.success_streak),
         success_delay_floor_ms: u64_to_i64(report.success_delay_floor_ms),
         next_delay_ms: report.next_delay_ms.map(u64_to_i64),
         failure_reason_counts_json: serde_json::to_string(&report.failure_reason_counts)
             .unwrap_or_else(|_| "{}".to_string()),
+        adaptive_decision_reason: report.adaptive_decision_reason.clone(),
         legacy_checkpoint_only: report.legacy_checkpoint_only,
     })?;
     Ok(())
@@ -1021,6 +1310,17 @@ fn median_nonempty_ms(mut values: Vec<u64>) -> Option<u64> {
     }
     values.sort_unstable();
     Some(values[values.len() / 2])
+}
+
+fn best_items_per_minute(samples: &VecDeque<RecentSuccessBatchSample>) -> Option<u64> {
+    samples
+        .iter()
+        .filter_map(|sample| throughput_per_minute(sample.item_count, sample.elapsed_ms))
+        .fold(None, |best, value| match best {
+            Some(current) if current >= value => Some(current),
+            _ => Some(value),
+        })
+        .map(|value| value.round() as u64)
 }
 
 fn estimate_item_eta_ms(
@@ -1135,6 +1435,13 @@ struct BatchProcessor<'a> {
     should_pause: &'a mut dyn FnMut() -> bool,
     started: Instant,
     recent_success_batch_elapsed_ms: VecDeque<u64>,
+    recent_success_batch_samples: VecDeque<RecentSuccessBatchSample>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecentSuccessBatchSample {
+    elapsed_ms: u64,
+    item_count: usize,
 }
 
 impl BatchProcessor<'_> {
@@ -1179,7 +1486,11 @@ impl BatchProcessor<'_> {
                     Ok(translations) => {
                         self.report.retry_pending_items = 0;
                         self.report.provider_backoff_ms = None;
-                        self.note_successful_provider_batch(elapsed_ms(request_started));
+                        let request_elapsed_ms = elapsed_ms(request_started);
+                        let success_delay_ms = self.note_successful_provider_batch(
+                            request_elapsed_ms,
+                            count_batch_source_text_ids(batch),
+                        );
                         let (translations, censored) =
                             split_censored_translations(batch, translations);
                         persist_translations(
@@ -1199,6 +1510,13 @@ impl BatchProcessor<'_> {
                         if let Some(path) = self.checkpoint_path {
                             CheckpointWriter::write_atomic(path, self.checkpoint)?;
                         }
+                        self.record_speed_sample(
+                            batch,
+                            request_elapsed_ms,
+                            success_delay_ms,
+                            "success",
+                            None,
+                        )?;
                         return Ok(());
                     }
                     Err(error) => {
@@ -1210,7 +1528,8 @@ impl BatchProcessor<'_> {
                         return Err(error);
                     }
                     if let Some(reason) = ProviderFailureReason::classify(&error) {
-                        self.retry_provider_failure(batch, reason, error)?;
+                        let request_elapsed_ms = elapsed_ms(request_started);
+                        self.retry_provider_failure(batch, reason, error, request_elapsed_ms)?;
                         return Ok(());
                     }
                     last_error = error;
@@ -1266,6 +1585,12 @@ impl BatchProcessor<'_> {
         if let Some(path) = self.checkpoint_path {
             CheckpointWriter::write_atomic(path, self.checkpoint)?;
         }
+        let sample_status = if finding_type == "provider-json-parse" {
+            "parse_failed"
+        } else {
+            "validation_failed"
+        };
+        self.record_speed_sample(batch, 0, 0, sample_status, Some(finding_type))?;
         Ok(())
     }
 
@@ -1274,6 +1599,7 @@ impl BatchProcessor<'_> {
         batch: &[BatchJob],
         reason: ProviderFailureReason,
         first_error: Error,
+        first_request_elapsed_ms: u64,
     ) -> Result<()> {
         let source_count = count_batch_source_text_ids(batch);
         let mut last_message = first_error.to_string();
@@ -1284,13 +1610,29 @@ impl BatchProcessor<'_> {
             self.record_final_provider_failure(batch, reason, &last_message)?;
             return Ok(());
         }
+        self.record_speed_sample(
+            batch,
+            first_request_elapsed_ms,
+            0,
+            "recoverable_provider",
+            Some(reason.as_key()),
+        )?;
         for backoff_ms in schedule {
             self.note_recoverable_provider_failure(reason, source_count, Some(backoff_ms));
             if self.report.recoverable_provider_failures >= source_count.saturating_mul(2)
                 && self.report.effective_batch_size > 1
             {
+                let previous_batch_size = self.report.effective_batch_size;
                 self.report.effective_batch_size = (self.report.effective_batch_size / 2).max(1);
+                self.report.adaptive_decision_reason = format!(
+                    "adaptive: runtime conservative after {}; recoverable_provider_failures={}; batch {}->{}",
+                    reason.as_key(),
+                    self.report.recoverable_provider_failures,
+                    previous_batch_size,
+                    self.report.effective_batch_size
+                );
             }
+            self.report.next_experiment_batch_size = self.report.effective_batch_size;
             persist_translation_job_progress(
                 self.db,
                 self.report,
@@ -1318,7 +1660,9 @@ impl BatchProcessor<'_> {
                     Ok(translations) => {
                         self.report.retry_pending_items = 0;
                         self.report.provider_backoff_ms = None;
-                        self.note_successful_provider_batch(elapsed_ms(request_started));
+                        let request_elapsed_ms = elapsed_ms(request_started);
+                        let success_delay_ms =
+                            self.note_successful_provider_batch(request_elapsed_ms, source_count);
                         let (translations, censored) =
                             split_censored_translations(batch, translations);
                         persist_translations(
@@ -1338,6 +1682,13 @@ impl BatchProcessor<'_> {
                         if let Some(path) = self.checkpoint_path {
                             CheckpointWriter::write_atomic(path, self.checkpoint)?;
                         }
+                        self.record_speed_sample(
+                            batch,
+                            request_elapsed_ms,
+                            success_delay_ms,
+                            "success_after_retry",
+                            None,
+                        )?;
                         return Ok(());
                     }
                     Err(error) => {
@@ -1347,11 +1698,19 @@ impl BatchProcessor<'_> {
                     }
                 },
                 Err(error) => {
+                    let request_elapsed_ms = elapsed_ms(request_started);
                     if is_pause_abort_error(&error) {
                         return Err(error);
                     }
                     if let Some(next_reason) = ProviderFailureReason::classify(&error) {
                         last_message = error.to_string();
+                        self.record_speed_sample(
+                            batch,
+                            request_elapsed_ms,
+                            0,
+                            "recoverable_provider",
+                            Some(next_reason.as_key()),
+                        )?;
                         if next_reason != reason {
                             self.note_recoverable_provider_failure(next_reason, source_count, None);
                         }
@@ -1389,7 +1748,11 @@ impl BatchProcessor<'_> {
             .or_insert(0) += source_count;
     }
 
-    fn note_successful_provider_batch(&mut self, request_elapsed_ms: u64) {
+    fn note_successful_provider_batch(
+        &mut self,
+        request_elapsed_ms: u64,
+        item_count: usize,
+    ) -> u64 {
         self.report.provider_backoff_ms = None;
         self.report.success_streak = self.report.success_streak.saturating_add(1);
         self.report.speed_mode = "steady".to_string();
@@ -1420,25 +1783,69 @@ impl BatchProcessor<'_> {
                 }
             }
         }
+        self.report.next_experiment_batch_size = self.report.effective_batch_size;
 
         let delay_ms = success_delay_ms(
             request_elapsed_ms,
             &self.config.provider_spacing,
             self.report.success_delay_floor_ms,
         );
+        let paced_elapsed_ms = request_elapsed_ms.saturating_add(delay_ms).max(1);
         self.recent_success_batch_elapsed_ms
-            .push_back(request_elapsed_ms.saturating_add(delay_ms));
+            .push_back(paced_elapsed_ms);
         while self.recent_success_batch_elapsed_ms.len() > 12 {
             self.recent_success_batch_elapsed_ms.pop_front();
         }
-        self.report.avg_batch_elapsed_ms = median_nonempty_ms(
-            self.recent_success_batch_elapsed_ms
-                .iter()
-                .copied()
-                .collect(),
-        );
+        self.recent_success_batch_samples
+            .push_back(RecentSuccessBatchSample {
+                elapsed_ms: paced_elapsed_ms,
+                item_count,
+            });
+        while self.recent_success_batch_samples.len() > 12 {
+            self.recent_success_batch_samples.pop_front();
+        }
+        let recent_elapsed_ms = self
+            .recent_success_batch_elapsed_ms
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        self.report.avg_batch_elapsed_ms = median_nonempty_ms(recent_elapsed_ms.clone());
+        self.report.recent_p50_batch_elapsed_ms = percentile_latency_ms(&recent_elapsed_ms, 50);
+        self.report.recent_p95_batch_elapsed_ms = percentile_latency_ms(&recent_elapsed_ms, 95);
+        self.report.best_items_per_minute =
+            best_items_per_minute(&self.recent_success_batch_samples);
         self.report.next_delay_ms = (delay_ms > 0).then_some(delay_ms);
         sleep_success_delay(delay_ms);
+        delay_ms
+    }
+
+    fn record_speed_sample(
+        &mut self,
+        batch: &[BatchJob],
+        request_elapsed_ms: u64,
+        success_delay_ms: u64,
+        status: &str,
+        failure_type: Option<&str>,
+    ) -> Result<()> {
+        self.db
+            .insert_translation_speed_sample(&NewTranslationSpeedSample {
+                provider_run_id: self.provider_run_id,
+                batch_index: usize_to_i64(self.report.processed_batches.saturating_add(1)),
+                lane: batch_lane_key(batch).to_string(),
+                item_count: usize_to_i64(batch.len()),
+                char_count: usize_to_i64(batch_char_count(batch)),
+                estimated_token_count: usize_to_i64(batch_token_estimate(batch)),
+                request_elapsed_ms: u64_to_i64(request_elapsed_ms),
+                success_delay_ms: u64_to_i64(success_delay_ms),
+                total_elapsed_ms: u64_to_i64(request_elapsed_ms.saturating_add(success_delay_ms)),
+                status: status.to_string(),
+                failure_type: failure_type.map(str::to_string),
+                effective_batch_size: usize_to_i64(self.report.effective_batch_size),
+                adaptive_decision_reason: self.report.adaptive_decision_reason.clone(),
+                model: self.provider.model_name().map(str::to_string),
+                prompt_hash: self.config.prompt_hash.clone(),
+            })?;
+        Ok(())
     }
 
     fn record_final_provider_failure(
@@ -1458,6 +1865,7 @@ impl BatchProcessor<'_> {
             "final-failed",
             &format!("{}: {message}", reason.as_key()),
         )?;
+        self.record_speed_sample(batch, 0, 0, "final_failed", Some(reason.as_key()))?;
         self.report.final_failed_items = self.report.failed_source_text_ids.len();
         Ok(())
     }
@@ -1633,6 +2041,28 @@ fn count_batch_source_text_ids(batch: &[BatchJob]) -> usize {
     batch.iter().map(|job| job.source_text_ids.len()).sum()
 }
 
+fn median_i64(values: &[i64]) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+fn percentile_i64(values: &[i64], percentile: u64) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    let percentile = percentile.min(100);
+    let index = (values.len().saturating_sub(1) as u64)
+        .saturating_mul(percentile)
+        .div_ceil(100);
+    values.get(index as usize).copied()
+}
+
 fn success_delay_ms(
     request_elapsed_ms: u64,
     config: &ProviderRequestSpacingConfig,
@@ -1646,6 +2076,26 @@ fn success_delay_ms(
     computed
         .max(floor)
         .min(config.max_success_spacing_ms.max(floor))
+}
+
+fn batch_lane_key(batch: &[BatchJob]) -> &'static str {
+    batch
+        .iter()
+        .map(|job| job.lane)
+        .max()
+        .unwrap_or(BatchLane::PlainBlock)
+        .as_key()
+}
+
+fn batch_char_count(batch: &[BatchJob]) -> usize {
+    batch
+        .iter()
+        .map(|job| job.provider_text.chars().count())
+        .sum()
+}
+
+fn batch_token_estimate(batch: &[BatchJob]) -> usize {
+    batch.iter().map(|job| job.token_estimate).sum()
 }
 
 fn sleep_success_delay(delay_ms: u64) {

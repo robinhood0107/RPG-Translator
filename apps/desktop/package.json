@@ -10,7 +10,7 @@
     "web:build": "tsc -p tsconfig.json --noEmit && vite build",
     "web:preview": "vite preview --host 127.0.0.1",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:build": "tauri build && node scripts/prepare-windows-artifacts.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "preview": "npm run web:preview"

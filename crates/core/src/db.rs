@@ -11,10 +11,10 @@ use crate::{
     BulkReviewApproveReport, DuplicateProjectCleanupReport, Engine, ExportStatusRecord,
     ExportableTranslationRecord, ExtractedOccurrence, GameSnapshotRecord, InstallRecord,
     InstallStatusRecord, NewInstallRecord, NewOccurrence, NewProject, NewProviderRun, NewQaFinding,
-    NewSourceText, NewTranslation, OccurrenceContext, OccurrenceSegment, ProjectRecord,
-    ProviderRunStatusRecord, QaFindingRecord, Result, ReviewCounts, ReviewQueueRow,
+    NewSourceText, NewTranslation, NewTranslationSpeedSample, OccurrenceContext, OccurrenceSegment,
+    ProjectRecord, ProviderRunStatusRecord, QaFindingRecord, Result, ReviewCounts, ReviewQueueRow,
     ReviewUpdateRequest, ScanPersistenceStats, SourceTextRecord, TextCodec,
-    TranslationJobProgressUpdate, TranslationJobSummary, TranslationRecord,
+    TranslationJobProgressUpdate, TranslationJobSummary, TranslationRecord, TranslationSpeedSample,
     WorkbenchDashboardSummary, WorkbenchSettingsRecord, WorkbenchSettingsUpdate,
 };
 
@@ -25,6 +25,12 @@ pub struct TranslationDb {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaMigrationReport {
     pub backup_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpeedMetricSample {
+    item_count: i64,
+    total_elapsed_ms: i64,
 }
 
 impl TranslationDb {
@@ -238,11 +244,14 @@ impl TranslationDb {
                 final_failed_items INTEGER NOT NULL DEFAULT 0,
                 provider_backoff_ms INTEGER,
                 effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                next_experiment_batch_size INTEGER NOT NULL DEFAULT 0,
+                input_token_budget INTEGER NOT NULL DEFAULT 4096,
                 speed_mode TEXT NOT NULL DEFAULT 'steady',
                 success_streak INTEGER NOT NULL DEFAULT 0,
                 success_delay_floor_ms INTEGER NOT NULL DEFAULT 1500,
                 next_delay_ms INTEGER,
                 failure_reason_counts_json TEXT NOT NULL DEFAULT '{}',
+                adaptive_decision_reason TEXT NOT NULL DEFAULT '',
                 legacy_checkpoint_only INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -253,6 +262,26 @@ impl TranslationDb {
                 translation_job_id INTEGER REFERENCES translation_jobs(id) ON DELETE CASCADE,
                 event_type TEXT NOT NULL,
                 payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS translation_speed_samples (
+                id INTEGER PRIMARY KEY,
+                provider_run_id INTEGER NOT NULL REFERENCES provider_runs(id) ON DELETE CASCADE,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                lane TEXT NOT NULL DEFAULT 'unknown',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                estimated_token_count INTEGER NOT NULL DEFAULT 0,
+                request_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                success_delay_ms INTEGER NOT NULL DEFAULT 0,
+                total_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'success',
+                failure_type TEXT,
+                effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                adaptive_decision_reason TEXT NOT NULL DEFAULT '',
+                model TEXT,
+                prompt_hash TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -276,6 +305,7 @@ impl TranslationDb {
         self.ensure_qa_findings_columns()?;
         self.normalize_legacy_qa_findings()?;
         self.ensure_translation_jobs_columns()?;
+        self.ensure_translation_speed_samples_table()?;
         self.ensure_review_drafts_table()?;
         self.ensure_required_indexes()?;
         self.cleanup_duplicate_projects()?;
@@ -297,16 +327,28 @@ impl TranslationDb {
                 "recoverable_provider_failures",
                 "final_failed_items",
                 "effective_batch_size",
+                "next_experiment_batch_size",
+                "input_token_budget",
                 "speed_mode",
                 "success_streak",
                 "success_delay_floor_ms",
                 "next_delay_ms",
                 "failure_reason_counts_json",
+                "adaptive_decision_reason",
                 "legacy_checkpoint_only",
             ] {
                 if !columns.contains(column) {
                     return Ok(true);
                 }
+            }
+        }
+        if !tables.is_empty() && !tables.contains("translation_speed_samples") {
+            return Ok(true);
+        }
+        if tables.contains("translation_speed_samples") {
+            let columns = self.table_columns("translation_speed_samples")?;
+            if !columns.contains("adaptive_decision_reason") {
+                return Ok(true);
             }
         }
         if tables.contains("qa_findings") {
@@ -545,11 +587,14 @@ impl TranslationDb {
             ("final_failed_items", "INTEGER NOT NULL DEFAULT 0"),
             ("provider_backoff_ms", "INTEGER"),
             ("effective_batch_size", "INTEGER NOT NULL DEFAULT 0"),
+            ("next_experiment_batch_size", "INTEGER NOT NULL DEFAULT 0"),
+            ("input_token_budget", "INTEGER NOT NULL DEFAULT 4096"),
             ("speed_mode", "TEXT NOT NULL DEFAULT 'steady'"),
             ("success_streak", "INTEGER NOT NULL DEFAULT 0"),
             ("success_delay_floor_ms", "INTEGER NOT NULL DEFAULT 1500"),
             ("next_delay_ms", "INTEGER"),
             ("failure_reason_counts_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("adaptive_decision_reason", "TEXT NOT NULL DEFAULT ''"),
             ("legacy_checkpoint_only", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !columns.contains(column) {
@@ -589,11 +634,59 @@ impl TranslationDb {
                         END
                     ELSE effective_batch_size
                 END,
+                next_experiment_batch_size = CASE
+                    WHEN next_experiment_batch_size IS NULL OR next_experiment_batch_size <= 0 THEN
+                        CASE
+                            WHEN effective_batch_size > 0 THEN effective_batch_size
+                            WHEN current_batch_items > 0 THEN current_batch_items
+                            ELSE 16
+                        END
+                    ELSE next_experiment_batch_size
+                END,
+                input_token_budget = CASE
+                    WHEN input_token_budget IS NULL OR input_token_budget <= 0 THEN 4096
+                    ELSE input_token_budget
+                END,
                 failure_reason_counts_json = COALESCE(NULLIF(failure_reason_counts_json, ''), '{}'),
+                adaptive_decision_reason = COALESCE(adaptive_decision_reason, ''),
                 legacy_checkpoint_only = COALESCE(legacy_checkpoint_only, 0)
             ",
             [],
         )?;
+        Ok(())
+    }
+
+    fn ensure_translation_speed_samples_table(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS translation_speed_samples (
+                id INTEGER PRIMARY KEY,
+                provider_run_id INTEGER NOT NULL REFERENCES provider_runs(id) ON DELETE CASCADE,
+                batch_index INTEGER NOT NULL DEFAULT 0,
+                lane TEXT NOT NULL DEFAULT 'unknown',
+                item_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                estimated_token_count INTEGER NOT NULL DEFAULT 0,
+                request_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                success_delay_ms INTEGER NOT NULL DEFAULT 0,
+                total_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'success',
+                failure_type TEXT,
+                effective_batch_size INTEGER NOT NULL DEFAULT 0,
+                adaptive_decision_reason TEXT NOT NULL DEFAULT '',
+                model TEXT,
+                prompt_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+        let columns = self.table_columns("translation_speed_samples")?;
+        if !columns.contains("adaptive_decision_reason") {
+            self.conn.execute(
+                "ALTER TABLE translation_speed_samples ADD COLUMN adaptive_decision_reason TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -744,6 +837,10 @@ impl TranslationDb {
                 ON installs(project_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_translation_jobs_target_latest
                 ON translation_jobs(target_language, updated_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_translation_speed_samples_run_batch
+                ON translation_speed_samples(provider_run_id, batch_index);
+            CREATE INDEX IF NOT EXISTS idx_translation_speed_samples_model_prompt_latest
+                ON translation_speed_samples(model, prompt_hash, lane, status, created_at DESC);
             ",
         )?;
         Ok(())
@@ -2437,12 +2534,15 @@ impl TranslationDb {
                     final_failed_items = ?25,
                     provider_backoff_ms = ?26,
                     effective_batch_size = ?27,
-                    speed_mode = ?28,
-                    success_streak = ?29,
-                    success_delay_floor_ms = ?30,
-                    next_delay_ms = ?31,
-                    failure_reason_counts_json = ?32,
-                    legacy_checkpoint_only = ?33,
+                    next_experiment_batch_size = ?28,
+                    input_token_budget = ?29,
+                    speed_mode = ?30,
+                    success_streak = ?31,
+                    success_delay_floor_ms = ?32,
+                    next_delay_ms = ?33,
+                    failure_reason_counts_json = ?34,
+                    adaptive_decision_reason = ?35,
+                    legacy_checkpoint_only = ?36,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?1
                 ",
@@ -2474,11 +2574,14 @@ impl TranslationDb {
                     input.final_failed_items,
                     input.provider_backoff_ms,
                     input.effective_batch_size,
+                    input.next_experiment_batch_size,
+                    input.input_token_budget,
                     input.speed_mode,
                     input.success_streak,
                     input.success_delay_floor_ms,
                     input.next_delay_ms,
                     input.failure_reason_counts_json,
+                    input.adaptive_decision_reason,
                     input.legacy_checkpoint_only
                 ],
             )?;
@@ -2514,14 +2617,17 @@ impl TranslationDb {
                     final_failed_items,
                     provider_backoff_ms,
                     effective_batch_size,
+                    next_experiment_batch_size,
+                    input_token_budget,
                     speed_mode,
                     success_streak,
                     success_delay_floor_ms,
                     next_delay_ms,
                     failure_reason_counts_json,
+                    adaptive_decision_reason,
                     legacy_checkpoint_only
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)
                 ",
                 params![
                     input.provider_run_id,
@@ -2551,11 +2657,14 @@ impl TranslationDb {
                     input.final_failed_items,
                     input.provider_backoff_ms,
                     input.effective_batch_size,
+                    input.next_experiment_batch_size,
+                    input.input_token_budget,
                     input.speed_mode,
                     input.success_streak,
                     input.success_delay_floor_ms,
                     input.next_delay_ms,
                     input.failure_reason_counts_json,
+                    input.adaptive_decision_reason,
                     input.legacy_checkpoint_only
                 ],
             )?;
@@ -2570,6 +2679,111 @@ impl TranslationDb {
         )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn insert_translation_speed_sample(
+        &mut self,
+        input: &NewTranslationSpeedSample,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "
+            INSERT INTO translation_speed_samples (
+                provider_run_id,
+                batch_index,
+                lane,
+                item_count,
+                char_count,
+                estimated_token_count,
+                request_elapsed_ms,
+                success_delay_ms,
+                total_elapsed_ms,
+                status,
+                failure_type,
+                effective_batch_size,
+                adaptive_decision_reason,
+                model,
+                prompt_hash
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ",
+            params![
+                input.provider_run_id,
+                input.batch_index,
+                input.lane,
+                input.item_count,
+                input.char_count,
+                input.estimated_token_count,
+                input.request_elapsed_ms,
+                input.success_delay_ms,
+                input.total_elapsed_ms,
+                input.status,
+                input.failure_type,
+                input.effective_batch_size,
+                input.adaptive_decision_reason,
+                input.model,
+                input.prompt_hash
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn recent_translation_speed_samples(
+        &self,
+        model: Option<&str>,
+        prompt_hash: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TranslationSpeedSample>> {
+        let limit = limit.clamp(1, 500);
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                id,
+                provider_run_id,
+                batch_index,
+                lane,
+                item_count,
+                char_count,
+                estimated_token_count,
+                request_elapsed_ms,
+                success_delay_ms,
+                total_elapsed_ms,
+                status,
+                failure_type,
+                effective_batch_size,
+                adaptive_decision_reason,
+                model,
+                prompt_hash,
+                created_at
+            FROM translation_speed_samples
+            WHERE (?1 IS NULL OR model = ?1)
+              AND (?2 IS NULL OR prompt_hash = ?2)
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?3
+            ",
+        )?;
+        let rows = statement.query_map(params![model, prompt_hash, limit], |row| {
+            Ok(TranslationSpeedSample {
+                id: row.get(0)?,
+                provider_run_id: row.get(1)?,
+                batch_index: row.get(2)?,
+                lane: row.get(3)?,
+                item_count: row.get(4)?,
+                char_count: row.get(5)?,
+                estimated_token_count: row.get(6)?,
+                request_elapsed_ms: row.get(7)?,
+                success_delay_ms: row.get(8)?,
+                total_elapsed_ms: row.get(9)?,
+                status: row.get(10)?,
+                failure_type: row.get(11)?,
+                effective_batch_size: row.get(12)?,
+                adaptive_decision_reason: row.get(13)?,
+                model: row.get(14)?,
+                prompt_hash: row.get(15)?,
+                created_at: row.get(16)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn latest_translation_job_summary(
@@ -2607,11 +2821,14 @@ impl TranslationDb {
                 translation_jobs.final_failed_items,
                 translation_jobs.provider_backoff_ms,
                 translation_jobs.effective_batch_size,
+                translation_jobs.next_experiment_batch_size,
+                translation_jobs.input_token_budget,
                 translation_jobs.speed_mode,
                 translation_jobs.success_streak,
                 translation_jobs.success_delay_floor_ms,
                 translation_jobs.next_delay_ms,
                 translation_jobs.failure_reason_counts_json,
+                translation_jobs.adaptive_decision_reason,
                 translation_jobs.legacy_checkpoint_only,
                 provider_runs.model
             FROM translation_jobs
@@ -2651,11 +2868,14 @@ impl TranslationDb {
                 translation_jobs.final_failed_items,
                 translation_jobs.provider_backoff_ms,
                 translation_jobs.effective_batch_size,
+                translation_jobs.next_experiment_batch_size,
+                translation_jobs.input_token_budget,
                 translation_jobs.speed_mode,
                 translation_jobs.success_streak,
                 translation_jobs.success_delay_floor_ms,
                 translation_jobs.next_delay_ms,
                 translation_jobs.failure_reason_counts_json,
+                translation_jobs.adaptive_decision_reason,
                 translation_jobs.legacy_checkpoint_only,
                 provider_runs.model
             FROM translation_jobs
@@ -2688,6 +2908,9 @@ impl TranslationDb {
                 batch_eta_ms: row.get(18)?,
                 last_batch_elapsed_ms: row.get(19)?,
                 avg_batch_elapsed_ms: row.get(20)?,
+                recent_p50_batch_elapsed_ms: None,
+                recent_p95_batch_elapsed_ms: None,
+                best_items_per_minute: None,
                 current_batch_items: row.get(21)?,
                 elapsed_ms: row.get(22)?,
                 retry_pending_items: row.get(23)?,
@@ -2695,22 +2918,84 @@ impl TranslationDb {
                 final_failed_items: row.get(25)?,
                 provider_backoff_ms: row.get(26)?,
                 effective_batch_size: row.get(27)?,
-                speed_mode: row.get(28)?,
-                success_streak: row.get(29)?,
-                success_delay_floor_ms: row.get(30)?,
-                next_delay_ms: row.get(31)?,
-                failure_reason_counts_json: row.get(32)?,
-                legacy_checkpoint_only: row.get(33)?,
-                model: row.get(34)?,
+                next_experiment_batch_size: row.get(28)?,
+                input_token_budget: row.get(29)?,
+                speed_mode: row.get(30)?,
+                success_streak: row.get(31)?,
+                success_delay_floor_ms: row.get(32)?,
+                next_delay_ms: row.get(33)?,
+                failure_reason_counts_json: row.get(34)?,
+                adaptive_decision_reason: row.get(35)?,
+                legacy_checkpoint_only: row.get(36)?,
+                model: row.get(37)?,
             })
         };
-        if let Some(target_language) = target_language {
-            Ok(statement
+        let latest = if let Some(target_language) = target_language {
+            statement
                 .query_row(params![target_language], map_row)
-                .optional()?)
+                .optional()?
         } else {
-            Ok(statement.query_row([], map_row).optional()?)
-        }
+            statement.query_row([], map_row).optional()?
+        };
+        drop(statement);
+        latest
+            .map(|summary| self.hydrate_translation_job_speed_metrics(summary))
+            .transpose()
+    }
+
+    fn hydrate_translation_job_speed_metrics(
+        &self,
+        mut summary: TranslationJobSummary,
+    ) -> Result<TranslationJobSummary> {
+        let Some(provider_run_id) = summary.provider_run_id else {
+            return Ok(summary);
+        };
+        let samples = self.recent_success_speed_metric_samples(provider_run_id, 12)?;
+        let elapsed_ms = samples
+            .iter()
+            .map(|sample| sample.total_elapsed_ms)
+            .collect::<Vec<_>>();
+        summary.recent_p50_batch_elapsed_ms = percentile_latency_i64(&elapsed_ms, 50);
+        summary.recent_p95_batch_elapsed_ms = percentile_latency_i64(&elapsed_ms, 95);
+        summary.best_items_per_minute = samples
+            .iter()
+            .filter_map(|sample| {
+                if sample.total_elapsed_ms <= 0 || sample.item_count <= 0 {
+                    return None;
+                }
+                Some(
+                    (sample.item_count as f64 * 60_000.0 / sample.total_elapsed_ms as f64).round()
+                        as i64,
+                )
+            })
+            .max();
+        Ok(summary)
+    }
+
+    fn recent_success_speed_metric_samples(
+        &self,
+        provider_run_id: i64,
+        limit: usize,
+    ) -> Result<Vec<SpeedMetricSample>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT item_count, total_elapsed_ms
+            FROM translation_speed_samples
+            WHERE provider_run_id = ?1
+              AND status = 'success'
+              AND total_elapsed_ms > 0
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?2
+            ",
+        )?;
+        let rows = statement.query_map(params![provider_run_id, limit as i64], |row| {
+            Ok(SpeedMetricSample {
+                item_count: row.get(0)?,
+                total_elapsed_ms: row.get(1)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn count_running_provider_runs(&self) -> Result<i64> {
@@ -3547,14 +3832,14 @@ fn review_translation_validation_messages_tx(
     if translated_text.trim().is_empty() {
         return Ok(vec!["번역문이 비어 있습니다.".to_string()]);
     }
-    let (source_normalized, source_signature): (String, String) = tx.query_row(
+    let (source_normalized, source_signature, unit_kind): (String, String, String) = tx.query_row(
         "
-        SELECT normalized_text, control_code_signature
+        SELECT normalized_text, control_code_signature, unit_kind
         FROM source_texts
         WHERE id = ?1
         ",
         params![source_text_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let translated = TextCodec::analyze(translated_text);
     let mut messages = Vec::new();
@@ -3567,12 +3852,33 @@ fn review_translation_validation_messages_tx(
     }
     let source_line_breaks = source_normalized.matches('\n').count();
     let translated_line_breaks = translated.normalized_text.matches('\n').count();
-    if source_line_breaks != translated_line_breaks {
+    if source_line_breaks != translated_line_breaks && !is_wrapped_runtime_unit(&unit_kind) {
         messages.push(format!(
             "줄바꿈 수가 원문과 다릅니다. 원문 {source_line_breaks}개, 번역 {translated_line_breaks}개"
         ));
     }
+    if source_line_breaks == translated_line_breaks {
+        let source_line_placeholders = TextCodec::control_code_counts_by_line(&source_normalized);
+        let translated_line_placeholders =
+            TextCodec::control_code_counts_by_line(&translated.normalized_text);
+        for (index, (source_count, translated_count)) in source_line_placeholders
+            .iter()
+            .zip(translated_line_placeholders.iter())
+            .enumerate()
+        {
+            if source_count != translated_count {
+                messages.push(format!(
+                    "줄별 제어코드 수가 원문과 다릅니다. {}번째 줄 원문 {source_count}개, 번역 {translated_count}개",
+                    index + 1
+                ));
+            }
+        }
+    }
     Ok(messages)
+}
+
+fn is_wrapped_runtime_unit(unit_kind: &str) -> bool {
+    matches!(unit_kind, "message_block" | "scroll_block")
 }
 
 fn insert_qa_finding_tx(tx: &Transaction<'_>, input: &NewQaFinding) -> Result<i64> {
@@ -4020,6 +4326,19 @@ fn verify_database_file(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn percentile_latency_i64(latencies: &[i64], percentile: u64) -> Option<i64> {
+    if latencies.is_empty() {
+        return None;
+    }
+    let mut values = latencies.to_vec();
+    values.sort_unstable();
+    let percentile = percentile.min(100);
+    let index = (values.len().saturating_sub(1) as u64)
+        .saturating_mul(percentile)
+        .div_ceil(100);
+    values.get(index as usize).copied()
 }
 
 fn configure_connection(conn: &Connection, file_db: bool) -> Result<()> {

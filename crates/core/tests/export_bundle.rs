@@ -122,10 +122,9 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
         &fs::read_to_string(temp.path().join("manifest.json")).expect("read manifest"),
     )
     .expect("parse manifest");
-    let config: OverlayConfig = serde_json::from_str(
-        &fs::read_to_string(temp.path().join("overlay-config.json")).expect("read config"),
-    )
-    .expect("parse config");
+    let config_text =
+        fs::read_to_string(temp.path().join("overlay-config.json")).expect("read config");
+    let config: OverlayConfig = serde_json::from_str(&config_text).expect("parse config");
 
     assert_eq!(manifest.schema_version, 1);
     assert_eq!(manifest.project_id, project_id);
@@ -138,6 +137,75 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
     assert!(!config.diagnostics_enabled);
     assert!(config.startup_toast_enabled);
     assert_eq!(config.startup_toast_text, "RPG-Translator 작동중");
+    assert_eq!(config.runtime_load_contract.schema_version, 1);
+    assert_eq!(
+        config.runtime_load_contract.support_directory,
+        "rpg-translator"
+    );
+    assert_eq!(
+        config.runtime_load_contract.plugin_entry_file,
+        "RPGTranslator.js"
+    );
+    assert_eq!(
+        config.runtime_load_contract.script_load_order.last(),
+        Some(&"boot.js".to_string())
+    );
+    assert_eq!(
+        config.runtime_load_contract.script_load_order,
+        vec![
+            "text-codec.js".to_string(),
+            "runtime-miss-logger.js".to_string(),
+            "lookup-index.js".to_string(),
+            "render-guard.js".to_string(),
+            "wrapping.js".to_string(),
+            "runtime-diagnostics.js".to_string(),
+            "orchestrator.js".to_string(),
+            "adapter-contract.js".to_string(),
+            "foresight-scanner.js".to_string(),
+            "cache-loader.js".to_string(),
+            "message-adapter.js".to_string(),
+            "window-text-adapter.js".to_string(),
+            "bitmap-text-adapter.js".to_string(),
+            "sprite-text-adapter.js".to_string(),
+            "pixi-text-adapter.js".to_string(),
+            "startup-toast.js".to_string(),
+            "boot.js".to_string(),
+        ]
+    );
+    assert!(
+        config
+            .runtime_load_contract
+            .required_runtime_files
+            .contains(&"RPGTranslator.js".to_string())
+    );
+    assert!(
+        config
+            .runtime_load_contract
+            .required_runtime_files
+            .contains(&"adapter-contract.js".to_string())
+    );
+    assert!(config_text.contains("\"foresight_command_catalog\""));
+    assert!(config_text.contains("\"runtime_load_contract\""));
+    assert!(config_text.contains("\"schemaVersion\""));
+    assert!(config_text.contains("\"eventCommands\""));
+    assert!(config_text.contains("\"movementRouteCommands\""));
+    assert_eq!(config.foresight_command_catalog.schema_version, 4);
+    assert_eq!(
+        config
+            .foresight_command_catalog
+            .event_commands
+            .get("205")
+            .map(|command| command.scan_behavior.as_str()),
+        Some("movement-route")
+    );
+    assert_eq!(
+        config
+            .foresight_command_catalog
+            .movement_route_commands
+            .get("1")
+            .map(|command| command.scan_behavior.as_str()),
+        Some("advance")
+    );
 
     Ok(())
 }
@@ -212,7 +280,7 @@ fn export_verification_rejects_malformed_runtime_bundle() -> Result<()> {
     .expect("write manifest");
     fs::write(
         temp.path().join("overlay-config.json"),
-        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중"}"#,
+        serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
     )
     .expect("write config");
     fs::write(
@@ -223,6 +291,118 @@ fn export_verification_rejects_malformed_runtime_bundle() -> Result<()> {
 
     let error = ExportBuilder::verify_bundle(temp.path()).expect_err("malformed bundle fails");
     assert!(error.to_string().contains("cache_key"));
+
+    Ok(())
+}
+
+#[test]
+fn export_verification_rejects_cache_files_outside_bundle_before_reading() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let export_dir = temp.path().join("export");
+    fs::create_dir_all(&export_dir).expect("create export dir");
+    fs::write(
+        export_dir.join("manifest.json"),
+        r#"{"schema_version":1,"project_id":1,"source_language":"ja","target_language":"ko","created_timestamp":"1","key_schema_version":"v1","cache_files":["../outside.jsonl"],"record_count":1}"#,
+    )
+    .expect("write manifest");
+    fs::write(
+        export_dir.join("overlay-config.json"),
+        serde_json::to_string(&OverlayConfig::runtime_default()).expect("encode config"),
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join("outside.jsonl"),
+        r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","cache_aliases":["ck:v1:0000000000000000000000000000000000000000000000000000000000000000"],"source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
+    )
+    .expect("write outside cache");
+
+    let error = ExportBuilder::verify_bundle(&export_dir).expect_err("outside cache file fails");
+
+    assert!(error.to_string().contains("unsupported export cache file"));
+
+    Ok(())
+}
+
+#[test]
+fn export_verification_rejects_wrong_foresight_catalog_schema() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"schema_version":1,"project_id":1,"source_language":"ja","target_language":"ko","created_timestamp":"1","key_schema_version":"v1","cache_files":["cache.jsonl"],"record_count":1}"#,
+    )
+    .expect("write manifest");
+    let mut config = OverlayConfig::runtime_default();
+    config.foresight_command_catalog.schema_version = 3;
+    fs::write(
+        temp.path().join("overlay-config.json"),
+        serde_json::to_string(&config).expect("encode wrong catalog config"),
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join("cache.jsonl"),
+        "{\"cache_key\":\"ck:v1:fixture\",\"cache_aliases\":[\"ck:v1:fixture\"],\"source_text_id\":1,\"source_hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"source_language\":\"ja\",\"target_language\":\"ko\",\"normalized_text\":\"a\",\"visible_text\":\"a\",\"translation\":\"b\",\"control_code_signature\":\"\",\"context_hash\":null}\n",
+    )
+    .expect("write cache");
+
+    let error = ExportBuilder::verify_bundle(temp.path()).expect_err("wrong catalog schema fails");
+    assert!(
+        error
+            .to_string()
+            .contains("foresight command catalog schema")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn export_verification_rejects_missing_runtime_load_contract() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"schema_version":1,"project_id":1,"source_language":"ja","target_language":"ko","created_timestamp":"1","key_schema_version":"v1","cache_files":["cache.jsonl"],"record_count":1}"#,
+    )
+    .expect("write manifest");
+    fs::write(
+        temp.path().join("overlay-config.json"),
+        r#"{"schema_version":1,"diagnostics_enabled":false,"startup_toast_enabled":true,"startup_toast_text":"RPG-Translator 작동중","foresight_command_catalog":{"schemaVersion":4,"eventCommands":{},"movementRouteCommands":{}}}"#,
+    )
+    .expect("write config without runtime contract");
+    fs::write(
+        temp.path().join("cache.jsonl"),
+        r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","cache_aliases":["ck:v1:0000000000000000000000000000000000000000000000000000000000000000"],"source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
+    )
+    .expect("write cache");
+
+    let error =
+        ExportBuilder::verify_bundle(temp.path()).expect_err("missing runtime load contract fails");
+    assert!(error.to_string().contains("runtime load contract"));
+
+    Ok(())
+}
+
+#[test]
+fn export_verification_rejects_runtime_load_order_mismatch() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    fs::write(
+        temp.path().join("manifest.json"),
+        r#"{"schema_version":1,"project_id":1,"source_language":"ja","target_language":"ko","created_timestamp":"1","key_schema_version":"v1","cache_files":["cache.jsonl"],"record_count":1}"#,
+    )
+    .expect("write manifest");
+    let mut config = OverlayConfig::runtime_default();
+    config.runtime_load_contract.script_load_order.swap(0, 1);
+    fs::write(
+        temp.path().join("overlay-config.json"),
+        serde_json::to_string(&config).expect("encode config"),
+    )
+    .expect("write config with wrong order");
+    fs::write(
+        temp.path().join("cache.jsonl"),
+        r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","cache_aliases":["ck:v1:0000000000000000000000000000000000000000000000000000000000000000"],"source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
+    )
+    .expect("write cache");
+
+    let error = ExportBuilder::verify_bundle(temp.path()).expect_err("wrong load order fails");
+    assert!(error.to_string().contains("script_load_order"));
 
     Ok(())
 }

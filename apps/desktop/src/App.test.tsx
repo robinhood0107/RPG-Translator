@@ -842,6 +842,9 @@ test("real prompt speed benchmark is disabled while translation is running", asy
           batch_eta_ms: 9000,
           last_batch_elapsed_ms: 1000,
           avg_batch_elapsed_ms: 1000,
+          recent_p50_batch_elapsed_ms: 900,
+          recent_p95_batch_elapsed_ms: 1300,
+          best_items_per_minute: 1200,
           current_batch_items: 16,
           started_completed_items: 0,
           parse_failed_items: 0,
@@ -853,11 +856,14 @@ test("real prompt speed benchmark is disabled while translation is running", asy
           final_failed_items: 0,
           provider_backoff_ms: null,
           effective_batch_size: 16,
+          next_experiment_batch_size: 24,
+          input_token_budget: 4096,
           speed_mode: "accelerating",
           success_streak: 4,
           success_delay_floor_ms: 1250,
           next_delay_ms: 1250,
           failure_reason_counts: {},
+          adaptive_decision_reason: "adaptive: steady from test",
           legacy_checkpoint_only: false,
         },
       },
@@ -867,6 +873,15 @@ test("real prompt speed benchmark is disabled while translation is running", asy
   expect(screen.getByRole("button", { name: "Real prompt speed test" })).toBeDisabled();
   expect(screen.getByText("Speed mode: Reducing wait")).toBeInTheDocument();
   expect(screen.getByText("Success streak: 4")).toBeInTheDocument();
+  expect(screen.getByText("Text ETA 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("Batch ETA 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("Recent p50 batch 00:00:00")).toBeInTheDocument();
+  expect(screen.getByText("Recent p95 batch 00:00:01")).toBeInTheDocument();
+  expect(screen.getByText("Best speed: 1,200 Items/min")).toBeInTheDocument();
+  expect(screen.getByText("Effective batch: 16")).toBeInTheDocument();
+  expect(screen.getByText("Next experiment batch: 24")).toBeInTheDocument();
+  expect(screen.getByText("Input token budget: 4,096")).toBeInTheDocument();
+  expect(screen.getByText("Speed tuning reason: adaptive: steady from test")).toBeInTheDocument();
 });
 
 test("review queue paginates rows and appends the next page", async () => {
@@ -1425,16 +1440,22 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
 	          final_failed_items: 16,
 	          provider_backoff_ms: null,
 	          effective_batch_size: 8,
+          next_experiment_batch_size: 12,
+          input_token_budget: 6144,
 	          speed_mode: "steady",
 	          success_streak: 4,
 	          success_delay_floor_ms: 1250,
 	          next_delay_ms: 1250,
 	          failure_reason_counts_json: "{\"provider-503\":6351,\"provider-connection\":5462}",
+          adaptive_decision_reason: "adaptive: backoff from test",
           legacy_checkpoint_only: false,
           item_eta_ms: 26_880_000,
           batch_eta_ms: 1_880_000,
           last_batch_elapsed_ms: 17_000,
           avg_batch_elapsed_ms: 11_000,
+          recent_p50_batch_elapsed_ms: 9_000,
+          recent_p95_batch_elapsed_ms: 15_000,
+          best_items_per_minute: 320,
           current_batch_items: 16,
           elapsed_ms: 5_298_000,
           model: "gemma-4-26B-IQ4_NL.gguf",
@@ -1459,6 +1480,14 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
   expect(screen.getByText("번역 검증 오류: 6")).toBeInTheDocument();
   expect(screen.getByText("건너뜀: 2")).toBeInTheDocument();
   expect(screen.getByText("별표 재시도: 1")).toBeInTheDocument();
+  expect(screen.getByText("다음 실험 배치: 12")).toBeInTheDocument();
+  expect(screen.getByText("입력 토큰 예산: 6,144")).toBeInTheDocument();
+  expect(screen.getByText("최근 p50 배치 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("최근 p95 배치 00:00:15")).toBeInTheDocument();
+  const restoredBestSpeedRow = screen.getByText(/최고 속도:/).closest("span");
+  expect(restoredBestSpeedRow).not.toBeNull();
+  expect(restoredBestSpeedRow).toHaveTextContent("320");
+  expect(restoredBestSpeedRow).toHaveTextContent("분당 항목 수");
   expect(screen.getByText("DB 저장 완료")).toBeInTheDocument();
   expect(screen.getByText("번역 DB에 저장된 행 수입니다. 검토 승인 수가 아닙니다.")).toBeInTheDocument();
   expect(screen.getByText("이어하기 때 재시도")).toBeInTheDocument();
@@ -2162,6 +2191,27 @@ test("scan completion releases the UI even when post-scan hydration is still pen
   await waitFor(() => expect(screen.getByRole("tab", { name: "Review" })).toHaveAttribute("aria-selected", "true"));
 });
 
+test("hydrate reports stale translation recovery in desktop status", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({
+        active_tab: "translate",
+        stale_runs_interrupted: 3,
+      }));
+    }
+    if (name === "review_queue") {
+      return Promise.resolve({ rows: [], total_count: 0, next_offset: null });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  expect(await screen.findByText("Recovered interrupted translation jobs: 3")).toBeInTheDocument();
+});
+
 test("desktop translate progress events update progress and pause resumes later", async () => {
   (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
   localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
@@ -2223,6 +2273,9 @@ test("desktop translate progress events update progress and pause resumes later"
           split_batches: 0,
           elapsed_ms: 64_000,
           eta_ms: 3_136_000,
+          recent_p50_batch_elapsed_ms: 9_000,
+          recent_p95_batch_elapsed_ms: 12_000,
+          best_items_per_minute: 240,
         },
       },
     });
@@ -2231,6 +2284,12 @@ test("desktop translate progress events update progress and pause resumes later"
   expect(await screen.findByText("32 / 1,600")).toBeInTheDocument();
   expect(screen.getByText("Batch 2 / 100")).toBeInTheDocument();
   expect(screen.getByText("Text ETA 00:52:16")).toBeInTheDocument();
+  expect(screen.getByText("Recent p50 batch 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("Recent p95 batch 00:00:12")).toBeInTheDocument();
+  const bestSpeedRow = screen.getByText(/Best speed:/).closest("span");
+  expect(bestSpeedRow).not.toBeNull();
+  expect(bestSpeedRow).toHaveTextContent("240");
+  expect(bestSpeedRow).toHaveTextContent("Items/min");
 
   fireEvent.click(screen.getByRole("button", { name: "Pause" }));
   await waitFor(() =>
@@ -2369,8 +2428,254 @@ test("desktop window close destroys the window after bounded safe shutdown attem
   expect(invokeMock).toHaveBeenCalledWith("prepare_safe_shutdown", {
     request: { db_path: testDbPath },
   });
-  expect(appWindowCloseMock).not.toHaveBeenCalled();
   expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+  expect(appWindowCloseMock).toHaveBeenCalledOnce();
+});
+
+test("desktop window close still fires native close fallback after destroy resolves", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return Promise.resolve({ settings: hydratedWorkbench({ active_tab: "scan" }).settings, saved_drafts: 0, saved_at: "1" });
+    }
+    if (name === "prepare_safe_shutdown") {
+      return Promise.resolve({ pause_requested: false, provider_run_id: null, mode: "no-active-run", stale_runs_interrupted: 0 });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  const event = { preventDefault: vi.fn() };
+  await act(async () => {
+    await appWindowHandlers.closeRequested?.(event);
+  });
+
+  expect(event.preventDefault).toHaveBeenCalledOnce();
+  expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+  expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  expect(appWindowDestroyMock.mock.invocationCallOrder[0]).toBeLessThan(appWindowCloseMock.mock.invocationCallOrder[0]);
+});
+
+test("desktop repeated window close allows native close without restarting safe shutdown", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const firstEvent = { preventDefault: vi.fn() };
+    const firstClose = appWindowHandlers.closeRequested?.(firstEvent);
+    const secondEvent = { preventDefault: vi.fn() };
+    await act(async () => {
+      await appWindowHandlers.closeRequested?.(secondEvent);
+    });
+
+    expect(firstEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(secondEvent.preventDefault).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.filter(([name]) => name === "save_workbench_state")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([name]) => name === "prepare_safe_shutdown")).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await firstClose;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("desktop window close does not wait beyond the total safe close budget", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledWith("save_workbench_state", expect.any(Object));
+    expect(invokeMock).toHaveBeenCalledWith("prepare_safe_shutdown", {
+      request: { db_path: testDbPath },
+    });
+    expect(appWindowDestroyMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await closePromise;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("desktop window close does not spend fallback time after the safe close budget is exhausted", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  appWindowDestroyMock.mockReturnValue(never);
+  appWindowCloseMock.mockReturnValue(never);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    let settled = false;
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+    void closePromise?.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(settled).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("desktop window close fires close fallback even when shutdown work exhausts the safe close budget", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  appWindowDestroyMock.mockReturnValue(never);
+  appWindowCloseMock.mockReturnValue(never);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return never;
+    }
+    if (name === "prepare_safe_shutdown") {
+      return never;
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    let settled = false;
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+    void closePromise?.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+    expect(settled).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("desktop window close falls back when destroy does not settle", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  appWindowDestroyMock.mockReturnValue(new Promise<never>(() => {}));
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return Promise.resolve({ settings: hydratedWorkbench({ active_tab: "scan" }).settings, saved_drafts: 0, saved_at: "1" });
+    }
+    if (name === "prepare_safe_shutdown") {
+      return Promise.resolve({ pause_requested: false, provider_run_id: null, mode: "no-active-run", stale_runs_interrupted: 0 });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await closePromise;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("web command API rejects desktop commands instead of returning mock data", async () => {
@@ -2401,6 +2706,7 @@ function hydratedWorkbench(overrides: {
   review_counts?: ReviewCounts | null;
   latest_job?: TranslationJobSummary | null;
   checkpoint?: CheckpointSummary | null;
+  stale_runs_interrupted?: number;
 } = {}) {
   const project = overrides.project ?? testProject();
   const workspace = overrides.workspace ?? testWorkspace({
@@ -2427,7 +2733,7 @@ function hydratedWorkbench(overrides: {
     review_counts: overrides.review_counts ?? testReviewCounts(),
     checkpoint: overrides.checkpoint ?? null,
     latest_job: overrides.latest_job ?? null,
-    stale_runs_interrupted: 0,
+    stale_runs_interrupted: overrides.stale_runs_interrupted ?? 0,
   };
 }
 
@@ -2524,6 +2830,7 @@ function testJob(overrides: Partial<TranslationJobSummary> = {}): TranslationJob
 	    success_delay_floor_ms: 1500,
 	    next_delay_ms: null,
 	    failure_reason_counts_json: "{}",
+    adaptive_decision_reason: "adaptive: test",
     legacy_checkpoint_only: false,
     item_eta_ms: null,
     batch_eta_ms: null,
