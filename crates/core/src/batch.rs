@@ -266,6 +266,11 @@ impl BatchValidator {
                     "provider returned empty translation for id {id}"
                 )));
             }
+            if is_unchanged_provider_output(&job.provider_text, translation) {
+                return Err(Error::invalid_input(format!(
+                    "provider returned unchanged provider output for id {id}"
+                )));
+            }
             validate_line_local_placeholders(id, &job.provider_text, translation)?;
             let restored =
                 TextCodec::restore_provider_translation(translation, &job.provider_state)?;
@@ -307,6 +312,12 @@ fn validate_line_local_placeholders(id: i64, source: &str, translation: &str) ->
         }
     }
     Ok(())
+}
+
+fn is_unchanged_provider_output(source: &str, translation: &str) -> bool {
+    let source = source.trim();
+    let translation = translation.trim();
+    !source.is_empty() && !translation.is_empty() && source == translation
 }
 
 fn placeholder_count(input: &str) -> usize {

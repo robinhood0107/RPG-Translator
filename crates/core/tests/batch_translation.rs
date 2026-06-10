@@ -2,11 +2,12 @@ use std::{collections::VecDeque, fs, thread, time::Duration};
 
 use rpg_translator_core::{
     BatchPlanner, BatchPlannerConfig, BatchRunStatus, BatchTranslator, BatchTranslatorConfig,
-    BatchValidator, CheckpointWriter, Engine, Error, FakeProvider, NewProject, NewQaFinding,
-    NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse, ProviderClient,
-    ProviderRequestSpacingConfig, ProviderSpeedBenchmark, ProviderSpeedBenchmarkConfig, TextCodec,
-    TranslateProgressEvent, TranslationDb, TranslationSpeedSample,
-    adaptive_translation_tuning_from_samples, adaptive_translation_tuning_from_samples_for_lanes,
+    BatchValidator, CheckpointWriter, Engine, Error, FakeProvider, NewOccurrence, NewProject,
+    NewQaFinding, NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse,
+    ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
+    ProviderSpeedBenchmarkConfig, TextCodec, TranslateProgressEvent, TranslationDb,
+    TranslationSpeedSample, adaptive_translation_tuning_from_samples,
+    adaptive_translation_tuning_from_samples_for_lanes,
 };
 use tempfile::tempdir;
 
@@ -389,6 +390,61 @@ fn planner_deduplicates_same_normalized_text_and_signature() {
 }
 
 #[test]
+fn planner_deduplicates_block_units_with_multiple_occurrences() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let project_id = db
+        .upsert_project(&NewProject {
+            game_root: "/synthetic/game".to_string(),
+            display_name: "Synthetic Game".to_string(),
+            engine: Engine::Mz,
+        })
+        .expect("insert project");
+    let source_id = seed_source_with_kind(&mut db, "en", "Line one\nLine two", "message_block");
+
+    for (index, path) in [
+        "$.events[1].pages[0].list[2]",
+        "$.events[7].pages[0].list[9]",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        db.insert_project_occurrence(
+            project_id,
+            &NewOccurrence {
+                project_id: Some(project_id),
+                source_text_id: source_id,
+                file_path: "data/Map001.json".to_string(),
+                json_path: path.to_string(),
+                entity_type: "event_command".to_string(),
+                event_id: Some((index + 1) as i64),
+                page_index: Some(0),
+                command_index: Some(index as i64),
+                command_code: Some(101),
+                parameter_index: None,
+                object_key: None,
+                extraction_rule_id: "event.message.block".to_string(),
+            },
+        )
+        .expect("insert occurrence");
+    }
+
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    assert_eq!(plan.jobs.len(), 1);
+    assert_eq!(plan.jobs[0].source_text_ids, vec![source_id]);
+    assert_eq!(plan.jobs[0].provider_text, "Line one\nLine two");
+}
+
+#[test]
 fn planner_separates_short_block_and_complex_lanes() {
     let mut db = TranslationDb::open_in_memory().expect("open db");
     db.migrate().expect("migrate db");
@@ -457,6 +513,55 @@ fn validator_rejects_line_local_placeholder_drift() {
             .to_string()
             .contains("line-local placeholder mismatch"),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validator_preserves_converted_escape_codes() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source(&mut db, "en", "Hello \u{1b}C[1]Emma\u{1b}C[0]");
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    let validated = BatchValidator::validate(r#"{"id":1,"translation":"안녕 ¤엠마¤"}"#, &plan.jobs)
+        .expect("converted escape placeholders should restore");
+
+    assert_eq!(
+        validated[0].translated_text,
+        "안녕 \u{1b}C[1]엠마\u{1b}C[0]"
+    );
+}
+
+#[test]
+fn validator_preserves_angle_and_bracket_params() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source(&mut db, "en", "\\N[1] found \\Quest<main>");
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    let validated =
+        BatchValidator::validate(r#"{"id":1,"translation":"¤이 ¤를 찾았다"}"#, &plan.jobs)
+            .expect("angle and bracket parameter placeholders should restore");
+
+    assert_eq!(
+        validated[0].translated_text,
+        "\\N[1]이 \\Quest<main>를 찾았다"
     );
 }
 
@@ -583,6 +688,37 @@ fn json_parse_failure_is_preserved_in_db_and_checkpoint_details() {
         Some("provider-json-parse")
     );
     assert_eq!(samples[0].item_count, 1);
+}
+
+#[test]
+fn translator_rejects_unchanged_provider_output() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let source = seed_source(&mut db, "en", "Hello");
+    let mut provider = FakeProvider::from_outputs(vec![output(&[(1, "Hello")])]);
+
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 1,
+            retry_attempts: 0,
+            ..test_config()
+        },
+    )
+    .expect("translate unchanged output");
+
+    assert_eq!(report.completed_source_text_ids, Vec::<i64>::new());
+    assert_eq!(report.failed_source_text_ids, vec![source]);
+    assert!(db.get_translation(source, "ko").expect("lookup").is_none());
+    let findings = db.qa_findings_for_source(source).expect("findings");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.message.contains("unchanged provider output")),
+        "expected unchanged provider output finding, got {findings:?}"
+    );
 }
 
 #[test]
