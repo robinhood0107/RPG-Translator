@@ -2,20 +2,23 @@
 
 -
 
-## Original Reference Read
+## Implementation Summary
 
-- [ ] Not applicable for this PR.
-- [ ] Read only for behavior-level audit; no implementation code copied.
-- Files read:
-- Behavior to preserve:
-- Behavior/UI to discard:
-- Independent rewrite mapping:
+- [ ] Describes implemented behavior and user-visible or developer-visible effects.
+- [ ] Describes changed verification or guard behavior when relevant.
+- [ ] Uses objective feature, implementation, and verification facts only.
 
-## Local-only Exclusion
+## Public Wording Guard
 
-- [ ] No `SPEC.md`, `spec_ko.md`, `AGENTS.md`, `ROADMAP.md`, `dontupload/`, `.gstack/`, or local compose/test output staged.
-- [ ] No API keys, model files, translated game builds, runtime exports, logs, screenshots, local DBs, benchmark output, or generated build/cache output included.
-- [ ] Committed tests use synthetic/mock fixtures only and do not reference `dontupload/City_Of_Secrets`.
+- [ ] Issue and pull request text uses public-facing behavior and verification wording only.
+- [ ] No private document names, private filesystem locations, provenance claims, or private source labels are included.
+- [ ] Historical cleanup is not repeated unless a fresh scan reports a current match.
+
+## Repository Boundary
+
+- [ ] No private, generated, sensitive, or machine-local files staged.
+- [ ] No API keys, model files, translated game builds, runtime exports, logs, screenshots, databases, benchmark output, or generated build/cache output included.
+- [ ] Committed tests use synthetic/mock fixtures only.
 
 ## Runtime And Provider Boundary
 
@@ -42,3 +45,4 @@
 - [ ] `scripts/check-local-only.sh --staged`
 - [ ] `scripts/check-local-only.sh --tree`
 - [ ] `scripts/check-release-archive.sh`
+- [ ] `scripts/check-github-public-copy.sh --stdin < .github/pull_request_template.md`
