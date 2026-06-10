@@ -445,6 +445,125 @@ test('runtime diagnostics records slow and dropped frame policy summaries', () =
   ]);
 });
 
+test('phase 4-5 completion matrix records surface adapters and runtime evidence', () => {
+  const runtimeDiagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: {
+        enabled: true,
+        record_all: true,
+        limit: 32,
+      },
+      performance_profiler: {
+        enabled: true,
+        target_fps: 60,
+        rolling_frames: 4,
+      },
+    },
+  });
+  runtimeDiagnostics.setForesightSnapshotProvider(() => ({
+    status: 'scanned',
+    blocks: 2,
+    stop_reason: 'end-of-list',
+    path_stops: [
+      { reason: 'label-jump', index: 12 },
+      { reason: 'movement-route-barrier', index: 19 },
+    ],
+  }));
+  const translations = new Map([
+    ['Window surface JP', 'Window surface KO'],
+    ['Bitmap surface JP', 'Bitmap surface KO'],
+    ['Sprite surface JP', 'Sprite surface KO'],
+    ['PIXI surface JP', 'PIXI surface KO'],
+  ]);
+  const orchestrator = new TextOrchestrator({
+    translate({ text }) {
+      return translations.get(text) || null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    diagnostics: runtimeDiagnostics,
+  });
+  const records = [
+    ['window-text', 'Window_Base.drawText', 'window-text', 'Window surface JP'],
+    ['bitmap-text', 'Bitmap.drawText', 'bitmap-text', 'Bitmap surface JP'],
+    ['sprite-text', 'Sprite glyph overlay', 'sprite-text', 'Sprite surface JP'],
+    ['pixi-text', 'PIXI.Text.text', 'pixi-text', 'PIXI surface JP'],
+  ].map(([adapter, kind, strategy, text]) => {
+    const surface = {};
+    return {
+      adapter,
+      command: orchestrator.observeRecord({
+        adapter,
+        kind,
+        surface,
+        slotKey: `${adapter}:phase45`,
+        text,
+        renderStrategy: strategy,
+      }),
+    };
+  });
+
+  for (const { adapter, command } of records) {
+    assert.equal(command.status, 'hit');
+    assert.equal(orchestrator.recordRenderAccepted(command.itemId, {
+      commandId: command.id,
+      reason: `${command.strategy}-completion`,
+    }), true);
+    orchestrator.recordDraw(command.itemId, `${command.strategy}-draw`, {
+      translationReceived: command.translatedText,
+      translationDrawn: `${command.translatedText} drawn`,
+    });
+    runtimeDiagnostics.recordAdapterInstall(adapter, 'installed', 1.25);
+  }
+  const conflictSurface = {};
+  assert.equal(orchestrator.claimSurface(conflictSurface, 'window-text'), true);
+  assert.equal(orchestrator.claimSurface(conflictSurface, 'bitmap-text'), false);
+  runtimeDiagnostics.recordDraw('skip', {
+    adapter: 'pixi-text',
+    methodName: 'text',
+    rawText: 'PIXI surface JP',
+    reason: 'ownership-conflict',
+  });
+  runtimeDiagnostics.time('hook.adapter.phase45.ms', 4.5, { domain: 'runtime' });
+  runtimeDiagnostics.recordFrame(20, { stage: 'window-text' });
+  runtimeDiagnostics.recordFrame(40, { stage: 'bitmap-replay' });
+
+  const diagnostics = orchestrator.diagnostics();
+  assert.equal(diagnostics.observed_items, 4);
+  assert.equal(diagnostics.cache_hits, 4);
+  assert.equal(diagnostics.render_accepted, 4);
+  assert.equal(diagnostics.ownership_conflicts, 1);
+  assert.deepEqual(diagnostics.active.map((item) => [item.adapter, item.translationDrawn]), [
+    ['window-text', 'Window surface KO drawn'],
+    ['bitmap-text', 'Bitmap surface KO drawn'],
+    ['sprite-text', 'Sprite surface KO drawn'],
+    ['pixi-text', 'PIXI surface KO drawn'],
+  ]);
+  const runtime = diagnostics.runtime_diagnostics;
+  assert.deepEqual(runtime.adapterInstallStatus.map((entry) => [entry.adapter, entry.status]), [
+    ['window-text', 'installed'],
+    ['bitmap-text', 'installed'],
+    ['sprite-text', 'installed'],
+    ['pixi-text', 'installed'],
+  ]);
+  assert.equal(runtime.drawTrace.summary.byAdapter['window-text'] >= 2, true);
+  assert.equal(runtime.drawTrace.summary.byAdapter['bitmap-text'] >= 2, true);
+  assert.equal(runtime.drawTrace.summary.byAdapter['sprite-text'] >= 2, true);
+  assert.equal(runtime.drawTrace.summary.byAdapter['pixi-text'] >= 2, true);
+  assert.equal(runtime.drawTrace.summary.byReason['ownership-conflict'], 1);
+  assert.equal(runtime.hookTimingSummary['hook.adapter.phase45.ms'].count, 1);
+  assert.equal(runtime.performance.frames.summary.total, 2);
+  assert.equal(runtime.performance.frames.summary.dropped, 1);
+  assert.equal(runtime.foresight.status, 'scanned');
+  assert.deepEqual(runtime.foresight.path_stops.map((stop) => stop.reason), [
+    'label-jump',
+    'movement-route-barrier',
+  ]);
+});
+
 test('orchestrator records canonical items and rejects stale render commands', () => {
   const surface = {};
   const index = {
