@@ -3534,6 +3534,42 @@ test('message adapter wraps translated blocks when line counts differ', () => {
   assert.deepEqual(calls, [['A translated', 'sentence', 'that wraps']]);
 });
 
+test('message adapter wraps translated cache hits with RPG Maker escapes and icon widths', () => {
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Window_Base: { _iconWidth: 32 },
+    $gameMessage: { _texts: ['short', 'block'] },
+    Window_Message: function WindowMessage() {
+      this.contents = { width: 120, height: 96 };
+    },
+  };
+  const calls = [];
+  root.Window_Message.prototype.lineHeight = () => 24;
+  root.Window_Message.prototype.textWidth = (text) => String(text).length * 10;
+  root.Window_Message.prototype.resetFontSettings = function resetFontSettings() {};
+  root.Window_Message.prototype.startMessage = function startMessage() {
+    calls.push(root.$gameMessage._texts.slice());
+  };
+  const translator = {
+    translateText(request) {
+      if (request.text === 'short\nblock') {
+        return '\\C[3]Emma\\C[0] carries \\I[12] through alpha beta';
+      }
+      return null;
+    },
+  };
+
+  MessageAdapter.install(root, translator);
+  new root.Window_Message().startMessage();
+
+  assert.deepEqual(root.$gameMessage._texts, [
+    '\\C[3]Emma\\C[0] carries',
+    '\\I[12] through',
+    'alpha beta',
+  ]);
+  assert.deepEqual(calls, [root.$gameMessage._texts]);
+});
+
 test('message adapter retires active message item when Game_Message.clear runs', () => {
   const clearCalls = [];
   function GameMessage() {
