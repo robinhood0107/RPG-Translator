@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rpg_translator_core::{
-    InstallOptions, Installer, Result, RollbackManager, RollbackOptions, TranslationDb,
+    InstallOptions, Installer, Result, RollbackManager, RollbackOptions, ScanOptions,
+    TranslationDb, WorkbenchService,
 };
 
 fn main() {
@@ -19,12 +20,45 @@ fn run(args: Vec<String>) -> Result<()> {
     }
 
     match args[0].as_str() {
+        "scan-game" => scan_game(&args[1..]),
         "install-overlay" => install_overlay(&args[1..]),
         "rollback-overlay" => rollback_overlay(&args[1..]),
         command => Err(rpg_translator_core::Error::invalid_input(format!(
             "unknown command {command}"
         ))),
     }
+}
+
+fn scan_game(args: &[String]) -> Result<()> {
+    let parsed = parse_flags(args)?;
+    let game_root = required_path(&parsed, "--game-root")?;
+    let db_path = required_path(&parsed, "--db")?;
+    let source_language = parsed
+        .get("--source-language")
+        .cloned()
+        .unwrap_or_else(|| "ja".to_string());
+    let mut db = TranslationDb::open_with_schema_guard(&db_path)?;
+    let report = WorkbenchService::scan_game(
+        &mut db,
+        &game_root,
+        ScanOptions {
+            source_language,
+            ..ScanOptions::default()
+        },
+    )?;
+    println!(
+        "scanned project_id={} snapshot_id={} source_texts={} occurrences={} added_sources={} unchanged_sources={} removed_occurrences={} rejected={} skipped={}",
+        report.project_id,
+        report.snapshot_id,
+        report.source_text_count,
+        report.occurrence_count,
+        report.added_source_text_count,
+        report.unchanged_source_text_count,
+        report.removed_occurrence_count,
+        report.rejected_count,
+        report.skipped_count
+    );
+    Ok(())
 }
 
 fn install_overlay(args: &[String]) -> Result<()> {

@@ -13,7 +13,14 @@ fn write_text(path: &Path, text: &str) {
 }
 
 fn make_game(root: &Path, plugins_js: &str) {
-    write_text(&root.join("data/System.json"), r#"{"gameTitle":"Fixture"}"#);
+    write_text(
+        &root.join("data/System.json"),
+        r#"{"gameTitle":"Fixture","terms":{"basic":["Level","HP"]}}"#,
+    );
+    write_text(
+        &root.join("data/Map001.json"),
+        r#"{"events":[null,{"id":1,"pages":[{"list":[{"code":101,"indent":0,"parameters":["","","",0,"Emma"]},{"code":401,"indent":0,"parameters":["Emma looks at the locked gate."]},{"code":401,"indent":0,"parameters":["The city keeps its secrets."]},{"code":0,"indent":0,"parameters":[]}]}]}]}"#,
+    );
     write_text(&root.join("js/plugins.js"), plugins_js);
 }
 
@@ -137,6 +144,38 @@ fn cli_install_and_rollback_apply_without_local_allowance_flag() {
         fs::read_to_string(game.join("js/plugins.js")).expect("read restored plugins"),
         original_plugins
     );
+}
+
+#[test]
+fn cli_scan_game_writes_project_db_and_reports_block_units() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db = temp.path().join("workbench.sqlite");
+    make_game(&game, "var $plugins = [];");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+
+    assert!(
+        output.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scanned project_id="));
+    assert!(stdout.contains("source_texts="));
+    assert!(stdout.contains("occurrences="));
+    assert!(db.is_file());
 }
 
 #[test]
