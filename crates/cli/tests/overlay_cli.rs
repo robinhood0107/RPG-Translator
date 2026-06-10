@@ -430,6 +430,134 @@ fn cli_translate_local_pretranslates_scanned_rows_for_export() {
 }
 
 #[test]
+fn cli_headless_usable_loop_translates_exports_installs_and_rolls_back() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db = temp.path().join("workbench.sqlite");
+    let export = temp.path().join("export");
+    let original_plugins = "var $plugins = [];";
+    make_game(&game, original_plugins);
+    let provider_address = spawn_openai_fixture_server();
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let project_id = parse_project_id(&String::from_utf8_lossy(&scan.stdout));
+
+    let translate = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "translate-local",
+            "--db",
+            db.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--source-language",
+            "en",
+            "--target-language",
+            "ko",
+            "--base-url",
+            &format!("http://{provider_address}"),
+            "--model",
+            "fixture-model",
+            "--batch-size",
+            "8",
+            "--review-state",
+            "accepted",
+        ])
+        .output()
+        .expect("run translate command");
+    assert!(
+        translate.status.success(),
+        "translate failed: {}",
+        String::from_utf8_lossy(&translate.stderr)
+    );
+
+    let export_result = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "export-bundle",
+            "--db",
+            db.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--target-language",
+            "ko",
+            "--export-dir",
+            export.to_str().expect("export path"),
+        ])
+        .output()
+        .expect("run export command");
+    assert!(
+        export_result.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&export_result.stderr)
+    );
+
+    let install = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "install-overlay",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--export-dir",
+            export.to_str().expect("export path"),
+            "--project-id",
+            &project_id.to_string(),
+        ])
+        .output()
+        .expect("run install command");
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let support_dir = game.join("js").join("plugins").join("rpg-translator");
+    let installed_cache =
+        fs::read_to_string(support_dir.join("cache.jsonl")).expect("read installed cache");
+    assert!(installed_cache.contains("ko:"));
+    assert!(
+        fs::read_to_string(game.join("js/plugins.js"))
+            .expect("read plugins")
+            .contains("\"name\": \"RPGTranslator\"")
+    );
+
+    let rollback = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "rollback-overlay",
+            "--manifest",
+            support_dir
+                .join("install-manifest.json")
+                .to_str()
+                .expect("manifest path"),
+        ])
+        .output()
+        .expect("run rollback command");
+    assert!(
+        rollback.status.success(),
+        "rollback failed: {}",
+        String::from_utf8_lossy(&rollback.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read restored plugins"),
+        original_plugins
+    );
+    assert!(!support_dir.join("cache.jsonl").exists());
+}
+
+#[test]
 fn cli_rejects_missing_required_install_args() {
     let output = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
         .arg("install-overlay")
