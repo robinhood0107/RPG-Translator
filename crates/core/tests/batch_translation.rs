@@ -287,6 +287,25 @@ fn fake_provider_success_persists_batch_translations() {
     assert!(
         samples
             .iter()
+            .all(|sample| sample.provider_run_id == report.provider_run_id)
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.effective_batch_size == report.effective_batch_size as i64)
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.prompt_hash == "prompt-fixture")
+    );
+    assert!(
+        samples.iter().all(|sample| sample.batch_index >= 1
+            && sample.batch_index <= report.processed_batches as i64)
+    );
+    assert!(
+        samples
+            .iter()
             .all(|sample| sample.adaptive_decision_reason.starts_with("adaptive:"))
     );
     assert!(
