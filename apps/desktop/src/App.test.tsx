@@ -842,6 +842,9 @@ test("real prompt speed benchmark is disabled while translation is running", asy
           batch_eta_ms: 9000,
           last_batch_elapsed_ms: 1000,
           avg_batch_elapsed_ms: 1000,
+          recent_p50_batch_elapsed_ms: 900,
+          recent_p95_batch_elapsed_ms: 1300,
+          best_items_per_minute: 1200,
           current_batch_items: 16,
           started_completed_items: 0,
           parse_failed_items: 0,
@@ -853,6 +856,8 @@ test("real prompt speed benchmark is disabled while translation is running", asy
           final_failed_items: 0,
           provider_backoff_ms: null,
           effective_batch_size: 16,
+          next_experiment_batch_size: 24,
+          input_token_budget: 4096,
           speed_mode: "accelerating",
           success_streak: 4,
           success_delay_floor_ms: 1250,
@@ -868,6 +873,15 @@ test("real prompt speed benchmark is disabled while translation is running", asy
   expect(screen.getByRole("button", { name: "Real prompt speed test" })).toBeDisabled();
   expect(screen.getByText("Speed mode: Reducing wait")).toBeInTheDocument();
   expect(screen.getByText("Success streak: 4")).toBeInTheDocument();
+  expect(screen.getByText("Text ETA 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("Batch ETA 00:00:09")).toBeInTheDocument();
+  expect(screen.getByText("Recent p50 batch 00:00:00")).toBeInTheDocument();
+  expect(screen.getByText("Recent p95 batch 00:00:01")).toBeInTheDocument();
+  expect(screen.getByText("Best speed: 1,200 Items/min")).toBeInTheDocument();
+  expect(screen.getByText("Effective batch: 16")).toBeInTheDocument();
+  expect(screen.getByText("Next experiment batch: 24")).toBeInTheDocument();
+  expect(screen.getByText("Input token budget: 4,096")).toBeInTheDocument();
+  expect(screen.getByText("Speed tuning reason: adaptive: steady from test")).toBeInTheDocument();
 });
 
 test("review queue paginates rows and appends the next page", async () => {
