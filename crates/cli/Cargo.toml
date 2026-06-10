@@ -10,10 +10,11 @@ name = "rpg-translator"
 path = "src/main.rs"
 
 [dependencies]
+reqwest.workspace = true
 rpg-translator-core.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

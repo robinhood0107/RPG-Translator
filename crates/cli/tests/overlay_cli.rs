@@ -1,8 +1,12 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::thread;
 
 use rpg_translator_core::{NewTranslation, OverlayConfig, TranslationDb};
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn write_text(path: &Path, text: &str) {
@@ -46,6 +50,84 @@ fn parse_project_id(stdout: &str) -> i64 {
         .expect("project_id in output")
         .parse()
         .expect("numeric project id")
+}
+
+fn spawn_openai_fixture_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture provider");
+    let address = listener.local_addr().expect("fixture provider address");
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            respond_to_openai_request(stream);
+        }
+    });
+    address
+}
+
+fn respond_to_openai_request(mut stream: TcpStream) {
+    let body = read_http_body(&mut stream);
+    let request: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+    let content = request
+        .pointer("/messages/1/content")
+        .or_else(|| request.get("input"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let jsonl = content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row.get("id").and_then(Value::as_i64))
+        .map(|id| json!({ "id": id, "translation": format!("ko:{id}") }).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let response = json!({
+        "choices": [
+            {
+                "message": {
+                    "content": jsonl
+                }
+            }
+        ]
+    })
+    .to_string();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        response.len()
+    );
+    stream
+        .write_all(header.as_bytes())
+        .and_then(|_| stream.write_all(response.as_bytes()))
+        .expect("write fixture provider response");
+}
+
+fn read_http_body(stream: &mut TcpStream) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut chunk).expect("read fixture request");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = find_header_end(&buffer) {
+            let headers = String::from_utf8_lossy(&buffer[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or_default();
+            let body_start = header_end + 4;
+            if buffer.len().saturating_sub(body_start) >= content_length {
+                return buffer[body_start..body_start + content_length].to_vec();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 fn approve_all_scanned_rows(db_path: &Path, project_id: i64) {
@@ -262,6 +344,89 @@ fn cli_export_bundle_writes_verified_runtime_cache_bundle() {
     assert!(export.join("manifest.json").is_file());
     assert!(export.join("overlay-config.json").is_file());
     assert!(export.join("cache.jsonl").is_file());
+}
+
+#[test]
+fn cli_translate_local_pretranslates_scanned_rows_for_export() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db = temp.path().join("workbench.sqlite");
+    let export = temp.path().join("export");
+    make_game(&game, "var $plugins = [];");
+    let provider_address = spawn_openai_fixture_server();
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let project_id = parse_project_id(&String::from_utf8_lossy(&scan.stdout));
+
+    let translate = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "translate-local",
+            "--db",
+            db.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--source-language",
+            "en",
+            "--target-language",
+            "ko",
+            "--base-url",
+            &format!("http://{provider_address}"),
+            "--model",
+            "fixture-model",
+            "--batch-size",
+            "8",
+            "--review-state",
+            "accepted",
+        ])
+        .output()
+        .expect("run translate command");
+    assert!(
+        translate.status.success(),
+        "translate failed stdout={} stderr={}",
+        String::from_utf8_lossy(&translate.stdout),
+        String::from_utf8_lossy(&translate.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&translate.stdout);
+    assert!(stdout.contains("translated status="));
+    assert!(stdout.contains("accepted="));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "export-bundle",
+            "--db",
+            db.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--target-language",
+            "ko",
+            "--export-dir",
+            export.to_str().expect("export path"),
+        ])
+        .output()
+        .expect("run export command");
+    assert!(
+        output.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cache = fs::read_to_string(export.join("cache.jsonl")).expect("read cache");
+    assert!(cache.contains("ko:"));
 }
 
 #[test]
