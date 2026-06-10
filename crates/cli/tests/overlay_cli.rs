@@ -259,6 +259,94 @@ fn cli_install_and_rollback_apply_without_local_allowance_flag() {
 }
 
 #[test]
+fn cli_rollback_rejects_manifest_copied_outside_its_game_root() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let copied_game = temp.path().join("copied-game");
+    let export = temp.path().join("export");
+    let original_plugins = "var $plugins = [];";
+    make_game(&game, original_plugins);
+    make_export_bundle(&export);
+
+    let install = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "install-overlay",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--export-dir",
+            export.to_str().expect("export path"),
+        ])
+        .output()
+        .expect("run install command");
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let support_dir = game.join("js").join("plugins").join("rpg-translator");
+    let copied_support_dir = copied_game
+        .join("js")
+        .join("plugins")
+        .join("rpg-translator");
+    fs::create_dir_all(&copied_support_dir).expect("create copied support dir");
+    fs::copy(
+        support_dir.join("install-manifest.json"),
+        copied_support_dir.join("install-manifest.json"),
+    )
+    .expect("copy manifest");
+
+    let stale_rollback = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "rollback-overlay",
+            "--manifest",
+            copied_support_dir
+                .join("install-manifest.json")
+                .to_str()
+                .expect("manifest path"),
+        ])
+        .output()
+        .expect("run stale rollback command");
+    assert!(
+        !stale_rollback.status.success(),
+        "stale rollback unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&stale_rollback.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&stale_rollback.stderr).contains("outside game root"),
+        "stale rollback should explain path mismatch: {}",
+        String::from_utf8_lossy(&stale_rollback.stderr)
+    );
+    assert!(
+        fs::read_to_string(game.join("js/plugins.js"))
+            .expect("read original plugins")
+            .contains("\"name\": \"RPGTranslator\""),
+        "stale rollback must not modify the original installed game"
+    );
+
+    let rollback = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "rollback-overlay",
+            "--manifest",
+            support_dir
+                .join("install-manifest.json")
+                .to_str()
+                .expect("manifest path"),
+        ])
+        .output()
+        .expect("run rollback command");
+    assert!(
+        rollback.status.success(),
+        "rollback failed: {}",
+        String::from_utf8_lossy(&rollback.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read restored plugins"),
+        original_plugins
+    );
+}
+
+#[test]
 fn cli_scan_game_writes_project_db_and_reports_block_units() {
     let temp = tempdir().expect("create temp dir");
     let game = temp.path().join("game");
