@@ -266,6 +266,7 @@ impl BatchValidator {
                     "provider returned empty translation for id {id}"
                 )));
             }
+            validate_line_local_placeholders(id, &job.provider_text, translation)?;
             let restored =
                 TextCodec::restore_provider_translation(translation, &job.provider_state)?;
             validated.push(ValidatedTranslation {
@@ -283,6 +284,33 @@ impl BatchValidator {
 
         Ok(validated)
     }
+}
+
+fn validate_line_local_placeholders(id: i64, source: &str, translation: &str) -> Result<()> {
+    let source_lines = source.split('\n').collect::<Vec<_>>();
+    let translation_lines = translation.split('\n').collect::<Vec<_>>();
+    if source_lines.len() != translation_lines.len() {
+        return Ok(());
+    }
+    for (index, (source_line, translation_line)) in source_lines
+        .iter()
+        .zip(translation_lines.iter())
+        .enumerate()
+    {
+        let expected = placeholder_count(source_line);
+        let actual = placeholder_count(translation_line);
+        if expected != actual {
+            return Err(Error::invalid_input(format!(
+                "line-local placeholder mismatch for id {id} line {}: expected {expected}, got {actual}",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn placeholder_count(input: &str) -> usize {
+    input.chars().filter(|ch| *ch == '\u{00a4}').count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

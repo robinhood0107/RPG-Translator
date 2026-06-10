@@ -442,6 +442,25 @@ fn validator_rejects_bad_model_output_shapes() {
 }
 
 #[test]
+fn validator_rejects_line_local_placeholder_drift() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "Line \u{00a4}\nSecond line".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    let error = BatchValidator::validate(r#"{"id":1,"translation":"첫 줄\n둘째 줄¤"}"#, &jobs)
+        .expect_err("placeholder moved to another line should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("line-local placeholder mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn validator_allows_message_block_line_break_mismatch_for_runtime_wrapping() {
     let item = ProviderBatchItem {
         id: 1,

@@ -3857,6 +3857,23 @@ fn review_translation_validation_messages_tx(
             "줄바꿈 수가 원문과 다릅니다. 원문 {source_line_breaks}개, 번역 {translated_line_breaks}개"
         ));
     }
+    if source_line_breaks == translated_line_breaks {
+        let source_line_placeholders = TextCodec::control_code_counts_by_line(&source_normalized);
+        let translated_line_placeholders =
+            TextCodec::control_code_counts_by_line(&translated.normalized_text);
+        for (index, (source_count, translated_count)) in source_line_placeholders
+            .iter()
+            .zip(translated_line_placeholders.iter())
+            .enumerate()
+        {
+            if source_count != translated_count {
+                messages.push(format!(
+                    "줄별 제어코드 수가 원문과 다릅니다. {}번째 줄 원문 {source_count}개, 번역 {translated_count}개",
+                    index + 1
+                ));
+            }
+        }
+    }
     Ok(messages)
 }
 

@@ -87,6 +87,14 @@ impl TextCodec {
         }
         Ok(restored)
     }
+
+    #[must_use]
+    pub fn control_code_counts_by_line(input: &str) -> Vec<usize> {
+        normalize_line_endings(input)
+            .split('\n')
+            .map(|line| collect_control_codes(line).len())
+            .collect()
+    }
 }
 
 fn normalize_line_endings(input: &str) -> String {

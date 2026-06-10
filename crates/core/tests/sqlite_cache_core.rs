@@ -1517,6 +1517,47 @@ fn review_update_resolves_findings_only_after_machine_validation_passes() -> Res
 }
 
 #[test]
+fn review_update_rejects_line_local_control_code_drift() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let source = "Hello \\V[1]\nWorld";
+    let analysis = TextCodec::analyze(source);
+    let source_id = db.upsert_source_text(&source_text_with_signature(
+        "en",
+        &analysis.normalized_text,
+        &analysis.visible_text,
+        &analysis.control_code_signature,
+    ))?;
+
+    let invalid = db.update_review_row(&ReviewUpdateRequest {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text: "안녕\n세계 \\V[1]".to_string(),
+        provider: "manual-review".to_string(),
+        model: None,
+        review_state: "accepted".to_string(),
+        qa_state: "passed".to_string(),
+        expected_updated_at: None,
+    })?;
+
+    assert_eq!(invalid.review_state, "pending");
+    assert_eq!(invalid.qa_state, "needs-review");
+    let messages = db
+        .qa_findings_for_source(source_id)?
+        .into_iter()
+        .map(|finding| finding.message)
+        .collect::<Vec<_>>();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("줄별 제어코드 수가 원문과 다릅니다")),
+        "expected line-local control-code finding, got {messages:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn review_update_allows_message_block_line_break_changes_for_runtime_wrapping() -> Result<()> {
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;
