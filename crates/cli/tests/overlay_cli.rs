@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use rpg_translator_core::OverlayConfig;
+use rpg_translator_core::{NewTranslation, OverlayConfig, TranslationDb};
 use tempfile::tempdir;
 
 fn write_text(path: &Path, text: &str) {
@@ -37,6 +37,36 @@ fn make_export_bundle(root: &Path) {
         &root.join("cache.jsonl"),
         r#"{"cache_key":"ck:v1:0000000000000000000000000000000000000000000000000000000000000000","cache_aliases":["ck:v1:0000000000000000000000000000000000000000000000000000000000000000"],"source_text_id":1,"source_hash":"0000000000000000000000000000000000000000000000000000000000000000","source_language":"ja","target_language":"ko","normalized_text":"世界","visible_text":"世界","translation":"세계","control_code_signature":"","context_hash":null}"#,
     );
+}
+
+fn parse_project_id(stdout: &str) -> i64 {
+    stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("project_id="))
+        .expect("project_id in output")
+        .parse()
+        .expect("numeric project id")
+}
+
+fn approve_all_scanned_rows(db_path: &Path, project_id: i64) {
+    let mut db = TranslationDb::open_with_schema_guard(db_path).expect("open scanned db");
+    let rows = db
+        .review_queue_rows(project_id, "ko", None)
+        .expect("read review rows");
+    assert!(!rows.is_empty(), "scan should create review rows");
+    for row in rows {
+        db.upsert_translation(&NewTranslation {
+            source_text_id: row.source_text_id,
+            target_language: "ko".to_string(),
+            translated_text: format!("ko: {}", row.normalized_text),
+            provider: "fixture".to_string(),
+            model: Some("cli-test".to_string()),
+            provider_run_id: None,
+            review_state: "accepted".to_string(),
+            qa_state: "passed".to_string(),
+        })
+        .expect("approve row");
+    }
 }
 
 #[test]
@@ -176,6 +206,62 @@ fn cli_scan_game_writes_project_db_and_reports_block_units() {
     assert!(stdout.contains("source_texts="));
     assert!(stdout.contains("occurrences="));
     assert!(db.is_file());
+}
+
+#[test]
+fn cli_export_bundle_writes_verified_runtime_cache_bundle() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db = temp.path().join("workbench.sqlite");
+    let export = temp.path().join("export");
+    make_game(&game, "var $plugins = [];");
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let project_id = parse_project_id(&String::from_utf8_lossy(&scan.stdout));
+    approve_all_scanned_rows(&db, project_id);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "export-bundle",
+            "--db",
+            db.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--target-language",
+            "ko",
+            "--export-dir",
+            export.to_str().expect("export path"),
+        ])
+        .output()
+        .expect("run export command");
+
+    assert!(
+        output.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("exported export_id="));
+    assert!(stdout.contains("included="));
+    assert!(export.join("manifest.json").is_file());
+    assert!(export.join("overlay-config.json").is_file());
+    assert!(export.join("cache.jsonl").is_file());
 }
 
 #[test]

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rpg_translator_core::{
-    InstallOptions, Installer, Result, RollbackManager, RollbackOptions, ScanOptions,
-    TranslationDb, WorkbenchService,
+    ExportBuilder, ExportPolicy, InstallOptions, Installer, Result, RollbackManager,
+    RollbackOptions, ScanOptions, TranslationDb, WorkbenchService,
 };
 
 fn main() {
@@ -21,6 +21,7 @@ fn run(args: Vec<String>) -> Result<()> {
 
     match args[0].as_str() {
         "scan-game" => scan_game(&args[1..]),
+        "export-bundle" => export_bundle(&args[1..]),
         "install-overlay" => install_overlay(&args[1..]),
         "rollback-overlay" => rollback_overlay(&args[1..]),
         command => Err(rpg_translator_core::Error::invalid_input(format!(
@@ -57,6 +58,33 @@ fn scan_game(args: &[String]) -> Result<()> {
         report.removed_occurrence_count,
         report.rejected_count,
         report.skipped_count
+    );
+    Ok(())
+}
+
+fn export_bundle(args: &[String]) -> Result<()> {
+    let parsed = parse_flags(args)?;
+    let db_path = required_path(&parsed, "--db")?;
+    let project_id = required_i64(&parsed, "--project-id")?;
+    let target_language = parsed.get("--target-language").ok_or_else(|| {
+        rpg_translator_core::Error::invalid_input("--target-language is required")
+    })?;
+    let export_dir = required_path(&parsed, "--export-dir")?;
+    let mut db = TranslationDb::open_with_schema_guard(&db_path)?;
+    let report = ExportBuilder::export_project(
+        &mut db,
+        project_id,
+        target_language,
+        &export_dir,
+        ExportPolicy::accepted_and_reviewed(),
+    )?;
+    println!(
+        "exported export_id={} included={} skipped={} manifest_hash={} output={}",
+        report.export_id,
+        report.included_count,
+        report.skipped_count,
+        report.manifest_hash,
+        report.output_dir.display()
     );
     Ok(())
 }
@@ -132,6 +160,11 @@ fn required_path(parsed: &HashMap<String, String>, key: &str) -> Result<PathBuf>
     parsed
         .get(key)
         .map(PathBuf::from)
+        .ok_or_else(|| rpg_translator_core::Error::invalid_input(format!("{key} is required")))
+}
+
+fn required_i64(parsed: &HashMap<String, String>, key: &str) -> Result<i64> {
+    optional_i64(parsed, key)?
         .ok_or_else(|| rpg_translator_core::Error::invalid_input(format!("{key} is required")))
 }
 
