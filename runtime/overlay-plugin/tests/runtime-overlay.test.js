@@ -6837,6 +6837,97 @@ test('boot installs cache-only overlay without provider surfaces', async () => {
   assert.equal(root.RPGTranslatorOverlay.translationQueue, undefined);
 });
 
+test('boot loads cache bundle and translates joined message block cache hits', async () => {
+  const sourceText = 'Line one\nLine two';
+  const translatedText = '첫 줄\n둘째 줄';
+  const cacheKey = CacheKeyBuilder.build({
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    normalizedText: sourceText,
+    controlCodeSignature: '',
+    contextHash: null,
+  });
+  const files = new Map([
+    [
+      'rpg-translator/manifest.json',
+      JSON.stringify({
+        schema_version: 1,
+        project_id: 1,
+        source_language: 'en',
+        target_language: 'ko',
+        created_timestamp: '1',
+        key_schema_version: 'v1',
+        cache_files: ['cache.jsonl'],
+        record_count: 1,
+      }),
+    ],
+    [
+      'rpg-translator/overlay-config.json',
+      JSON.stringify({
+        schema_version: 1,
+        diagnostics_enabled: false,
+        startup_toast_enabled: false,
+        runtime_load_contract: {
+          schema_version: 1,
+          support_directory: 'rpg-translator',
+          plugin_entry_file: 'RPGTranslator.js',
+          script_load_order: RuntimeEntry.moduleFiles(),
+          required_runtime_files: ['RPGTranslator.js'].concat(RuntimeEntry.moduleFiles()),
+        },
+      }),
+    ],
+    [
+      'rpg-translator/cache.jsonl',
+      `${JSON.stringify({
+        cache_key: cacheKey,
+        cache_aliases: [cacheKey],
+        source_text_id: 1,
+        source_hash: '0'.repeat(64),
+        source_language: 'en',
+        target_language: 'ko',
+        normalized_text: sourceText,
+        visible_text: sourceText,
+        translation: translatedText,
+        control_code_signature: '',
+        context_hash: null,
+      })}\n`,
+    ],
+  ]);
+  const bundle = await CacheLoader.load('rpg-translator/', async (url) => ({
+    ok: files.has(url),
+    async text() {
+      return files.get(url);
+    },
+  }));
+  const root = {
+    document: { body: null },
+    RPGTranslatorOverlay: {},
+    $gameMessage: {
+      _texts: ['Line one', 'Line two'],
+      allText() {
+        return this._texts.join('\n');
+      },
+    },
+    Window_Message: function WindowMessage() {},
+    Window_Base: function WindowBase() {},
+  };
+  const calls = [];
+  root.Window_Message.prototype.startMessage = function startMessage() {
+    calls.push(root.$gameMessage._texts.slice());
+  };
+  root.Window_Base.prototype.drawText = function drawText() {};
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) { return text.length; };
+
+  await Boot.install(root, { bundle, engine: 'mz' });
+  new root.Window_Message().startMessage();
+
+  assert.deepEqual(calls, [['첫 줄', '둘째 줄']]);
+  assert.equal(root.RPGTranslatorOverlay.index.diagnostics().cache_hits, 1);
+  assert.equal(root.RPGTranslatorOverlay.provider, undefined);
+  assert.equal(root.RPGTranslatorOverlay.translationQueue, undefined);
+});
+
 test('boot rejects runtime load contract mismatches before installing adapters', async () => {
   const root = {
     document: { body: null },
