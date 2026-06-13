@@ -69,6 +69,18 @@ pub struct RuntimeCacheRecord {
 pub struct OverlayConfig {
     pub schema_version: u32,
     pub diagnostics_enabled: bool,
+    #[serde(default)]
+    pub draw_capture_trace: DrawCaptureTraceConfig,
+    #[serde(default)]
+    pub performance_profiler: PerformanceProfilerConfig,
+    #[serde(default)]
+    pub layout_overflow: RuntimeIssueClassConfig,
+    #[serde(default)]
+    pub replay_failure: RuntimeIssueClassConfig,
+    #[serde(default)]
+    pub ownership_conflict: RuntimeIssueClassConfig,
+    #[serde(default)]
+    pub unsupported_image_text: RuntimeIssueClassConfig,
     pub startup_toast_enabled: bool,
     pub startup_toast_text: String,
     #[serde(default)]
@@ -82,11 +94,79 @@ impl OverlayConfig {
         Self {
             schema_version: EXPORT_SCHEMA_VERSION,
             diagnostics_enabled: false,
+            draw_capture_trace: DrawCaptureTraceConfig::default(),
+            performance_profiler: PerformanceProfilerConfig::default(),
+            layout_overflow: RuntimeIssueClassConfig::new("layout-overflow"),
+            replay_failure: RuntimeIssueClassConfig::new("replay-failure"),
+            ownership_conflict: RuntimeIssueClassConfig::new("ownership-conflict"),
+            unsupported_image_text: RuntimeIssueClassConfig::new("unsupported-image-text"),
             startup_toast_enabled: true,
             startup_toast_text: STARTUP_TOAST_TEXT.to_string(),
             runtime_load_contract: RuntimeLoadContract::runtime_default(),
             foresight_command_catalog: ForesightCommandCatalog::runtime_default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawCaptureTraceConfig {
+    pub enabled: bool,
+    pub record_all: bool,
+    pub record_cjk: bool,
+    pub limit: u32,
+}
+
+impl Default for DrawCaptureTraceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            record_all: false,
+            record_cjk: false,
+            limit: 320,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceProfilerConfig {
+    pub enabled: bool,
+    pub target_fps: u32,
+    pub slow_frame_ms: u32,
+    pub dropped_frame_multiplier: u32,
+    pub rolling_frames: u32,
+}
+
+impl Default for PerformanceProfilerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_fps: 40,
+            slow_frame_ms: 50,
+            dropped_frame_multiplier: 3,
+            rolling_frames: 1200,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeIssueClassConfig {
+    pub enabled: bool,
+    pub category: String,
+}
+
+impl RuntimeIssueClassConfig {
+    #[must_use]
+    pub fn new(category: &str) -> Self {
+        Self {
+            enabled: true,
+            category: category.to_string(),
+        }
+    }
+}
+
+impl Default for RuntimeIssueClassConfig {
+    fn default() -> Self {
+        Self::new("runtime-render")
     }
 }
 

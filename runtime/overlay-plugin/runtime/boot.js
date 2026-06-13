@@ -170,6 +170,20 @@
       throw new Error('runtime config diagnostics_enabled must be a boolean when present');
     }
 
+    for (const field of [
+      ['draw_capture_trace', 'drawCaptureTrace'],
+      ['performance_profiler', 'performanceProfiler'],
+      ['layout_overflow', 'layoutOverflow'],
+      ['replay_failure', 'replayFailure'],
+      ['ownership_conflict', 'ownershipConflict'],
+      ['unsupported_image_text', 'unsupportedImageText'],
+    ]) {
+      const value = getObjectValue(config, field[0], field[1]);
+      if (value !== undefined && !isPlainObject(value)) {
+        throw new Error(`runtime config ${field[0]} must be an object when present`);
+      }
+    }
+
     const startupToastEnabled = getObjectValue(config, 'startup_toast_enabled', 'startupToastEnabled');
     if (startupToastEnabled !== undefined && typeof startupToastEnabled !== 'boolean') {
       throw new Error('runtime config startup_toast_enabled must be a boolean when present');

@@ -135,6 +135,16 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
     assert_eq!(manifest.record_count, 2);
     assert!(!manifest.created_timestamp.is_empty());
     assert!(!config.diagnostics_enabled);
+    assert!(!config.draw_capture_trace.enabled);
+    assert_eq!(config.draw_capture_trace.limit, 320);
+    assert!(!config.performance_profiler.enabled);
+    assert_eq!(config.layout_overflow.category, "layout-overflow");
+    assert_eq!(config.replay_failure.category, "replay-failure");
+    assert_eq!(config.ownership_conflict.category, "ownership-conflict");
+    assert_eq!(
+        config.unsupported_image_text.category,
+        "unsupported-image-text"
+    );
     assert!(config.startup_toast_enabled);
     assert_eq!(config.startup_toast_text, "RPG-Translator 작동중");
     assert_eq!(config.runtime_load_contract.schema_version, 1);
@@ -186,6 +196,12 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
             .contains(&"runtime/text-orchestrator/adapter-contract.js".to_string())
     );
     assert!(config_text.contains("\"foresight_command_catalog\""));
+    assert!(config_text.contains("\"draw_capture_trace\""));
+    assert!(config_text.contains("\"performance_profiler\""));
+    assert!(config_text.contains("\"layout_overflow\""));
+    assert!(config_text.contains("\"replay_failure\""));
+    assert!(config_text.contains("\"ownership_conflict\""));
+    assert!(config_text.contains("\"unsupported_image_text\""));
     assert!(config_text.contains("\"runtime_load_contract\""));
     assert!(config_text.contains("\"schemaVersion\""));
     assert!(config_text.contains("\"eventCommands\""));
