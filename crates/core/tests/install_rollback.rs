@@ -93,11 +93,15 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .is_file()
     );
     assert!(
+        game.join("js/plugins/rpg-translator/replay-state.js")
+            .is_file()
+    );
+    assert!(
         game.join("js/plugins/rpg-translator/manifest.json")
             .is_file()
     );
     assert!(report.install_manifest_path.is_file());
-    assert_eq!(report.installed_files.len(), 21);
+    assert_eq!(report.installed_files.len(), 22);
 
     let plugins = fs::read_to_string(game.join("js/plugins.js")).expect("read plugins");
     assert_eq!(plugins.matches("\"name\": \"RPGTranslator\"").count(), 1);
@@ -120,6 +124,7 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             "render-guard.js",
             "wrapping.js",
             "runtime-diagnostics.js",
+            "replay-state.js",
             "orchestrator.js",
             "adapter-contract.js",
             "foresight-scanner.js",
@@ -273,7 +278,7 @@ fn phase_6_7_completion_matrix_locks_export_install_and_rollback_evidence() -> R
             .len(),
         3
     );
-    assert_eq!(installed.len(), 21);
+    assert_eq!(installed.len(), 22);
     assert!(
         installed[0]["path"]
             .as_str()
@@ -287,19 +292,19 @@ fn phase_6_7_completion_matrix_locks_export_install_and_rollback_evidence() -> R
             .ends_with("text-codec.js")
     );
     assert!(
-        installed[18]["path"]
+        installed[19]["path"]
             .as_str()
             .expect("manifest path")
             .ends_with("manifest.json")
     );
     assert!(
-        installed[19]["path"]
+        installed[20]["path"]
             .as_str()
             .expect("overlay config path")
             .ends_with("overlay-config.json")
     );
     assert!(
-        installed[20]["path"]
+        installed[21]["path"]
             .as_str()
             .expect("cache jsonl path")
             .ends_with("cache.jsonl")
@@ -544,6 +549,7 @@ fn installer_rejects_missing_runtime_support_file_before_mutating_game() {
         "render-guard.js",
         "wrapping.js",
         "runtime-diagnostics.js",
+        "replay-state.js",
         "orchestrator.js",
         "adapter-contract.js",
         "foresight-scanner.js",

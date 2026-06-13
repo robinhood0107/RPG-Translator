@@ -1,7 +1,10 @@
 (function attach(root) {
+  const { ReplayState } = loadDependency(root, './replay-state');
   const STATE_KEY = '__rpgTranslatorWindowTextState';
   const INSTALL_TOKEN = 'rpg-translator-window-text-v2';
   const LIFECYCLE_TOKEN = 'rpg-translator-window-lifecycle-v2';
+  const CTOR_TOKEN = 'rpg-translator-window-constructor-v2';
+  const CONTENTS_REPLAY_TOKEN = 'rpg-translator-window-contents-replay-v2';
   let nextWindowId = 1;
 
   class WindowTextAdapter {
@@ -14,6 +17,7 @@
       wrapWindowLifecycle(prototype, translator);
       wrapPendingFlushMethod(prototype, 'open', translator);
       wrapPendingFlushMethod(prototype, 'update', translator);
+      wrapWindowConstructor(scope, translator);
       prototype.__rpgTranslatorWindowTextInstalled = INSTALL_TOKEN;
       return true;
     }
@@ -26,14 +30,12 @@
       if (isTranslatedDrawActive(this) || isDedicatedMessageWindow(scope, this)) {
         return original.call(this, text, ...rest);
       }
-      const translated = translateText(translator, scope, text, this, name, rest);
-      recordWindowOverflow(translator, this, name, translated, rest);
-      return withTranslatedDraw(this, () => withFittedWindowText(this, name, translated, rest, () => original.call(this, translated, ...rest)));
+      return observeWindowTextDraw(scope, translator, this, original, name, text, rest);
     };
     prototype[name].__rpgTranslatorOriginal = original;
   }
 
-  function translateText(translator, scope, text, surface, methodName, rest) {
+  function observeWindowTextDraw(scope, translator, surface, original, methodName, text, rest) {
     const state = ensureState(surface);
     const sourceText = String(text ?? '');
     const slotKey = createSlotKey(state, methodName, rest);
@@ -45,14 +47,16 @@
 
     if (!sourceText.trim()) {
       clearSlot(translator, state, slotKey, false);
-      return text;
+      return original.call(surface, text, ...rest);
     }
     if (translator && typeof translator.claimSurface === 'function' && !translator.claimSurface(surface, surfaceOwner)) {
-      return text;
+      return original.call(surface, text, ...rest);
     }
     if (translator && typeof translator.claimText === 'function' && !translator.claimText(slotKey, textOwner)) {
-      return text;
+      return original.call(surface, text, ...rest);
     }
+    const drawOrder = ReplayState.nextDrawOrder(state);
+    const bounds = textBounds(surface, methodName, rest, sourceText);
 
     const request = {
       engine: overlay(scope).engine || 'unknown',
@@ -79,6 +83,7 @@
         height: rest && rest.length > 3 ? rest[3] : undefined,
         maxWidth: rest && rest.length > 2 ? rest[2] : undefined,
         lineHeight: rest && rest.length > 3 ? rest[3] : undefined,
+        drawOrder,
       },
     };
 
@@ -86,7 +91,22 @@
       ? translator.observeRecord(request)
       : null;
     const itemId = command && command.itemId ? command.itemId : '';
-    if (itemId) state.slots.set(slotKey, { itemId, sourceText, revision: state.revision, textOwner });
+    const entry = {
+      command,
+      itemId,
+      slotKey,
+      sourceText,
+      methodName,
+      args: Array.isArray(rest) ? rest.slice() : [],
+      revision: state.revision,
+      textOwner,
+      drawOrder,
+      bounds,
+      status: 'observed',
+    };
+    if (itemId) state.slots.set(slotKey, entry);
+
+    const nativeResult = original.call(surface, text, ...rest);
 
     const translated = command
       ? (command.status === 'hit' ? command.translatedText : null)
@@ -105,13 +125,54 @@
           methodName,
           args: Array.isArray(rest) ? rest.slice() : [],
           itemId,
+          drawOrder,
+          bounds,
         });
-        return text;
+        return nativeResult;
       }
       dropPendingDraw(state, slotKey);
-      if (!translator.acceptRender(command, surface, sourceText)) return text;
+      if (!translator.acceptRender(command, surface, sourceText)) return nativeResult;
     }
-    return translated || text;
+    if (translated) {
+      renderWindowEntry(translator, surface, state, Object.assign(entry, { translatedText: translated }));
+    }
+    return nativeResult;
+  }
+
+  function wrapWindowConstructor(scope, translator) {
+    const OriginalCtor = scope && scope.Window_Base;
+    if (typeof OriginalCtor !== 'function' || OriginalCtor.__rpgTranslatorWindowConstructor === CTOR_TOKEN) return false;
+    function WrappedWindowBase(...args) {
+      let instance = null;
+      try {
+        instance = Reflect.construct(OriginalCtor, args, new.target || WrappedWindowBase);
+      } catch (_error) {
+        const result = OriginalCtor.apply(this, args);
+        instance = result && (typeof result === 'object' || typeof result === 'function') ? result : this;
+      }
+      registerWindowInstance(instance, translator);
+      return instance;
+    }
+    WrappedWindowBase.prototype = OriginalCtor.prototype;
+    Object.setPrototypeOf(WrappedWindowBase, OriginalCtor);
+    for (const key of Object.keys(OriginalCtor)) {
+      try {
+        WrappedWindowBase[key] = OriginalCtor[key];
+      } catch (_error) {
+        // Static copy is best-effort for host engine constructors.
+      }
+    }
+    WrappedWindowBase.__rpgTranslatorWindowConstructor = CTOR_TOKEN;
+    WrappedWindowBase.__rpgTranslatorOriginal = OriginalCtor;
+    scope.Window_Base = WrappedWindowBase;
+    return true;
+  }
+
+  function registerWindowInstance(windowInstance, translator) {
+    if (!windowInstance) return false;
+    ensureState(windowInstance);
+    wrapContentsMutation(windowInstance, translator);
+    return true;
   }
 
   function wrapWindowLifecycle(prototype, translator) {
@@ -152,6 +213,20 @@
     const contents = windowInstance && windowInstance.contents;
     if (!contents || contents.__rpgTranslatorWindowOwner === windowInstance) return;
     contents.__rpgTranslatorWindowOwner = windowInstance;
+    for (const methodName of ['fillRect', 'gradientFillRect', 'strokeRect', 'drawCircle', 'blt', 'bltImage']) {
+      const original = contents[methodName];
+      if (typeof original !== 'function') continue;
+      if (original.__rpgTranslatorWindowReplay === CONTENTS_REPLAY_TOKEN) continue;
+      contents[methodName] = function translatedContentsRenderOp(...args) {
+        const result = original.apply(this, args);
+        if (!isTranslatedDrawActive(windowInstance)) {
+          recordWindowRenderOp(windowInstance, methodName, args, original);
+        }
+        return result;
+      };
+      contents[methodName].__rpgTranslatorOriginal = original;
+      contents[methodName].__rpgTranslatorWindowReplay = CONTENTS_REPLAY_TOKEN;
+    }
     for (const methodName of ['clear', 'clearRect', 'resize']) {
       const original = contents[methodName];
       if (typeof original !== 'function') continue;
@@ -215,8 +290,10 @@
       surface[STATE_KEY] = {
         windowId: String(nextWindowId++),
         revision: 0,
+        drawOrderCounter: 0,
         slots: new Map(),
         pendingDraws: new Map(),
+        renderOps: [],
         surface,
       };
     }
@@ -274,20 +351,61 @@
         return;
       }
       state.pendingDraws.delete(slotKey);
-      recordWindowOverflow(translator, windowInstance, entry.methodName, entry.translatedText, entry.args || []);
-      withTranslatedDraw(windowInstance, () => {
-        clearWindowTextRegion(windowInstance, entry.methodName, entry.args || []);
-        return withFittedWindowText(
-          windowInstance,
-          entry.methodName,
-          entry.translatedText,
-          entry.args || [],
-          () => draw.call(windowInstance, entry.translatedText, ...(entry.args || [])),
-        );
-      });
+      renderWindowEntry(translator, windowInstance, state, entry);
       flushed = true;
     });
     return flushed;
+  }
+
+  function renderWindowEntry(translator, windowInstance, state, entry) {
+    if (!entry || !entry.translatedText) return false;
+    const translatedBounds = textBounds(windowInstance, entry.methodName, entry.args || [], entry.translatedText);
+    const originalBounds = entry.bounds || textBounds(windowInstance, entry.methodName, entry.args || [], entry.sourceText);
+    const dirtyRect = ReplayState.unionRect(originalBounds, translatedBounds);
+    const replayBefore = ReplayState.sortedOverlappingOps(state && state.renderOps, dirtyRect, entry.drawOrder);
+    recordWindowOverflow(translator, windowInstance, entry.methodName, entry.translatedText, entry.args || []);
+    withTranslatedDraw(windowInstance, () => {
+      const cleared = clearWindowTextRegion(windowInstance, entry.methodName, entry.args || [], dirtyRect);
+      const contents = windowInstance && windowInstance.contents;
+      const replayed = contents ? ReplayState.replayOps(contents, replayBefore, '__rpgTranslatorWindowReplayDepth') : 0;
+      recordReplayTrace(translator, 'background.restore', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared);
+      const draw = windowInstance && windowInstance[entry.methodName];
+      const original = draw && draw.__rpgTranslatorOriginal;
+      if (typeof original !== 'function') return false;
+      const result = withFittedWindowText(
+        windowInstance,
+        entry.methodName,
+        entry.translatedText,
+        entry.args || [],
+        () => original.call(windowInstance, entry.translatedText, ...(entry.args || [])),
+      );
+      recordReplayTrace(translator, 'render.accepted', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared);
+      return result;
+    });
+    entry.status = 'rendered';
+    return true;
+  }
+
+  function recordReplayTrace(translator, stage, entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared) {
+    if (!translator || typeof translator.recordDrawTrace !== 'function') return null;
+    return translator.recordDrawTrace(stage, {
+      adapter: 'window-text',
+      methodName: entry.methodName,
+      rawText: entry.sourceText,
+      visibleText: entry.translatedText,
+      slotKey: entry.slotKey,
+      itemId: entry.itemId,
+      textOwner: entry.textOwner,
+      drawOrder: entry.drawOrder,
+      dirtyRect,
+      originalBounds,
+      translatedBounds,
+      replayBeforeCount: replayed,
+      replayAfterCount: 0,
+      clearMode: replayed > 0 ? 'replay' : cleared ? 'clear' : 'draw',
+      snapshotStatus: replayed > 0 ? 'render-op-replay' : 'clear-only',
+      force: true,
+    });
   }
 
   function withTranslatedDraw(windowInstance, callback) {
@@ -340,14 +458,61 @@
     }
   }
 
-  function clearWindowTextRegion(windowInstance, methodName, args) {
+  function clearWindowTextRegion(windowInstance, methodName, args, boundsOverride) {
     if (methodName !== 'drawText') return false;
     const contents = windowInstance && windowInstance.contents;
     const clear = contents && typeof contents.clearRect === 'function' ? contents.clearRect : null;
-    const width = numberAt(args, 2, 0);
+    const bounds = ReplayState.normalizeRect(boundsOverride);
+    const width = bounds ? bounds.width : numberAt(args, 2, 0);
     if (typeof clear !== 'function' || width <= 0) return false;
-    clear.call(contents, numberAt(args, 0, 0), numberAt(args, 1, 0), width, resolveLineHeight(windowInstance, args));
+    clear.call(
+      contents,
+      bounds ? bounds.x : numberAt(args, 0, 0),
+      bounds ? bounds.y : numberAt(args, 1, 0),
+      width,
+      bounds ? bounds.height : resolveLineHeight(windowInstance, args),
+    );
     return true;
+  }
+
+  function recordWindowRenderOp(windowInstance, methodName, args, original) {
+    const state = getState(windowInstance) || ensureState(windowInstance);
+    if (!state.renderOps) state.renderOps = [];
+    const bounds = renderOpBounds(windowInstance && windowInstance.contents, methodName, args);
+    if (!ReplayState.normalizeRect(bounds)) return false;
+    state.renderOps.push({
+      methodName,
+      args: Array.isArray(args) ? args.slice() : [],
+      original,
+      bounds,
+      drawOrder: ReplayState.nextDrawOrder(state),
+    });
+    if (state.renderOps.length > 256) state.renderOps.splice(0, state.renderOps.length - 256);
+    return true;
+  }
+
+  function renderOpBounds(contents, methodName, args) {
+    if (methodName === 'fillRect' || methodName === 'gradientFillRect' || methodName === 'strokeRect') {
+      return { x: numberAt(args, 0, 0), y: numberAt(args, 1, 0), width: numberAt(args, 2, 0), height: numberAt(args, 3, 0) };
+    }
+    if (methodName === 'drawCircle') {
+      const x = numberAt(args, 0, 0);
+      const y = numberAt(args, 1, 0);
+      const radius = numberAt(args, 2, 0);
+      return { x: x - radius, y: y - radius, width: radius * 2, height: radius * 2 };
+    }
+    if (methodName === 'blt' || methodName === 'bltImage') {
+      return { x: numberAt(args, 5, 0), y: numberAt(args, 6, 0), width: numberAt(args, 7, numberAt(args, 3, 0)), height: numberAt(args, 8, numberAt(args, 4, 0)) };
+    }
+    return contents ? { x: 0, y: 0, width: Number(contents.width) || 0, height: Number(contents.height) || 0 } : null;
+  }
+
+  function textBounds(windowInstance, methodName, args, text) {
+    const x = numberAt(args, 0, 0);
+    const y = numberAt(args, 1, 0);
+    const width = Math.max(1, resolveWindowTextWidth(windowInstance, methodName, args) || measureWindowTextWidth(windowInstance, windowInstance && windowInstance.contents, text));
+    const height = Math.max(1, resolveLineHeight(windowInstance, args));
+    return { x, y, width, height };
   }
 
   function calculateWindowTextFit(windowInstance, methodName, text, args) {
@@ -455,4 +620,11 @@
 function publish(root, api) {
   root.RPGTranslatorOverlay = Object.assign(root.RPGTranslatorOverlay || {}, api);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
+}
+
+function loadDependency(root, path) {
+  const overlay = root.RPGTranslatorOverlay || {};
+  if (path === './replay-state' && overlay.ReplayState) return { ReplayState: overlay.ReplayState };
+  if (typeof require === 'function') return require(path);
+  return {};
 }

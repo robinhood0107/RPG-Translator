@@ -1,4 +1,5 @@
 (function attach(root) {
+  const { ReplayState } = loadDependency(root, './replay-state');
   const STATE_KEY = '__rpgTranslatorBitmapTextState';
   const INSTALL_TOKEN = 'rpg-translator-bitmap-text-v2';
   const MUTATION_TOKEN = 'rpg-translator-bitmap-mutation-v2';
@@ -36,10 +37,11 @@
       if (this.__rpgTranslatorBitmapReplayDepth > 0 || !translator || typeof translator.observeRecord !== 'function') {
         return originalDrawText.call(this, translateText(translator, scope, text, this, methodName), ...rest);
       }
+      const state = ensureState(this);
       const fragment = createFragment(scope, this, text, rest, methodName);
+      fragment.drawOrder = ReplayState.nextDrawOrder(state);
       const surfaceDraw = routeSurfaceDraw(translator, this, fragment, originalDrawText);
       if (surfaceDraw.handled) return surfaceDraw.result;
-      const state = ensureState(this);
       state.fragments.push(fragment);
       if (state.fragments.length > 240) state.fragments.splice(0, state.fragments.length - 240);
       scheduleFlush(scope, this);
@@ -170,6 +172,8 @@
     if (!group.length) return false;
     const text = group.map((fragment) => fragment.text).join('');
     const bounds = groupBounds(group);
+    const drawOrders = group.map((fragment) => Number(fragment.drawOrder) || 0).filter((value) => value > 0);
+    const drawOrder = drawOrders.length ? Math.min(...drawOrders) : ReplayState.nextDrawOrder(state);
     const slotKey = `bitmap:${state.id}:${Math.round(bounds.x)}:${Math.round(bounds.y)}:${Math.round(bounds.width)}:${group[0].font}`;
     const surfaceOwner = `bitmap-text:${state.id}`;
     const textOwner = `${surfaceOwner}:${slotKey}`;
@@ -206,6 +210,7 @@
         height: group[0].lineHeight,
         maxWidth: Math.max(bounds.width, group[0].maxWidth || 1),
         lineHeight: group[0].lineHeight,
+        drawOrder,
       },
     });
     if (command && command.itemId) state.entries.set(slotKey, {
@@ -214,6 +219,7 @@
       text,
       revision: state.revision,
       textOwner,
+      drawOrder,
     });
     if (!command || command.status !== 'hit') return false;
     if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, bitmap, text)) return false;
@@ -226,11 +232,13 @@
       group[0].lineHeight,
       group[0].align,
       group[0].methodName || 'drawText',
+      state,
+      drawOrder,
     );
     return true;
   }
 
-  function replayDrawText(bitmap, text, x, y, width, lineHeight, align, methodName) {
+  function replayDrawText(bitmap, text, x, y, width, lineHeight, align, methodName, state, drawOrder) {
     const drawMethod = methodName || 'drawText';
     const original = bitmap && bitmap.constructor && bitmap.constructor.prototype
       ? bitmap.constructor.prototype[drawMethod] && bitmap.constructor.prototype[drawMethod].__rpgTranslatorOriginal
@@ -238,7 +246,10 @@
     if (typeof original !== 'function') return false;
     bitmap.__rpgTranslatorBitmapReplayDepth = (bitmap.__rpgTranslatorBitmapReplayDepth || 0) + 1;
     try {
+      const bounds = { x, y, width, height: lineHeight };
+      const replayBefore = ReplayState.sortedOverlappingOps(state && state.renderOps, bounds, Number(drawOrder) || Number.MAX_SAFE_INTEGER);
       clearReplayTextRegion(bitmap, text, x, y, width, lineHeight);
+      ReplayState.replayOps(bitmap, replayBefore, '__rpgTranslatorBitmapReplayDepth');
       original.call(bitmap, text, x, y, width, lineHeight, align);
       return true;
     } finally {
@@ -266,18 +277,41 @@
   }
 
   function installMutationHooks(scope, prototype, translator) {
-    for (const methodName of ['clear', 'clearRect', 'resize', 'fillRect', 'fillAll', 'blt', 'destroy']) {
+    for (const methodName of ['clear', 'clearRect', 'resize', 'fillRect', 'gradientFillRect', 'strokeRect', 'drawCircle', 'fillAll', 'blt', 'bltImage', 'destroy']) {
       const original = prototype[methodName];
       if (typeof original !== 'function') continue;
       if (original.__rpgTranslatorBitmapMutation === MUTATION_TOKEN) continue;
       prototype[methodName] = function translatedBitmapMutation(...args) {
         const result = original.apply(this, args);
-        if (!shouldBypassBitmapMutation(scope, this)) retireBitmapSurface(translator, this, methodName, args);
+        if (!shouldBypassBitmapMutation(scope, this)) {
+          retireBitmapSurface(translator, this, methodName, args);
+          recordBitmapRenderOp(this, methodName, args, original);
+        }
         return result;
       };
       prototype[methodName].__rpgTranslatorOriginal = original;
       prototype[methodName].__rpgTranslatorBitmapMutation = MUTATION_TOKEN;
     }
+  }
+
+  function recordBitmapRenderOp(bitmap, methodName, args, original) {
+    if (!isReplayableRenderOp(methodName)) return false;
+    const state = ensureState(bitmap);
+    const bounds = mutationRect(methodName, args, bitmap);
+    if (!ReplayState.normalizeRect(bounds)) return false;
+    state.renderOps.push({
+      methodName,
+      args: Array.isArray(args) ? args.slice() : [],
+      original,
+      bounds,
+      drawOrder: ReplayState.nextDrawOrder(state),
+    });
+    if (state.renderOps.length > 512) state.renderOps.splice(0, state.renderOps.length - 512);
+    return true;
+  }
+
+  function isReplayableRenderOp(methodName) {
+    return ['fillRect', 'gradientFillRect', 'strokeRect', 'drawCircle', 'blt', 'bltImage', 'fillAll'].includes(methodName);
   }
 
   function shouldBypassBitmapMutation(scope, bitmap) {
@@ -305,6 +339,9 @@
       }
       state.fragments = rect
         ? state.fragments.filter((fragment) => !rectsOverlap(rect, fragmentRect(fragment)))
+        : [];
+      state.renderOps = rect
+        ? ReplayState.filterOutsideRect(state.renderOps, rect)
         : [];
       state.revision += 1;
       if (state.entries.size === 0 && translator && typeof translator.releaseSurface === 'function') {
@@ -433,8 +470,10 @@
         id: String(nextBitmapId++),
         bitmap,
         revision: 0,
+        drawOrderCounter: 0,
         fragments: [],
         entries: new Map(),
+        renderOps: [],
         flushQueued: false,
       };
     }
@@ -471,16 +510,26 @@
   }
 
   function mutationRect(methodName, args, bitmap) {
-    if (methodName === 'clearRect' || methodName === 'fillRect') {
+    if (methodName === 'clearRect' || methodName === 'fillRect' || methodName === 'gradientFillRect' || methodName === 'strokeRect') {
       return { x: numberAt(args, 0, 0), y: numberAt(args, 1, 0), width: numberAt(args, 2, 0), height: numberAt(args, 3, 0) };
     }
+    if (methodName === 'drawCircle') {
+      const x = numberAt(args, 0, 0);
+      const y = numberAt(args, 1, 0);
+      const radius = numberAt(args, 2, 0);
+      return { x: x - radius, y: y - radius, width: radius * 2, height: radius * 2 };
+    }
     if (methodName === 'blt') {
+      return { x: numberAt(args, 5, 0), y: numberAt(args, 6, 0), width: numberAt(args, 7, numberAt(args, 3, 0)), height: numberAt(args, 8, numberAt(args, 4, 0)) };
+    }
+    if (methodName === 'bltImage') {
       return { x: numberAt(args, 5, 0), y: numberAt(args, 6, 0), width: numberAt(args, 7, numberAt(args, 3, 0)), height: numberAt(args, 8, numberAt(args, 4, 0)) };
     }
     if (methodName === 'resize') {
       return null;
     }
-    if (methodName === 'destroy' || methodName === 'clear' || methodName === 'fillAll') return null;
+    if (methodName === 'fillAll') return bitmap ? { x: 0, y: 0, width: Number(bitmap.width) || 0, height: Number(bitmap.height) || 0 } : null;
+    if (methodName === 'destroy' || methodName === 'clear') return null;
     return bitmap ? { x: 0, y: 0, width: Number(bitmap.width) || 0, height: Number(bitmap.height) || 0 } : null;
   }
 
@@ -531,4 +580,11 @@
 function publish(root, api) {
   root.RPGTranslatorOverlay = Object.assign(root.RPGTranslatorOverlay || {}, api);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
+}
+
+function loadDependency(root, path) {
+  const overlay = root.RPGTranslatorOverlay || {};
+  if (path === './replay-state' && overlay.ReplayState) return { ReplayState: overlay.ReplayState };
+  if (typeof require === 'function') return require(path);
+  return {};
 }
