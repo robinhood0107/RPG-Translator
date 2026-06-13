@@ -381,7 +381,11 @@
     overlaySprite.x = Math.floor(run.bounds.x);
     overlaySprite.y = Math.floor(run.bounds.y);
     overlaySprite.bitmap = overlayBitmap;
-    attachParentRunOverlay(run.parent, overlaySprite);
+    if (!attachParentRunOverlay(run.parent, overlaySprite)) {
+      restoreParentRunOriginals(run);
+      return false;
+    }
+    suppressParentRunOriginals(run);
     return true;
   }
 
@@ -505,6 +509,7 @@
     run.overlaySprite = null;
     run.overlayBitmap = null;
     detachOverlayFromParent(overlaySprite);
+    restoreParentRunOriginals(run);
     run.removeReason = reason || 'remove';
     return true;
   }
@@ -601,7 +606,11 @@
     }
     if (overlaySprite.bitmap !== overlayBitmap) overlaySprite.bitmap = overlayBitmap;
     copySpriteVisualState(sprite, overlaySprite);
-    attachOverlay(sprite, overlaySprite);
+    if (!attachOverlay(sprite, overlaySprite)) {
+      restoreSpriteOriginal(state);
+      return false;
+    }
+    suppressSpriteOriginal(state);
     return true;
   }
 
@@ -719,7 +728,7 @@
     if (!state || !state.overlaySprite || !state.sprite) return false;
     copySpriteVisualState(state.sprite, state.overlaySprite);
     state.overlaySprite.visible = state.sprite.visible !== false && isOpen(state.sprite);
-    state.overlaySprite.renderable = state.overlaySprite.visible && state.sprite.renderable !== false;
+    state.overlaySprite.renderable = state.overlaySprite.visible;
     return true;
   }
 
@@ -739,7 +748,45 @@
     state.overlaySprite = null;
     state.overlayBitmap = null;
     detachOverlayFromParent(overlaySprite);
+    restoreSpriteOriginal(state);
     state.removeReason = reason || 'remove';
+    return true;
+  }
+
+  function suppressParentRunOriginals(run) {
+    if (!run || !Array.isArray(run.group)) return false;
+    run.group.forEach((item) => {
+      if (item && item.state) suppressSpriteOriginal(item.state);
+    });
+    return true;
+  }
+
+  function restoreParentRunOriginals(run) {
+    if (!run || !Array.isArray(run.group)) return false;
+    run.group.forEach((item) => {
+      if (item && item.state) restoreSpriteOriginal(item.state);
+    });
+    return true;
+  }
+
+  function suppressSpriteOriginal(state) {
+    if (!state || !state.sprite) return false;
+    if (!state.originalSuppressed) {
+      state.restoreRenderableHadOwn = Object.prototype.hasOwnProperty.call(state.sprite, 'renderable');
+      state.restoreRenderable = state.sprite.renderable;
+      state.originalSuppressed = true;
+    }
+    state.sprite.renderable = false;
+    return true;
+  }
+
+  function restoreSpriteOriginal(state) {
+    if (!state || !state.sprite || !state.originalSuppressed) return false;
+    if (state.restoreRenderableHadOwn) state.sprite.renderable = state.restoreRenderable;
+    else delete state.sprite.renderable;
+    state.originalSuppressed = false;
+    state.restoreRenderable = undefined;
+    state.restoreRenderableHadOwn = false;
     return true;
   }
 
