@@ -362,7 +362,9 @@
     const translatedBounds = textBounds(windowInstance, entry.methodName, entry.args || [], entry.translatedText);
     const originalBounds = entry.bounds || textBounds(windowInstance, entry.methodName, entry.args || [], entry.sourceText);
     const dirtyRect = ReplayState.unionRect(originalBounds, translatedBounds);
-    const replayBefore = ReplayState.sortedOverlappingOps(state && state.renderOps, dirtyRect, entry.drawOrder);
+    const replay = ReplayState.partitionOverlappingOps(state && state.renderOps, dirtyRect, entry.drawOrder);
+    const replayBefore = replay.before;
+    const replayAfter = replay.after;
     recordWindowOverflow(translator, windowInstance, entry.methodName, entry.translatedText, entry.args || []);
     withTranslatedDraw(windowInstance, () => {
       const cleared = clearWindowTextRegion(windowInstance, entry.methodName, entry.args || [], dirtyRect);
@@ -379,15 +381,18 @@
         entry.args || [],
         () => original.call(windowInstance, entry.translatedText, ...(entry.args || [])),
       );
-      recordReplayTrace(translator, 'render.accepted', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared);
+      const replayedAfter = contents ? ReplayState.replayOps(contents, replayAfter, '__rpgTranslatorWindowReplayDepth') : 0;
+      recordReplayTrace(translator, 'render.accepted', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared, replayedAfter);
       return result;
     });
     entry.status = 'rendered';
     return true;
   }
 
-  function recordReplayTrace(translator, stage, entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared) {
+  function recordReplayTrace(translator, stage, entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared, replayedAfter) {
     if (!translator || typeof translator.recordDrawTrace !== 'function') return null;
+    const beforeCount = Number(replayed) || 0;
+    const afterCount = Number(replayedAfter) || 0;
     return translator.recordDrawTrace(stage, {
       adapter: 'window-text',
       methodName: entry.methodName,
@@ -400,10 +405,10 @@
       dirtyRect,
       originalBounds,
       translatedBounds,
-      replayBeforeCount: replayed,
-      replayAfterCount: 0,
-      clearMode: replayed > 0 ? 'replay' : cleared ? 'clear' : 'draw',
-      snapshotStatus: replayed > 0 ? 'render-op-replay' : 'clear-only',
+      replayBeforeCount: beforeCount,
+      replayAfterCount: afterCount,
+      clearMode: beforeCount > 0 || afterCount > 0 ? 'replay' : cleared ? 'clear' : 'draw',
+      snapshotStatus: beforeCount > 0 || afterCount > 0 ? 'render-op-replay' : 'clear-only',
       force: true,
     });
   }

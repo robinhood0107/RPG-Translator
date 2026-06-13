@@ -3683,6 +3683,75 @@ test('window text adapter defers hidden window cache hits until ready', () => {
   assert.equal(orchestrator.diagnostics().render_accepted, 1);
 });
 
+test('window text adapter replays later render ops after pending translated draws', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Hidden JP') return 'Hidden KO';
+      return null;
+    },
+  };
+  const diagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: { enabled: true, record_all: true },
+    },
+  });
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+    diagnostics,
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'ja', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.visible = false;
+      this.openness = 0;
+      this.contents = {
+        width: 120,
+        height: 40,
+        fillRect(x, y, width, height, color) {
+          calls.push(['fillRect', x, y, width, height, color]);
+        },
+        clearRect(x, y, width, height) {
+          calls.push(['clearRect', x, y, width, height]);
+        },
+      };
+    },
+  };
+  root.Window_Base.prototype.drawText = function drawText(text, x, y, width, align) {
+    calls.push(['drawText', text, x, y, width, align]);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    calls.push(['drawTextEx', text]);
+    return text.length;
+  };
+  root.Window_Base.prototype.update = function update() {
+    calls.push(['update']);
+  };
+
+  WindowTextAdapter.install(root, orchestrator);
+  const hiddenWindow = new root.Window_Base();
+  hiddenWindow.drawText('Hidden JP', 1, 2, 80, 'center');
+  hiddenWindow.contents.fillRect(40, 2, 30, 24, '#445566');
+
+  hiddenWindow.visible = true;
+  hiddenWindow.openness = 255;
+  hiddenWindow.update();
+
+  assert.deepEqual(calls, [
+    ['drawText', 'Hidden JP', 1, 2, 80, 'center'],
+    ['fillRect', 40, 2, 30, 24, '#445566'],
+    ['update'],
+    ['clearRect', 1, 2, 80, 24],
+    ['drawText', 'Hidden KO', 1, 2, 80, 'center'],
+    ['fillRect', 40, 2, 30, 24, '#445566'],
+  ]);
+  const trace = diagnostics.snapshot().drawTrace.events;
+  assert.ok(trace.some((event) => event.adapter === 'window-text' && event.replayAfterCount === 1));
+});
+
 test('window text adapter scales translated text to fit narrow draw slots and restores font size', () => {
   const index = {
     translate({ text }) {
@@ -6789,6 +6858,60 @@ test('bitmap text adapter replays earlier render ops before translated text', ()
     ['clearRect', 0, 0, 80, 24],
     ['fillRect', 0, 0, 80, 24, '#223344'],
     ['drawText', '라벨', 0, 0, 80, 24, 'left'],
+  ]);
+});
+
+test('bitmap text adapter flushes queued fragments before observed paint mutations', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Label') return '라벨';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 160;
+      this.height = 64;
+      this.fontSize = 20;
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['frame']);
+      },
+    },
+  };
+  root.Bitmap.prototype.textWidth = function textWidth(text) {
+    return String(text).length * 10;
+  };
+  root.Bitmap.prototype.fillRect = function fillRect(x, y, width, height, color) {
+    calls.push(['fillRect', x, y, width, height, color]);
+  };
+  root.Bitmap.prototype.clearRect = function clearRect(x, y, width, height) {
+    calls.push(['clearRect', x, y, width, height]);
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+  bitmap.drawText('Label', 0, 0, 80, 24, 'left');
+  bitmap.fillRect(40, 0, 30, 24, '#445566');
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(calls, [
+    ['drawText', 'Label', 0, 0, 80, 24, 'left'],
+    ['clearRect', 0, 0, 80, 24],
+    ['drawText', '라벨', 0, 0, 80, 24, 'left'],
+    ['fillRect', 40, 0, 30, 24, '#445566'],
+    ['frame'],
   ]);
 });
 
