@@ -163,12 +163,55 @@
   function installContainerLifecycle(ctor, translator, watched) {
     if (!ctor || !ctor.prototype) return false;
     let installed = false;
+    if (typeof ctor.prototype.addChild === 'function'
+        && ctor.prototype.addChild.__rpgTranslatorPixiLifecycle !== LIFECYCLE_TOKEN) {
+      const original = ctor.prototype.addChild;
+      ctor.prototype.addChild = function translatedAddChild(...children) {
+        const moving = children.filter((child) => child && child.parent && child.parent !== this);
+        moving.forEach((child) => { child.__rpgTranslatorPixiReparentBypass = true; });
+        let result;
+        try {
+          result = original.apply(this, children);
+        } finally {
+          moving.forEach((child) => { child.__rpgTranslatorPixiReparentBypass = false; });
+        }
+        children.forEach((child) => refreshReparentedTree(translator, child, watched));
+        sweepVisibility(translator, watched);
+        return result;
+      };
+      ctor.prototype.addChild.__rpgTranslatorOriginal = original;
+      ctor.prototype.addChild.__rpgTranslatorPixiLifecycle = LIFECYCLE_TOKEN;
+      installed = true;
+    }
+    if (typeof ctor.prototype.addChildAt === 'function'
+        && ctor.prototype.addChildAt.__rpgTranslatorPixiLifecycle !== LIFECYCLE_TOKEN) {
+      const original = ctor.prototype.addChildAt;
+      ctor.prototype.addChildAt = function translatedAddChildAt(child, ...rest) {
+        const moving = child && child.parent && child.parent !== this;
+        if (moving) child.__rpgTranslatorPixiReparentBypass = true;
+        let result;
+        try {
+          result = original.call(this, child, ...rest);
+        } finally {
+          if (moving) child.__rpgTranslatorPixiReparentBypass = false;
+        }
+        refreshReparentedTree(translator, child, watched);
+        sweepVisibility(translator, watched);
+        return result;
+      };
+      ctor.prototype.addChildAt.__rpgTranslatorOriginal = original;
+      ctor.prototype.addChildAt.__rpgTranslatorPixiLifecycle = LIFECYCLE_TOKEN;
+      installed = true;
+    }
     if (typeof ctor.prototype.removeChild === 'function'
         && ctor.prototype.removeChild.__rpgTranslatorPixiLifecycle !== LIFECYCLE_TOKEN) {
       const original = ctor.prototype.removeChild;
       ctor.prototype.removeChild = function translatedRemoveChild(...children) {
         const result = original.apply(this, children);
-        children.forEach((child) => retireTree(translator, child, watched, 'pixi-text-removed'));
+        children.forEach((child) => {
+          if (!child || child.__rpgTranslatorPixiReparentBypass) return;
+          retireTree(translator, child, watched, 'pixi-text-removed');
+        });
         return result;
       };
       ctor.prototype.removeChild.__rpgTranslatorOriginal = original;
@@ -181,7 +224,10 @@
       ctor.prototype.removeChildAt = function translatedRemoveChildAt(index, ...rest) {
         const child = this && Array.isArray(this.children) ? this.children[index] : null;
         const result = original.call(this, index, ...rest);
-        retireTree(translator, child || result, watched, 'pixi-text-removed');
+        const removed = child || result;
+        if (!removed || !removed.__rpgTranslatorPixiReparentBypass) {
+          retireTree(translator, removed, watched, 'pixi-text-removed');
+        }
         return result;
       };
       ctor.prototype.removeChildAt.__rpgTranslatorOriginal = original;
@@ -195,7 +241,10 @@
         const removed = snapshotRemovedChildren(this, beginIndex, endIndex);
         const result = original.call(this, beginIndex, endIndex, ...rest);
         const children = Array.isArray(result) && result.length ? result : removed;
-        children.forEach((child) => retireTree(translator, child, watched, 'pixi-text-removed'));
+        children.forEach((child) => {
+          if (!child || child.__rpgTranslatorPixiReparentBypass) return;
+          retireTree(translator, child, watched, 'pixi-text-removed');
+        });
         return result;
       };
       ctor.prototype.removeChildren.__rpgTranslatorOriginal = original;
@@ -214,6 +263,22 @@
       installed = true;
     }
     return installed;
+  }
+
+  function refreshReparentedTree(translator, surface, watched) {
+    if (!surface) return false;
+    let refreshed = false;
+    const state = getState(surface);
+    if (state && state.itemId) {
+      watched.add(surface);
+      refreshed = true;
+    }
+    const children = Array.isArray(surface.children) ? surface.children.slice() : [];
+    children.forEach((child) => {
+      if (refreshReparentedTree(translator, child, watched)) refreshed = true;
+    });
+    if (refreshed) sweepVisibility(translator, watched);
+    return refreshed;
   }
 
   function installFrameSweep(scope, translator, watched) {
