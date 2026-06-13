@@ -93,6 +93,19 @@
     if (diagnosticsEnabled !== undefined && typeof diagnosticsEnabled !== 'boolean') {
       throw new Error('overlay config diagnostics_enabled must be a boolean when present');
     }
+    for (const field of [
+      ['draw_capture_trace', 'drawCaptureTrace'],
+      ['performance_profiler', 'performanceProfiler'],
+      ['layout_overflow', 'layoutOverflow'],
+      ['replay_failure', 'replayFailure'],
+      ['ownership_conflict', 'ownershipConflict'],
+      ['unsupported_image_text', 'unsupportedImageText'],
+    ]) {
+      const value = getObjectValue(config, field[0], field[1]);
+      if (value !== undefined && !isPlainObject(value)) {
+        throw new Error(`overlay config ${field[0]} must be an object when present`);
+      }
+    }
     const startupToastEnabled = getObjectValue(config, 'startup_toast_enabled', 'startupToastEnabled');
     if (startupToastEnabled !== undefined && typeof startupToastEnabled !== 'boolean') {
       throw new Error('overlay config startup_toast_enabled must be a boolean when present');
@@ -111,6 +124,10 @@
 
   function isNonEmptyString(value) {
     return typeof value === 'string' && value.trim().length > 0;
+  }
+
+  function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
   }
 
   function joinUrl(baseUrl, file) {

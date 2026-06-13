@@ -386,6 +386,16 @@ test('cache loader rejects malformed static bundle metadata before cache file fe
       config: Object.assign({}, validConfig, { diagnostics_enabled: 'yes' }),
       error: /overlay config diagnostics_enabled must be a boolean when present/,
     },
+    {
+      manifest: validManifest,
+      config: Object.assign({}, validConfig, { draw_capture_trace: true }),
+      error: /overlay config draw_capture_trace must be an object when present/,
+    },
+    {
+      manifest: validManifest,
+      config: Object.assign({}, validConfig, { performance_profiler: true }),
+      error: /overlay config performance_profiler must be an object when present/,
+    },
   ];
 
   for (const testCase of cases) {
@@ -8144,6 +8154,24 @@ test('boot rejects malformed runtime manifest and config before installing adapt
         records: [],
       },
       error: /runtime config diagnostics_enabled must be a boolean when present/,
+    },
+    {
+      name: 'draw capture trace config',
+      bundle: {
+        manifest: validManifest,
+        config: Object.assign({}, validConfig, { draw_capture_trace: true }),
+        records: [],
+      },
+      error: /runtime config draw_capture_trace must be an object when present/,
+    },
+    {
+      name: 'performance profiler config',
+      bundle: {
+        manifest: validManifest,
+        config: Object.assign({}, validConfig, { performance_profiler: true }),
+        records: [],
+      },
+      error: /runtime config performance_profiler must be an object when present/,
     },
     {
       name: 'startup toast text',
