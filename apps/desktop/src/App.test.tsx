@@ -2026,6 +2026,9 @@ test("diagnostics panel shows coverage audit counts and samples", async () => {
         runtime_imported_translatable_count: 4,
         unsupported_image_text_count: 1,
         layout_overflow_count: 2,
+        stale_render_count: 3,
+        ownership_conflict_count: 5,
+        replay_failure_count: 7,
         coverage_samples: [
           {
             category: "unscanned-static-accepted",
@@ -2058,6 +2061,9 @@ test("diagnostics panel shows coverage audit counts and samples", async () => {
   expect(screen.getByText("Runtime candidates imported")).toBeInTheDocument();
   expect(screen.getByText("Unsupported image text")).toBeInTheDocument();
   expect(screen.getByText("Layout overflow")).toBeInTheDocument();
+  expect(screen.getByText("Stale renders")).toBeInTheDocument();
+  expect(screen.getByText("Ownership conflicts")).toBeInTheDocument();
+  expect(screen.getByText("Replay failures")).toBeInTheDocument();
   expect(screen.getByText(/Do you have something you need/)).toBeInTheDocument();
 });
 

@@ -5430,6 +5430,12 @@ function DiagnosticsPanel({
         <strong>{diagnostics?.unsupported_image_text_count?.toLocaleString() ?? t.noValue}</strong>
         <span>Layout overflow</span>
         <strong>{diagnostics?.layout_overflow_count?.toLocaleString() ?? t.noValue}</strong>
+        <span>Stale renders</span>
+        <strong>{diagnostics?.stale_render_count?.toLocaleString() ?? t.noValue}</strong>
+        <span>Ownership conflicts</span>
+        <strong>{diagnostics?.ownership_conflict_count?.toLocaleString() ?? t.noValue}</strong>
+        <span>Replay failures</span>
+        <strong>{diagnostics?.replay_failure_count?.toLocaleString() ?? t.noValue}</strong>
         <span>Latest job</span>
         <strong>{diagnostics?.latest_job?.status ?? t.noValue}</strong>
       </div>

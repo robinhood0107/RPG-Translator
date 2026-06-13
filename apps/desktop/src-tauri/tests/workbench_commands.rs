@@ -702,7 +702,19 @@ fn diagnostics_imports_runtime_misses_as_translatable_candidates() {
                 .join("rpg-translator")
                 .join("logs")
                 .join("runtime-misses.jsonl"),
-            r#"{"text":"Quest","normalized_text":"Quest","control_code_signature":"","cache_key":"runtime-menu-quest","source_language":"en","target_language":"ko","adapter":"window-text","kind":"drawText","methodName":"drawText","slotKey":"menu-command-quest","visible":true,"screenState":"visible","owner":"window-text:1","sceneName":"Scene_Menu","mapId":1,"eventId":2,"reason":"cache-miss","bbox":{"x":10,"y":20,"width":80,"height":24}}"#,
+            concat!(
+                r#"{"text":"Quest","normalized_text":"Quest","control_code_signature":"","cache_key":"runtime-menu-quest","source_language":"en","target_language":"ko","adapter":"window-text","kind":"drawText","methodName":"drawText","slotKey":"menu-command-quest","visible":true,"screenState":"visible","owner":"window-text:1","sceneName":"Scene_Menu","mapId":1,"eventId":2,"reason":"cache-miss","bbox":{"x":10,"y":20,"width":80,"height":24}}"#,
+                "\n",
+                r#"{"text":"Quest overflow","source_language":"en","target_language":"ko","adapter":"window-text","reason":"layout-overflow"}"#,
+                "\n",
+                r#"{"text":"Old title","source_language":"en","target_language":"ko","adapter":"pixi-text","reason":"stale-render"}"#,
+                "\n",
+                r#"{"text":"Duplicated glyph","source_language":"en","target_language":"ko","adapter":"bitmap-text","reason":"ownership-conflict"}"#,
+                "\n",
+                r#"{"text":"Replay failed","source_language":"en","target_language":"ko","adapter":"window-text","reason":"replay-failure"}"#,
+                "\n",
+                r#"{"text":"Image title","source_language":"en","target_language":"ko","adapter":"image","reason":"unsupported-image-text","category":"unsupported-image-text"}"#,
+            ),
         );
 
         let diagnostics = diagnostics::diagnostics_summary(DiagnosticsRequest {
@@ -715,7 +727,11 @@ fn diagnostics_imports_runtime_misses_as_translatable_candidates() {
 
         assert_eq!(diagnostics.runtime_candidate_count, 1);
         assert_eq!(diagnostics.runtime_imported_translatable_count, 1);
-        assert_eq!(diagnostics.unsupported_image_text_count, 0);
+        assert_eq!(diagnostics.unsupported_image_text_count, 1);
+        assert_eq!(diagnostics.layout_overflow_count, 1);
+        assert_eq!(diagnostics.stale_render_count, 1);
+        assert_eq!(diagnostics.ownership_conflict_count, 1);
+        assert_eq!(diagnostics.replay_failure_count, 1);
         assert!(diagnostics.dashboard.translatable_source_text_count >= 1);
         assert!(
             diagnostics.coverage_samples.iter().any(|sample| {
