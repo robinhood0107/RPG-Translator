@@ -7198,6 +7198,72 @@ test('pixi text adapter reports detached screen state for unparented text', () =
   assert.equal(active.priority, 250);
 });
 
+test('pixi text adapter rejects stale setter render and releases ownership', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Pixi JP') return 'Pixi KO';
+      return null;
+    },
+  };
+  const baseOrchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const staleTranslator = Object.create(baseOrchestrator);
+  staleTranslator.observeRecord = (request) => {
+    const command = baseOrchestrator.observeRecord(request);
+    baseOrchestrator.markSurfaceChanged(request.surface);
+    return command;
+  };
+  staleTranslator.acceptRender = (...args) => baseOrchestrator.acceptRender(...args);
+  staleTranslator.claimSurface = (...args) => baseOrchestrator.claimSurface(...args);
+  staleTranslator.claimText = (...args) => baseOrchestrator.claimText(...args);
+  staleTranslator.releaseSurface = (...args) => baseOrchestrator.releaseSurface(...args);
+  staleTranslator.releaseTextClaim = (...args) => baseOrchestrator.releaseTextClaim(...args);
+  staleTranslator.archiveItem = (...args) => baseOrchestrator.archiveItem(...args);
+  staleTranslator.markSurfaceChanged = (...args) => baseOrchestrator.markSurfaceChanged(...args);
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+    },
+    PIXI: {},
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+    this.visible = true;
+    this.renderable = true;
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, staleTranslator), true);
+  const container = new root.PIXI.Container();
+  const pixiText = new root.PIXI.Text('');
+  pixiText.parent = container;
+  container.children.push(pixiText);
+
+  pixiText.text = 'Pixi JP';
+
+  assert.equal(pixiText.text, 'Pixi JP');
+  assert.equal(pixiText._rpgTranslatorPixiItemId, null);
+  assert.equal(baseOrchestrator.diagnostics().active_items, 0);
+  assert.equal(baseOrchestrator.diagnostics().archived_items, 1);
+  assert.ok(baseOrchestrator.diagnostics().render_rejected >= 1);
+  assert.equal(baseOrchestrator.claimSurface(pixiText, 'window-text'), true);
+  assert.equal(baseOrchestrator.claimText(`pixi:${pixiText._rpgTranslatorPixiObjectId}:text`, 'window-text:slot'), true);
+});
+
 test('pixi text adapter leaves native text when another owner claimed the surface', () => {
   const index = {
     translate({ text }) {
@@ -7235,6 +7301,72 @@ test('pixi text adapter leaves native text when another owner claimed the surfac
 
   assert.equal(pixiText.text, 'Pixi JP');
   assert.equal(orchestrator.diagnostics().active_items, 0);
+});
+
+test('pixi bitmap text adapter follows setter lifecycle and removal retirement', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Bitmap JP') return 'Bitmap KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      config: { textScaleOthers: 50 },
+    },
+    PIXI: {},
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+    this.visible = true;
+    this.renderable = true;
+  };
+  root.PIXI.Container.prototype.removeChildren = function removeChildren(begin = 0, end = this.children.length) {
+    const removed = this.children.splice(begin, end - begin);
+    removed.forEach((child) => {
+      child.parent = null;
+    });
+    return removed;
+  };
+  root.PIXI.BitmapText = function PixiBitmapText(text) {
+    this._text = text;
+    this.fontSize = 22;
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.BitmapText.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const container = new root.PIXI.Container();
+  const bitmapText = new root.PIXI.BitmapText('');
+  bitmapText.parent = container;
+  container.children.push(bitmapText);
+
+  bitmapText.text = 'Bitmap JP';
+
+  assert.equal(bitmapText.text, 'Bitmap KO');
+  assert.equal(bitmapText.fontSize, 11);
+  assert.equal(bitmapText._rpgTranslatorPixiVisible, true);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  assert.deepEqual(container.removeChildren(0, 1), [bitmapText]);
+
+  assert.equal(bitmapText._rpgTranslatorPixiItemId, null);
+  assert.equal(bitmapText.fontSize, 22);
+  assert.equal(orchestrator.diagnostics().active_items, 0);
+  assert.equal(orchestrator.diagnostics().archived_items, 1);
 });
 
 test('pixi text adapter retires removeChildAt removeChildren and destroyed text objects', () => {

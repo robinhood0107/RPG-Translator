@@ -136,7 +136,10 @@
           : null;
 
     if (command && command.status === 'hit' && translator && typeof translator.acceptRender === 'function') {
-      if (!translator.acceptRender(command, surface, text)) return text;
+      if (!translator.acceptRender(command, surface, text)) {
+        retireCurrentItem(translator, surface, state, 'pixi-render-stale', true);
+        return text;
+      }
     }
     const output = translated || text;
     state.renderedText = String(output);
