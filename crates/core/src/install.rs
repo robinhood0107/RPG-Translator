@@ -17,44 +17,44 @@ const INSTALL_MANIFEST_FILE: &str = "install-manifest.json";
 const PLUGINS_BACKUP_FILE: &str = "plugins.js.backup";
 const INSTALLED_FILE_BACKUP_DIRECTORY: &str = "installed-file-backups";
 pub(crate) const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
-    "text-codec.js",
-    "runtime-miss-logger.js",
-    "lookup-index.js",
-    "render-guard.js",
-    "wrapping.js",
-    "runtime-diagnostics.js",
-    "replay-state.js",
-    "orchestrator.js",
-    "adapter-contract.js",
-    "foresight-scanner.js",
-    "cache-loader.js",
-    "message-adapter.js",
-    "window-text-adapter.js",
-    "bitmap-text-adapter.js",
-    "sprite-text-adapter.js",
-    "pixi-text-adapter.js",
-    "startup-toast.js",
-    "boot.js",
+    "runtime/text-codec.js",
+    "runtime/runtime-miss-logger.js",
+    "runtime/lookup-index.js",
+    "runtime/render-guard.js",
+    "runtime/wrapping.js",
+    "runtime/runtime-diagnostics.js",
+    "runtime/replay-state.js",
+    "runtime/text-orchestrator/orchestrator.js",
+    "runtime/text-orchestrator/adapter-contract.js",
+    "runtime/foresight-scanner.js",
+    "runtime/cache-loader.js",
+    "adapters/game-message/message-adapter.js",
+    "adapters/window-text/window-text-adapter.js",
+    "adapters/bitmap-text/bitmap-text-adapter.js",
+    "adapters/sprite-text/sprite-text-adapter.js",
+    "adapters/pixi-text/pixi-text-adapter.js",
+    "runtime/startup-toast.js",
+    "runtime/boot.js",
 ];
 pub(crate) const RUNTIME_SUPPORT_FILES: &[&str] = &[
-    "text-codec.js",
-    "runtime-miss-logger.js",
-    "lookup-index.js",
-    "render-guard.js",
-    "wrapping.js",
-    "runtime-diagnostics.js",
-    "replay-state.js",
-    "orchestrator.js",
-    "adapter-contract.js",
-    "foresight-scanner.js",
-    "cache-loader.js",
-    "message-adapter.js",
-    "window-text-adapter.js",
-    "bitmap-text-adapter.js",
-    "sprite-text-adapter.js",
-    "pixi-text-adapter.js",
-    "startup-toast.js",
-    "boot.js",
+    "runtime/text-codec.js",
+    "runtime/runtime-miss-logger.js",
+    "runtime/lookup-index.js",
+    "runtime/render-guard.js",
+    "runtime/wrapping.js",
+    "runtime/runtime-diagnostics.js",
+    "runtime/replay-state.js",
+    "runtime/text-orchestrator/orchestrator.js",
+    "runtime/text-orchestrator/adapter-contract.js",
+    "runtime/foresight-scanner.js",
+    "runtime/cache-loader.js",
+    "adapters/game-message/message-adapter.js",
+    "adapters/window-text/window-text-adapter.js",
+    "adapters/bitmap-text/bitmap-text-adapter.js",
+    "adapters/sprite-text/sprite-text-adapter.js",
+    "adapters/pixi-text/pixi-text-adapter.js",
+    "runtime/startup-toast.js",
+    "runtime/boot.js",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +302,11 @@ impl RollbackManager {
         verify_file_hash(&plugins_backup_path, &manifest.plugins_backup_sha256)?;
         verify_installed_files(&game_root, &manifest.installed_files)?;
         verify_previous_file_backups(&game_root, &manifest.installed_files)?;
+        let support_dir = options
+            .manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| Error::invalid_input("install manifest has no parent directory"))?;
         fs::copy(&plugins_backup_path, &plugins_file).map_err(|error| {
             Error::invalid_input(format!(
                 "failed to restore plugins.js from {} to {}: {error}",
@@ -338,6 +343,7 @@ impl RollbackManager {
                 fs::remove_file(&path).map_err(|error| {
                     Error::invalid_input(format!("failed to remove {}: {error}", path.display()))
                 })?;
+                remove_empty_parents_until(path.parent(), &support_dir);
                 removed_files.push(path);
             }
         }
@@ -358,9 +364,7 @@ impl RollbackManager {
             })?;
             removed_files.push(plugins_backup_path);
         }
-        if let Some(parent) = options.manifest_path.parent() {
-            let _ = fs::remove_dir(parent);
-        }
+        let _ = fs::remove_dir(&support_dir);
 
         if let (Some(db), Some(install_id)) = (db, install_id) {
             db.update_install_status(install_id, "rolled-back")?;
@@ -574,6 +578,18 @@ fn verify_file_hash(path: &Path, expected: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn remove_empty_parents_until(mut current: Option<&Path>, stop_at: &Path) {
+    while let Some(parent) = current {
+        if parent == stop_at {
+            break;
+        }
+        if !parent.starts_with(stop_at) || fs::remove_dir(parent).is_err() {
+            break;
+        }
+        current = parent.parent();
+    }
 }
 
 fn ensure_within(root: &Path, path: &Path) -> Result<()> {

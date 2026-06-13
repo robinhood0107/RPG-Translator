@@ -1,5 +1,5 @@
 (function attach(root) {
-  const { ReplayState } = loadDependency(root, './replay-state');
+  const { ReplayState } = loadDependency(root, '../../runtime/replay-state');
   const STATE_KEY = '__rpgTranslatorWindowTextState';
   const INSTALL_TOKEN = 'rpg-translator-window-text-v2';
   const LIFECYCLE_TOKEN = 'rpg-translator-window-lifecycle-v2';
@@ -624,7 +624,7 @@ function publish(root, api) {
 
 function loadDependency(root, path) {
   const overlay = root.RPGTranslatorOverlay || {};
-  if (path === './replay-state' && overlay.ReplayState) return { ReplayState: overlay.ReplayState };
+  if (path === '../../runtime/replay-state' && overlay.ReplayState) return { ReplayState: overlay.ReplayState };
   if (typeof require === 'function') return require(path);
   return {};
 }

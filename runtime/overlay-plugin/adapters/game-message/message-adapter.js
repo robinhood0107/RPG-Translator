@@ -1,5 +1,5 @@
 (function attach(root) {
-  const { MessageWrapper } = loadDependency(root, './wrapping');
+  const { MessageWrapper } = loadDependency(root, '../../runtime/wrapping');
   const STATE_KEY = '__rpgTranslatorMessageAdapterState';
   const INSTALL_TOKEN = 'rpg-translator-message-v2';
   const CLEAR_TOKEN = 'rpg-translator-message-clear-v1';

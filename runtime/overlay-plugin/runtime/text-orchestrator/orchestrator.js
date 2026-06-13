@@ -1,5 +1,5 @@
 (function attach(root) {
-  const { RenderGuard } = loadDependency(root, './render-guard');
+  const { RenderGuard } = loadDependency(root, '../render-guard');
   const DEFAULT_EVENT_LIMIT = 128;
   const MAX_EVENT_LIMIT = 512;
   const DEFAULT_ITEM_HISTORY_LIMIT = 24;

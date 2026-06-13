@@ -6,23 +6,24 @@
   </head>
   <body>
     <div id="status">running</div>
-    <script src="../text-codec.js"></script>
-    <script src="../runtime-miss-logger.js"></script>
-    <script src="../lookup-index.js"></script>
-    <script src="../render-guard.js"></script>
-    <script src="../wrapping.js"></script>
-    <script src="../runtime-diagnostics.js"></script>
-    <script src="../orchestrator.js"></script>
-    <script src="../adapter-contract.js"></script>
-    <script src="../foresight-scanner.js"></script>
-    <script src="../cache-loader.js"></script>
-    <script src="../message-adapter.js"></script>
-    <script src="../window-text-adapter.js"></script>
-    <script src="../bitmap-text-adapter.js"></script>
-    <script src="../sprite-text-adapter.js"></script>
-    <script src="../pixi-text-adapter.js"></script>
-    <script src="../startup-toast.js"></script>
-    <script src="../boot.js"></script>
+    <script src="../runtime/text-codec.js"></script>
+    <script src="../runtime/runtime-miss-logger.js"></script>
+    <script src="../runtime/lookup-index.js"></script>
+    <script src="../runtime/render-guard.js"></script>
+    <script src="../runtime/wrapping.js"></script>
+    <script src="../runtime/runtime-diagnostics.js"></script>
+    <script src="../runtime/replay-state.js"></script>
+    <script src="../runtime/text-orchestrator/orchestrator.js"></script>
+    <script src="../runtime/text-orchestrator/adapter-contract.js"></script>
+    <script src="../runtime/foresight-scanner.js"></script>
+    <script src="../runtime/cache-loader.js"></script>
+    <script src="../adapters/game-message/message-adapter.js"></script>
+    <script src="../adapters/window-text/window-text-adapter.js"></script>
+    <script src="../adapters/bitmap-text/bitmap-text-adapter.js"></script>
+    <script src="../adapters/sprite-text/sprite-text-adapter.js"></script>
+    <script src="../adapters/pixi-text/pixi-text-adapter.js"></script>
+    <script src="../runtime/startup-toast.js"></script>
+    <script src="../runtime/boot.js"></script>
     <script>
       (async () => {
         const root = window;

@@ -4,24 +4,24 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { Boot } = require('../boot');
-const { BitmapTextAdapter } = require('../bitmap-text-adapter');
-const { CacheKeyBuilder, LookupIndex } = require('../lookup-index');
-const { CacheLoader } = require('../cache-loader');
-const { MessageAdapter } = require('../message-adapter');
-const { TextOrchestrator } = require('../orchestrator');
-const { createAdapterContract, isAdapterContractError } = require('../adapter-contract');
-const { PixiTextAdapter } = require('../pixi-text-adapter');
-const { RenderGuard } = require('../render-guard');
+const { Boot } = require('../runtime/boot');
+const { BitmapTextAdapter } = require('../adapters/bitmap-text/bitmap-text-adapter');
+const { CacheKeyBuilder, LookupIndex } = require('../runtime/lookup-index');
+const { CacheLoader } = require('../runtime/cache-loader');
+const { MessageAdapter } = require('../adapters/game-message/message-adapter');
+const { TextOrchestrator } = require('../runtime/text-orchestrator/orchestrator');
+const { createAdapterContract, isAdapterContractError } = require('../runtime/text-orchestrator/adapter-contract');
+const { PixiTextAdapter } = require('../adapters/pixi-text/pixi-text-adapter');
+const { RenderGuard } = require('../runtime/render-guard');
 const { RuntimeEntry } = require('../RPGTranslator');
-const { RuntimeDiagnostics } = require('../runtime-diagnostics');
-const { RuntimeMissLogger } = require('../runtime-miss-logger');
-const { SpriteTextAdapter } = require('../sprite-text-adapter');
-const { StartupToast } = require('../startup-toast');
-const { TextCodec } = require('../text-codec');
-const { MessageWrapper } = require('../wrapping');
-const { WindowTextAdapter } = require('../window-text-adapter');
-const { ForesightScanner } = require('../foresight-scanner');
+const { RuntimeDiagnostics } = require('../runtime/runtime-diagnostics');
+const { RuntimeMissLogger } = require('../runtime/runtime-miss-logger');
+const { SpriteTextAdapter } = require('../adapters/sprite-text/sprite-text-adapter');
+const { StartupToast } = require('../runtime/startup-toast');
+const { TextCodec } = require('../runtime/text-codec');
+const { MessageWrapper } = require('../runtime/wrapping');
+const { WindowTextAdapter } = require('../adapters/window-text/window-text-adapter');
+const { ForesightScanner } = require('../runtime/foresight-scanner');
 
 test('text codec follows shared Rust/runtime vectors', () => {
   const vectorsPath = path.join(__dirname, '..', 'test', 'fixtures', 'text-codec-vectors.json');
@@ -8050,24 +8050,24 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
   });
 
   assert.deepEqual(loaded, [
-    `${baseUrl}text-codec.js`,
-    `${baseUrl}runtime-miss-logger.js`,
-    `${baseUrl}lookup-index.js`,
-    `${baseUrl}render-guard.js`,
-    `${baseUrl}wrapping.js`,
-    `${baseUrl}runtime-diagnostics.js`,
-    `${baseUrl}replay-state.js`,
-    `${baseUrl}orchestrator.js`,
-    `${baseUrl}adapter-contract.js`,
-    `${baseUrl}foresight-scanner.js`,
-    `${baseUrl}cache-loader.js`,
-    `${baseUrl}message-adapter.js`,
-    `${baseUrl}window-text-adapter.js`,
-    `${baseUrl}bitmap-text-adapter.js`,
-    `${baseUrl}sprite-text-adapter.js`,
-    `${baseUrl}pixi-text-adapter.js`,
-    `${baseUrl}startup-toast.js`,
-    `${baseUrl}boot.js`,
+    `${baseUrl}runtime/text-codec.js`,
+    `${baseUrl}runtime/runtime-miss-logger.js`,
+    `${baseUrl}runtime/lookup-index.js`,
+    `${baseUrl}runtime/render-guard.js`,
+    `${baseUrl}runtime/wrapping.js`,
+    `${baseUrl}runtime/runtime-diagnostics.js`,
+    `${baseUrl}runtime/replay-state.js`,
+    `${baseUrl}runtime/text-orchestrator/orchestrator.js`,
+    `${baseUrl}runtime/text-orchestrator/adapter-contract.js`,
+    `${baseUrl}runtime/foresight-scanner.js`,
+    `${baseUrl}runtime/cache-loader.js`,
+    `${baseUrl}adapters/game-message/message-adapter.js`,
+    `${baseUrl}adapters/window-text/window-text-adapter.js`,
+    `${baseUrl}adapters/bitmap-text/bitmap-text-adapter.js`,
+    `${baseUrl}adapters/sprite-text/sprite-text-adapter.js`,
+    `${baseUrl}adapters/pixi-text/pixi-text-adapter.js`,
+    `${baseUrl}runtime/startup-toast.js`,
+    `${baseUrl}runtime/boot.js`,
     ['boot', baseUrl, 'mz'],
   ]);
   assert.equal(root.bootOptions.baseUrl, baseUrl);
@@ -8084,11 +8084,24 @@ test('runtime source files do not contain provider or launcher surfaces', () => 
     'precacher',
     'diagnostics window',
   ];
-  for (const entry of fs.readdirSync(path.join(__dirname, '..'))) {
-    if (!entry.endsWith('.js')) continue;
-    const content = fs.readFileSync(path.join(__dirname, '..', entry), 'utf8');
+  for (const filePath of runtimeSourceFiles(path.join(__dirname, '..'))) {
+    const content = fs.readFileSync(filePath, 'utf8');
     for (const word of banned) {
-      assert.equal(content.includes(word), false, `${entry} contains banned surface ${word}`);
+      assert.equal(content.includes(word), false, `${path.relative(path.join(__dirname, '..'), filePath)} contains banned surface ${word}`);
     }
   }
 });
+
+function runtimeSourceFiles(rootPath) {
+  const entries = [];
+  for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+    if (entry.name === 'tests' || entry.name === 'test') continue;
+    const entryPath = path.join(rootPath, entry.name);
+    if (entry.isDirectory()) {
+      entries.push(...runtimeSourceFiles(entryPath));
+    } else if (entry.name.endsWith('.js')) {
+      entries.push(entryPath);
+    }
+  }
+  return entries.sort();
+}
