@@ -66,34 +66,40 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
     let report = Installer::install(&install_options(game.clone(), export))?;
 
     assert!(game.join("js/plugins/RPGTranslator.js").is_file());
-    assert!(game.join("js/plugins/rpg-translator/boot.js").is_file());
     assert!(
-        game.join("js/plugins/rpg-translator/orchestrator.js")
+        game.join("js/plugins/rpg-translator/runtime/boot.js")
             .is_file()
     );
     assert!(
-        game.join("js/plugins/rpg-translator/foresight-scanner.js")
-            .is_file()
-    );
-    assert!(game.join("js/plugins/rpg-translator/wrapping.js").is_file());
-    assert!(
-        game.join("js/plugins/rpg-translator/bitmap-text-adapter.js")
+        game.join("js/plugins/rpg-translator/runtime/text-orchestrator/orchestrator.js")
             .is_file()
     );
     assert!(
-        game.join("js/plugins/rpg-translator/sprite-text-adapter.js")
+        game.join("js/plugins/rpg-translator/runtime/foresight-scanner.js")
             .is_file()
     );
     assert!(
-        game.join("js/plugins/rpg-translator/pixi-text-adapter.js")
+        game.join("js/plugins/rpg-translator/runtime/wrapping.js")
             .is_file()
     );
     assert!(
-        game.join("js/plugins/rpg-translator/adapter-contract.js")
+        game.join("js/plugins/rpg-translator/adapters/bitmap-text/bitmap-text-adapter.js")
             .is_file()
     );
     assert!(
-        game.join("js/plugins/rpg-translator/replay-state.js")
+        game.join("js/plugins/rpg-translator/adapters/sprite-text/sprite-text-adapter.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/adapters/pixi-text/pixi-text-adapter.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/runtime/text-orchestrator/adapter-contract.js")
+            .is_file()
+    );
+    assert!(
+        game.join("js/plugins/rpg-translator/runtime/replay-state.js")
             .is_file()
     );
     assert!(
@@ -118,24 +124,24 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
     assert_eq!(
         manifest["runtime_script_load_order"],
         serde_json::json!([
-            "text-codec.js",
-            "runtime-miss-logger.js",
-            "lookup-index.js",
-            "render-guard.js",
-            "wrapping.js",
-            "runtime-diagnostics.js",
-            "replay-state.js",
-            "orchestrator.js",
-            "adapter-contract.js",
-            "foresight-scanner.js",
-            "cache-loader.js",
-            "message-adapter.js",
-            "window-text-adapter.js",
-            "bitmap-text-adapter.js",
-            "sprite-text-adapter.js",
-            "pixi-text-adapter.js",
-            "startup-toast.js",
-            "boot.js"
+            "runtime/text-codec.js",
+            "runtime/runtime-miss-logger.js",
+            "runtime/lookup-index.js",
+            "runtime/render-guard.js",
+            "runtime/wrapping.js",
+            "runtime/runtime-diagnostics.js",
+            "runtime/replay-state.js",
+            "runtime/text-orchestrator/orchestrator.js",
+            "runtime/text-orchestrator/adapter-contract.js",
+            "runtime/foresight-scanner.js",
+            "runtime/cache-loader.js",
+            "adapters/game-message/message-adapter.js",
+            "adapters/window-text/window-text-adapter.js",
+            "adapters/bitmap-text/bitmap-text-adapter.js",
+            "adapters/sprite-text/sprite-text-adapter.js",
+            "adapters/pixi-text/pixi-text-adapter.js",
+            "runtime/startup-toast.js",
+            "runtime/boot.js"
         ])
     );
     assert_eq!(
@@ -166,7 +172,11 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
         original_plugins
     );
     assert!(!game.join("js/plugins/RPGTranslator.js").exists());
-    assert!(!game.join("js/plugins/rpg-translator/boot.js").exists());
+    assert!(
+        !game
+            .join("js/plugins/rpg-translator/runtime/boot.js")
+            .exists()
+    );
     assert!(!game.join("js/plugins/rpg-translator").exists());
     assert!(
         rollback
@@ -200,8 +210,8 @@ fn reinstall_rollback_restores_previous_overlay_state_byte_for_byte() -> Result<
     let cache_before_reinstall =
         fs::read_to_string(game.join("js/plugins/rpg-translator/cache.jsonl"))
             .expect("read installed cache");
-    let boot_before_reinstall =
-        fs::read(game.join("js/plugins/rpg-translator/boot.js")).expect("read installed boot");
+    let boot_before_reinstall = fs::read(game.join("js/plugins/rpg-translator/runtime/boot.js"))
+        .expect("read installed boot");
 
     let reinstall_report = Installer::install(&install_options(game.clone(), export2))?;
     let reinstall_manifest: Value = serde_json::from_str(
@@ -231,11 +241,15 @@ fn reinstall_rollback_restores_previous_overlay_state_byte_for_byte() -> Result<
         cache_before_reinstall
     );
     assert_eq!(
-        fs::read(game.join("js/plugins/rpg-translator/boot.js")).expect("read restored boot"),
+        fs::read(game.join("js/plugins/rpg-translator/runtime/boot.js"))
+            .expect("read restored boot"),
         boot_before_reinstall
     );
     assert!(game.join("js/plugins/RPGTranslator.js").exists());
-    assert!(game.join("js/plugins/rpg-translator/boot.js").exists());
+    assert!(
+        game.join("js/plugins/rpg-translator/runtime/boot.js")
+            .exists()
+    );
 
     Ok(())
 }
@@ -289,7 +303,7 @@ fn phase_6_7_completion_matrix_locks_export_install_and_rollback_evidence() -> R
         installed[1]["path"]
             .as_str()
             .expect("text codec path")
-            .ends_with("text-codec.js")
+            .ends_with("runtime/text-codec.js")
     );
     assert!(
         installed[19]["path"]
@@ -436,7 +450,7 @@ fn rollback_rejects_modified_installed_files_before_mutating_game() -> Result<()
     make_export_bundle(&export);
 
     let report = Installer::install(&install_options(game.clone(), export))?;
-    let installed_boot = game.join("js/plugins/rpg-translator/boot.js");
+    let installed_boot = game.join("js/plugins/rpg-translator/runtime/boot.js");
     write_text(&installed_boot, "tampered");
 
     let error = RollbackManager::rollback(&RollbackOptions {
@@ -543,23 +557,23 @@ fn installer_rejects_missing_runtime_support_file_before_mutating_game() {
     make_export_bundle(&export);
     for file in [
         "RPGTranslator.js",
-        "text-codec.js",
-        "runtime-miss-logger.js",
-        "lookup-index.js",
-        "render-guard.js",
-        "wrapping.js",
-        "runtime-diagnostics.js",
-        "replay-state.js",
-        "orchestrator.js",
-        "adapter-contract.js",
-        "foresight-scanner.js",
-        "cache-loader.js",
-        "message-adapter.js",
-        "window-text-adapter.js",
-        "bitmap-text-adapter.js",
-        "sprite-text-adapter.js",
-        "startup-toast.js",
-        "boot.js",
+        "runtime/text-codec.js",
+        "runtime/runtime-miss-logger.js",
+        "runtime/lookup-index.js",
+        "runtime/render-guard.js",
+        "runtime/wrapping.js",
+        "runtime/runtime-diagnostics.js",
+        "runtime/replay-state.js",
+        "runtime/text-orchestrator/orchestrator.js",
+        "runtime/text-orchestrator/adapter-contract.js",
+        "runtime/foresight-scanner.js",
+        "runtime/cache-loader.js",
+        "adapters/game-message/message-adapter.js",
+        "adapters/window-text/window-text-adapter.js",
+        "adapters/bitmap-text/bitmap-text-adapter.js",
+        "adapters/sprite-text/sprite-text-adapter.js",
+        "runtime/startup-toast.js",
+        "runtime/boot.js",
     ] {
         write_text(&runtime.join(file), "// fixture");
     }

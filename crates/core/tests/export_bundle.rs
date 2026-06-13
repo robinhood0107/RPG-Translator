@@ -148,29 +148,29 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
     );
     assert_eq!(
         config.runtime_load_contract.script_load_order.last(),
-        Some(&"boot.js".to_string())
+        Some(&"runtime/boot.js".to_string())
     );
     assert_eq!(
         config.runtime_load_contract.script_load_order,
         vec![
-            "text-codec.js".to_string(),
-            "runtime-miss-logger.js".to_string(),
-            "lookup-index.js".to_string(),
-            "render-guard.js".to_string(),
-            "wrapping.js".to_string(),
-            "runtime-diagnostics.js".to_string(),
-            "replay-state.js".to_string(),
-            "orchestrator.js".to_string(),
-            "adapter-contract.js".to_string(),
-            "foresight-scanner.js".to_string(),
-            "cache-loader.js".to_string(),
-            "message-adapter.js".to_string(),
-            "window-text-adapter.js".to_string(),
-            "bitmap-text-adapter.js".to_string(),
-            "sprite-text-adapter.js".to_string(),
-            "pixi-text-adapter.js".to_string(),
-            "startup-toast.js".to_string(),
-            "boot.js".to_string(),
+            "runtime/text-codec.js".to_string(),
+            "runtime/runtime-miss-logger.js".to_string(),
+            "runtime/lookup-index.js".to_string(),
+            "runtime/render-guard.js".to_string(),
+            "runtime/wrapping.js".to_string(),
+            "runtime/runtime-diagnostics.js".to_string(),
+            "runtime/replay-state.js".to_string(),
+            "runtime/text-orchestrator/orchestrator.js".to_string(),
+            "runtime/text-orchestrator/adapter-contract.js".to_string(),
+            "runtime/foresight-scanner.js".to_string(),
+            "runtime/cache-loader.js".to_string(),
+            "adapters/game-message/message-adapter.js".to_string(),
+            "adapters/window-text/window-text-adapter.js".to_string(),
+            "adapters/bitmap-text/bitmap-text-adapter.js".to_string(),
+            "adapters/sprite-text/sprite-text-adapter.js".to_string(),
+            "adapters/pixi-text/pixi-text-adapter.js".to_string(),
+            "runtime/startup-toast.js".to_string(),
+            "runtime/boot.js".to_string(),
         ]
     );
     assert!(
@@ -183,7 +183,7 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
         config
             .runtime_load_contract
             .required_runtime_files
-            .contains(&"adapter-contract.js".to_string())
+            .contains(&"runtime/text-orchestrator/adapter-contract.js".to_string())
     );
     assert!(config_text.contains("\"foresight_command_catalog\""));
     assert!(config_text.contains("\"runtime_load_contract\""));
@@ -422,7 +422,7 @@ fn runtime_js_cache_key_builder_matches_rust_schema() {
         .join("..")
         .join("..");
     let script = r#"
-const { CacheKeyBuilder } = require('./runtime/overlay-plugin/lookup-index');
+const { CacheKeyBuilder } = require('./runtime/overlay-plugin/runtime/lookup-index');
 process.stdout.write(CacheKeyBuilder.build({
   engine: 'mz',
   sourceLanguage: 'ja',

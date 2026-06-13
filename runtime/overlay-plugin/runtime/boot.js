@@ -5,41 +5,41 @@
   const SUPPORT_DIRECTORY = 'rpg-translator';
   const PLUGIN_ENTRY_FILE = 'RPGTranslator.js';
   const RUNTIME_SCRIPT_LOAD_ORDER = [
-    'text-codec.js',
-    'runtime-miss-logger.js',
-    'lookup-index.js',
-    'render-guard.js',
-    'wrapping.js',
-    'runtime-diagnostics.js',
-    'replay-state.js',
-    'orchestrator.js',
-    'adapter-contract.js',
-    'foresight-scanner.js',
-    'cache-loader.js',
-    'message-adapter.js',
-    'window-text-adapter.js',
-    'bitmap-text-adapter.js',
-    'sprite-text-adapter.js',
-    'pixi-text-adapter.js',
-    'startup-toast.js',
-    'boot.js',
+    'runtime/text-codec.js',
+    'runtime/runtime-miss-logger.js',
+    'runtime/lookup-index.js',
+    'runtime/render-guard.js',
+    'runtime/wrapping.js',
+    'runtime/runtime-diagnostics.js',
+    'runtime/replay-state.js',
+    'runtime/text-orchestrator/orchestrator.js',
+    'runtime/text-orchestrator/adapter-contract.js',
+    'runtime/foresight-scanner.js',
+    'runtime/cache-loader.js',
+    'adapters/game-message/message-adapter.js',
+    'adapters/window-text/window-text-adapter.js',
+    'adapters/bitmap-text/bitmap-text-adapter.js',
+    'adapters/sprite-text/sprite-text-adapter.js',
+    'adapters/pixi-text/pixi-text-adapter.js',
+    'runtime/startup-toast.js',
+    'runtime/boot.js',
   ];
   const REQUIRED_RUNTIME_FILES = [PLUGIN_ENTRY_FILE].concat(RUNTIME_SCRIPT_LOAD_ORDER);
 
   const { CacheLoader } = loadDependency(root, './cache-loader');
   const { LookupIndex } = loadDependency(root, './lookup-index');
-  const { BitmapTextAdapter } = loadDependency(root, './bitmap-text-adapter');
-  const { MessageAdapter } = loadDependency(root, './message-adapter');
-  const { PixiTextAdapter } = loadDependency(root, './pixi-text-adapter');
+  const { BitmapTextAdapter } = loadDependency(root, '../adapters/bitmap-text/bitmap-text-adapter');
+  const { MessageAdapter } = loadDependency(root, '../adapters/game-message/message-adapter');
+  const { PixiTextAdapter } = loadDependency(root, '../adapters/pixi-text/pixi-text-adapter');
   const { RenderGuard } = loadDependency(root, './render-guard');
   const { RuntimeDiagnostics } = loadDependency(root, './runtime-diagnostics');
   const { ReplayState } = loadDependency(root, './replay-state');
   const { RuntimeMissLogger } = loadDependency(root, './runtime-miss-logger');
-  const { TextOrchestrator } = loadDependency(root, './orchestrator');
+  const { TextOrchestrator } = loadDependency(root, './text-orchestrator/orchestrator');
   const { ForesightScanner } = loadDependency(root, './foresight-scanner');
-  const { SpriteTextAdapter } = loadDependency(root, './sprite-text-adapter');
+  const { SpriteTextAdapter } = loadDependency(root, '../adapters/sprite-text/sprite-text-adapter');
   const { StartupToast } = loadDependency(root, './startup-toast');
-  const { WindowTextAdapter } = loadDependency(root, './window-text-adapter');
+  const { WindowTextAdapter } = loadDependency(root, '../adapters/window-text/window-text-adapter');
 
   class Boot {
     static async install(scope = root, options = {}) {
@@ -291,17 +291,17 @@
     const dependencyNames = {
       './cache-loader': 'CacheLoader',
       './lookup-index': 'LookupIndex',
-      './bitmap-text-adapter': 'BitmapTextAdapter',
-      './message-adapter': 'MessageAdapter',
-      './pixi-text-adapter': 'PixiTextAdapter',
+      '../adapters/bitmap-text/bitmap-text-adapter': 'BitmapTextAdapter',
+      '../adapters/game-message/message-adapter': 'MessageAdapter',
+      '../adapters/pixi-text/pixi-text-adapter': 'PixiTextAdapter',
       './render-guard': 'RenderGuard',
       './runtime-diagnostics': 'RuntimeDiagnostics',
       './runtime-miss-logger': 'RuntimeMissLogger',
-      './orchestrator': 'TextOrchestrator',
+      './text-orchestrator/orchestrator': 'TextOrchestrator',
       './foresight-scanner': 'ForesightScanner',
-      './sprite-text-adapter': 'SpriteTextAdapter',
+      '../adapters/sprite-text/sprite-text-adapter': 'SpriteTextAdapter',
       './startup-toast': 'StartupToast',
-      './window-text-adapter': 'WindowTextAdapter',
+      '../adapters/window-text/window-text-adapter': 'WindowTextAdapter',
     };
     const dependencyName = dependencyNames[modulePath];
     if (dependencyName && overlay[dependencyName]) return overlay;
