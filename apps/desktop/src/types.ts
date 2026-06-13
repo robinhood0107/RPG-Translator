@@ -301,6 +301,9 @@ export type DiagnosticsResponse = {
   runtime_imported_translatable_count?: number;
   unsupported_image_text_count?: number;
   layout_overflow_count?: number;
+  stale_render_count?: number;
+  ownership_conflict_count?: number;
+  replay_failure_count?: number;
   coverage_samples?: CoverageAuditSample[];
   latest_job?: TranslationJobSummary | null;
 };

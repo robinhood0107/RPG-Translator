@@ -39,6 +39,9 @@ pub struct DiagnosticsResponse {
     pub runtime_imported_translatable_count: i64,
     pub unsupported_image_text_count: i64,
     pub layout_overflow_count: i64,
+    pub stale_render_count: i64,
+    pub ownership_conflict_count: i64,
+    pub replay_failure_count: i64,
     pub coverage_samples: Vec<CoverageAuditSample>,
     pub latest_job: Option<TranslationJobSummary>,
 }
@@ -101,6 +104,9 @@ pub async fn diagnostics_summary(
             runtime_imported_translatable_count: runtime_import.runtime_imported_translatable_count,
             unsupported_image_text_count: runtime_import.unsupported_image_text_count,
             layout_overflow_count: runtime_import.layout_overflow_count,
+            stale_render_count: runtime_import.stale_render_count,
+            ownership_conflict_count: runtime_import.ownership_conflict_count,
+            replay_failure_count: runtime_import.replay_failure_count,
             coverage_samples: coverage.samples,
             latest_job: db.latest_translation_job_summary(Some(&request.target_language))?,
         })
@@ -123,6 +129,9 @@ struct RuntimeMissImportSummary {
     runtime_imported_translatable_count: i64,
     unsupported_image_text_count: i64,
     layout_overflow_count: i64,
+    stale_render_count: i64,
+    ownership_conflict_count: i64,
+    replay_failure_count: i64,
 }
 
 fn import_runtime_misses(
@@ -143,8 +152,24 @@ fn import_runtime_misses(
             summary.unsupported_image_text_count += 1;
             continue;
         }
-        if reason == "layout-overflow" {
+        if is_layout_overflow_reason(&reason) {
             summary.layout_overflow_count += 1;
+            continue;
+        }
+        if is_stale_render_reason(&reason) {
+            summary.stale_render_count += 1;
+            continue;
+        }
+        if is_ownership_conflict_reason(&reason) {
+            summary.ownership_conflict_count += 1;
+            continue;
+        }
+        if is_replay_failure_reason(&reason) {
+            summary.replay_failure_count += 1;
+            continue;
+        }
+        if !is_runtime_candidate_reason(&category, &reason) {
+            continue;
         }
         let text = json_string(&entry, "text");
         if !is_display_safe_runtime_candidate(&text) {
@@ -270,6 +295,13 @@ fn coverage_audit_summary(
         }
     }
 
+    for sample in runtime_miss_samples(&project.game_root) {
+        if samples.len() >= 12 {
+            break;
+        }
+        samples.push(sample);
+    }
+
     if export_missing_count > 0 {
         let (rows, _) = db.review_queue_page(project_id, target_language, None, None, 16, 0)?;
         for row in rows {
@@ -287,13 +319,6 @@ fn coverage_audit_summary(
                 reason: Some(row.review_state),
             });
         }
-    }
-
-    for sample in runtime_miss_samples(&project.game_root) {
-        if samples.len() >= 12 {
-            break;
-        }
-        samples.push(sample);
     }
 
     for item in &scan.rejected {
@@ -326,6 +351,11 @@ fn runtime_miss_samples(game_root: &str) -> Vec<CoverageAuditSample> {
     runtime_miss_entries(game_root)
         .into_iter()
         .rev()
+        .filter(|value| {
+            let category = json_string(value, "category");
+            let reason = json_string(value, "reason");
+            is_runtime_candidate_reason(&category, &reason)
+        })
         .take(4)
         .map(|value| CoverageAuditSample {
             category: "runtime-cache-miss".to_string(),
@@ -360,6 +390,49 @@ fn is_display_safe_runtime_candidate(text: &str) -> bool {
         && value.len() <= 512
         && value.chars().any(|ch| ch.is_alphabetic())
         && !value.starts_with("data:image/")
+}
+
+fn is_runtime_candidate_reason(category: &str, reason: &str) -> bool {
+    let category = category.trim();
+    let reason = reason.trim();
+    (category.is_empty() && reason.is_empty())
+        || category == "runtime-cache-miss"
+        || reason == "cache-miss"
+        || reason == "runtime-cache-miss"
+}
+
+fn is_layout_overflow_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim(),
+        "layout-overflow" | "layout_overflow" | "overflow"
+    )
+}
+
+fn is_stale_render_reason(reason: &str) -> bool {
+    let value = reason.trim();
+    value == "stale-render" || value == "render-stale" || value.ends_with("-stale")
+}
+
+fn is_ownership_conflict_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim(),
+        "ownership-conflict"
+            | "ownership_conflict"
+            | "surface-owned"
+            | "message-glyph-source"
+            | "duplicate-owner"
+    )
+}
+
+fn is_replay_failure_reason(reason: &str) -> bool {
+    matches!(
+        reason.trim(),
+        "replay-failure"
+            | "replay_failed"
+            | "replay-failed"
+            | "snapshot-restore-failed"
+            | "background-replay-failed"
+    )
 }
 
 fn runtime_miss_json_path(cache_key: &str, text: &str) -> String {
