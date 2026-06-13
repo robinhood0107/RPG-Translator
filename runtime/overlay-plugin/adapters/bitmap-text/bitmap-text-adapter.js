@@ -282,8 +282,10 @@
       if (typeof original !== 'function') continue;
       if (original.__rpgTranslatorBitmapMutation === MUTATION_TOKEN) continue;
       prototype[methodName] = function translatedBitmapMutation(...args) {
+        const bypass = shouldBypassBitmapMutation(scope, this);
+        if (!bypass) flushBitmap(scope, this, `before-${methodName}`);
         const result = original.apply(this, args);
-        if (!shouldBypassBitmapMutation(scope, this)) {
+        if (!bypass) {
           retireBitmapSurface(translator, this, methodName, args);
           recordBitmapRenderOp(this, methodName, args, original);
         }

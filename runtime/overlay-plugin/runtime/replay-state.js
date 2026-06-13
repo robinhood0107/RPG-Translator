@@ -46,6 +46,25 @@
         .sort((a, b) => a.drawOrder - b.drawOrder);
     }
 
+    static sortedOverlappingOpsAfter(ops, bounds, afterOrder) {
+      const rect = ReplayState.normalizeRect(bounds);
+      if (!Array.isArray(ops) || !rect) return [];
+      return ops
+        .filter((op) => op && op.drawOrder > afterOrder && ReplayState.rectsOverlap(rect, op.bounds))
+        .sort((a, b) => a.drawOrder - b.drawOrder);
+    }
+
+    static partitionOverlappingOps(ops, bounds, drawOrder) {
+      const order = Number(drawOrder);
+      if (!Number.isFinite(order)) {
+        return { before: [], after: [] };
+      }
+      return {
+        before: ReplayState.sortedOverlappingOps(ops, bounds, order),
+        after: ReplayState.sortedOverlappingOpsAfter(ops, bounds, order),
+      };
+    }
+
     static replayOps(target, ops, depthKey) {
       if (!target || !Array.isArray(ops) || !ops.length) return 0;
       const key = depthKey || '__rpgTranslatorReplayDepth';
