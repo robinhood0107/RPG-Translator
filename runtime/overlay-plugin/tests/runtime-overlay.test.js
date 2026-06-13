@@ -6738,6 +6738,103 @@ test('sprite text adapter moves existing overlays when a translated sprite is re
   assert.equal(orchestrator.diagnostics().archived_items, 0);
 });
 
+test('sprite text adapter mounts parent run overlays in a neutral sidecar carrier', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'ABC') return '가나다';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap(width, height) {
+      this.width = width || 120;
+      this.height = height || 32;
+    },
+    Sprite: function Sprite(bitmap) {
+      this.bitmap = bitmap || null;
+      this.children = [];
+      this.visible = true;
+      this.renderable = true;
+      this.opacity = 255;
+      this.x = 0;
+      this.y = 0;
+      this.scale = { x: 1, y: 1 };
+    },
+  };
+  root.Bitmap.prototype.drawText = function drawText(text) {
+    this._lastDrawText = text;
+  };
+  root.Sprite.prototype.addChild = function addChild(child) {
+    if (child.parent && child.parent !== this && typeof child.parent.removeChild === 'function') child.parent.removeChild(child);
+    this.children = this.children.filter((candidate) => candidate !== child);
+    this.children.push(child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.addChildAt = function addChildAt(child, index) {
+    if (child.parent && child.parent !== this && typeof child.parent.removeChild === 'function') child.parent.removeChild(child);
+    this.children = this.children.filter((candidate) => candidate !== child);
+    this.children.splice(index, 0, child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.Sprite.prototype.update = function update() {};
+
+  assert.equal(SpriteTextAdapter.install(root, orchestrator), true);
+  const stage = new root.Sprite(null);
+  const parent = new root.Sprite(null);
+  parent.x = 13;
+  parent.y = 21;
+  parent.opacity = 192;
+  stage.addChild(parent);
+  const makeGlyph = (text, x) => {
+    const sprite = new root.Sprite({ width: 16, height: 24, _rpgTranslatorGlyphText: text });
+    sprite.x = x;
+    sprite.y = 4;
+    parent.addChild(sprite);
+    return sprite;
+  };
+  const a = makeGlyph('A', 0);
+  const b = makeGlyph('B', 11);
+  const c = makeGlyph('C', 22);
+
+  a.update();
+
+  assert.deepEqual(parent.children, [a, b, c]);
+  const carrier = stage.children[1];
+  assert.equal(carrier._rpgTranslatorSpriteTextOverlayCarrier, true);
+  assert.equal(carrier._rpgTranslatorSpriteTextCarrierSource, parent);
+  assert.equal(carrier.x, 13);
+  assert.equal(carrier.y, 21);
+  assert.equal(carrier.opacity, 192);
+  assert.equal(carrier.children.length, 1);
+  assert.equal(carrier.children[0]._rpgTranslatorSpriteTextParentRunOverlay, true);
+  assert.equal(a.renderable, false);
+  assert.equal(b.renderable, false);
+  assert.equal(c.renderable, false);
+
+  parent.x = 30;
+  parent.y = 40;
+  parent.visible = false;
+  a.update();
+
+  assert.equal(carrier.x, 30);
+  assert.equal(carrier.y, 40);
+  assert.equal(carrier.visible, false);
+  assert.equal(carrier.children[0].visible, false);
+});
+
 test('bitmap text adapter aggregates same-line fragments and retires on mutation', () => {
   const requests = [];
   const index = {
@@ -7674,6 +7771,85 @@ test('pixi text adapter installs lifecycle hooks on both PIXI container classes'
   legacyContainer.removeChild(legacyText);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 2);
+});
+
+test('pixi text adapter preserves active translations when text objects are reparented', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Move JP') return 'Move KO';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'ja',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: {
+      engine: 'mz',
+      sourceLanguage: 'ja',
+      targetLanguage: 'ko',
+      config: { textScaleOthers: 50 },
+    },
+    PIXI: {},
+    SceneManager: {
+      updateScene() {},
+    },
+  };
+  root.PIXI.Container = function Container() {
+    this.children = [];
+    this.visible = true;
+    this.renderable = true;
+  };
+  root.PIXI.Container.prototype.addChild = function addChild(child) {
+    if (child.parent && child.parent !== this && typeof child.parent.removeChild === 'function') {
+      child.parent.removeChild(child);
+    }
+    this.children = this.children.filter((candidate) => candidate !== child);
+    this.children.push(child);
+    child.parent = this;
+    return child;
+  };
+  root.PIXI.Container.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.PIXI.Text = function PixiText(text) {
+    this._text = text;
+    this.style = { fontSize: 20 };
+    this.visible = true;
+    this.renderable = true;
+  };
+  Object.defineProperty(root.PIXI.Text.prototype, 'text', {
+    get() { return this._text; },
+    set(value) { this._text = value; },
+    configurable: true,
+  });
+
+  assert.equal(PixiTextAdapter.install(root, orchestrator), true);
+  const first = new root.PIXI.Container();
+  const second = new root.PIXI.Container();
+  const pixiText = new root.PIXI.Text('');
+  first.addChild(pixiText);
+
+  pixiText.text = 'Move JP';
+  assert.equal(pixiText.text, 'Move KO');
+  assert.equal(pixiText.style.fontSize, 10);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+
+  second.addChild(pixiText);
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(first.children, []);
+  assert.deepEqual(second.children, [pixiText]);
+  assert.equal(pixiText.parent, second);
+  assert.equal(pixiText.text, 'Move KO');
+  assert.equal(pixiText.style.fontSize, 10);
+  assert.equal(orchestrator.diagnostics().active_items, 1);
+  assert.equal(orchestrator.diagnostics().archived_items, 0);
+  assert.equal(orchestrator.diagnostics().active[0].screenState, 'visible');
 });
 
 test('boot installs cache-only overlay without provider surfaces', async () => {
