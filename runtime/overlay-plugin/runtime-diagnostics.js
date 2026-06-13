@@ -45,6 +45,20 @@
         normalizedText: limitText(firstString(source.normalizedText, visibleText, rawText)),
         windowType: firstString(source.windowType, ''),
         ownerType: firstString(source.ownerType, ''),
+        slotKey: firstString(source.slotKey, ''),
+        itemId: firstString(source.itemId, ''),
+        surfaceOwner: firstString(source.surfaceOwner, source.owner, ''),
+        textOwner: firstString(source.textOwner, ''),
+        drawOrder: finiteNumber(source.drawOrder, null),
+        dirtyRect: sanitizeRect(source.dirtyRect),
+        originalBounds: sanitizeRect(source.originalBounds),
+        translatedBounds: sanitizeRect(source.translatedBounds),
+        replayBeforeCount: finiteNumber(source.replayBeforeCount, null),
+        replayAfterCount: finiteNumber(source.replayAfterCount, null),
+        clearMode: firstString(source.clearMode, ''),
+        snapshotStatus: firstString(source.snapshotStatus, ''),
+        ownershipReason: firstString(source.ownershipReason, ''),
+        staleReason: firstString(source.staleReason, ''),
       }, 2);
       this.drawEvents.push(event);
       while (this.drawEvents.length > this.settings.drawTrace.limit) this.drawEvents.shift();
@@ -411,6 +425,21 @@
   function limitText(value) {
     const text = String(value || '');
     return text.length <= DEFAULT_TEXT_LIMIT ? text : `${text.slice(0, DEFAULT_TEXT_LIMIT - 3)}...`;
+  }
+
+  function finiteNumber(value, fallback) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function sanitizeRect(rect) {
+    if (!rect || typeof rect !== 'object') return undefined;
+    const x = finiteNumber(rect.x, NaN);
+    const y = finiteNumber(rect.y, NaN);
+    const width = finiteNumber(rect.width, NaN);
+    const height = finiteNumber(rect.height, NaN);
+    if (![x, y, width, height].every(Number.isFinite)) return undefined;
+    return { x, y, width, height };
   }
 
   function positiveInteger(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {

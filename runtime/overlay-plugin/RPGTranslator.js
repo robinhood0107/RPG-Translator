@@ -7,6 +7,7 @@
     'render-guard.js',
     'wrapping.js',
     'runtime-diagnostics.js',
+    'replay-state.js',
     'orchestrator.js',
     'adapter-contract.js',
     'foresight-scanner.js',

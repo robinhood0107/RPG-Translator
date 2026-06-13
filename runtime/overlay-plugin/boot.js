@@ -11,6 +11,7 @@
     'render-guard.js',
     'wrapping.js',
     'runtime-diagnostics.js',
+    'replay-state.js',
     'orchestrator.js',
     'adapter-contract.js',
     'foresight-scanner.js',
@@ -32,6 +33,7 @@
   const { PixiTextAdapter } = loadDependency(root, './pixi-text-adapter');
   const { RenderGuard } = loadDependency(root, './render-guard');
   const { RuntimeDiagnostics } = loadDependency(root, './runtime-diagnostics');
+  const { ReplayState } = loadDependency(root, './replay-state');
   const { RuntimeMissLogger } = loadDependency(root, './runtime-miss-logger');
   const { TextOrchestrator } = loadDependency(root, './orchestrator');
   const { ForesightScanner } = loadDependency(root, './foresight-scanner');
@@ -64,6 +66,7 @@
           targetLanguage: bundle.manifest.target_language,
           renderGuard: RenderGuard ? new RenderGuard() : null,
           diagnostics: runtimeDiagnostics,
+          replayState: ReplayState || null,
         })
         : index;
       const foresightScanner = ForesightScanner

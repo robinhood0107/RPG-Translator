@@ -159,6 +159,7 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
             "render-guard.js".to_string(),
             "wrapping.js".to_string(),
             "runtime-diagnostics.js".to_string(),
+            "replay-state.js".to_string(),
             "orchestrator.js".to_string(),
             "adapter-contract.js".to_string(),
             "foresight-scanner.js".to_string(),

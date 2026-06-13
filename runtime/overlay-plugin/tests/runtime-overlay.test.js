@@ -3431,6 +3431,7 @@ test('message and window adapters translate cache hits in synthetic RPG Maker ha
 
   assert.deepEqual(calls, [
     ['startMessage', '\\C[1]안녕'],
+    ['drawText', '世界', 1, 2, 3],
     ['drawText', '세계', 1, 2, 3],
     ['drawTextEx', 'missing', 4, 5],
   ]);
@@ -3501,12 +3502,12 @@ test('window text adapter retires entries when window contents are mutated', () 
   const windowInstance = new root.Window_Base();
   windowInstance.drawText('Menu JP', 1, 2);
 
-  assert.deepEqual(calls, [['drawText', 'Menu KO', 1, 2]]);
+  assert.deepEqual(calls, [['drawText', 'Menu JP', 1, 2], ['drawText', 'Menu KO', 1, 2]]);
   assert.equal(orchestrator.diagnostics().active_items, 1);
 
   windowInstance.contents.clear();
 
-  assert.deepEqual(calls, [['drawText', 'Menu KO', 1, 2], ['contents-clear']]);
+  assert.deepEqual(calls, [['drawText', 'Menu JP', 1, 2], ['drawText', 'Menu KO', 1, 2], ['contents-clear']]);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
   assert.equal(orchestrator.claimSurface(windowInstance, 'bitmap-text'), true);
@@ -3551,12 +3552,12 @@ test('window text adapter retires entries when window contents are recreated', (
   const windowInstance = new root.Window_Base();
   windowInstance.drawText('Recreate Menu JP', 3, 4);
 
-  assert.deepEqual(calls, [['drawText', 'Recreate Menu KO', 3, 4]]);
+  assert.deepEqual(calls, [['drawText', 'Recreate Menu JP', 3, 4], ['drawText', 'Recreate Menu KO', 3, 4]]);
   assert.equal(orchestrator.diagnostics().active_items, 1);
 
   windowInstance.createContents();
 
-  assert.deepEqual(calls, [['drawText', 'Recreate Menu KO', 3, 4], ['createContents']]);
+  assert.deepEqual(calls, [['drawText', 'Recreate Menu JP', 3, 4], ['drawText', 'Recreate Menu KO', 3, 4], ['createContents']]);
   assert.equal(orchestrator.diagnostics().active_items, 0);
   assert.equal(orchestrator.diagnostics().archived_items, 1);
   assert.equal(orchestrator.claimSurface(windowInstance, 'bitmap-text'), true);
@@ -3725,11 +3726,78 @@ test('window text adapter scales translated text to fit narrow draw slots and re
   const windowInstance = new root.Window_Base();
   windowInstance.drawText('Quest', 0, 0, 36, 'left');
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][1], '아주 긴 퀘스트 메뉴');
-  assert.ok(calls[0][6] < 20, `expected fitted font size below 20, got ${calls[0][6]}`);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][1], 'Quest');
+  assert.equal(calls[1][1], '아주 긴 퀘스트 메뉴');
+  assert.ok(calls[1][6] < 20, `expected fitted font size below 20, got ${calls[1][6]}`);
   assert.equal(windowInstance.contents.fontSize, 20);
   assert.equal(orchestrator.diagnostics().runtime_diagnostics.performance.counters.layout_overflow, 1);
+});
+
+test('window text adapter restores background and replays later draws around translated entries', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Quest') return '퀘스트';
+      return null;
+    },
+  };
+  const diagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: { enabled: true, record_all: true },
+    },
+  });
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    diagnostics,
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.visible = true;
+      this.openness = 255;
+      this.contents = {
+        width: 160,
+        height: 48,
+        fontSize: 20,
+        fillRect(x, y, width, height, color) {
+          calls.push(['fillRect', x, y, width, height, color]);
+        },
+        clearRect(x, y, width, height) {
+          calls.push(['clearRect', x, y, width, height]);
+        },
+      };
+    },
+  };
+  root.Window_Base.prototype.lineHeight = () => 24;
+  root.Window_Base.prototype.drawText = function drawText(text, x, y, width, align) {
+    calls.push(['drawText', text, x, y, width, align]);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text, x, y) {
+    calls.push(['drawTextEx', text, x, y]);
+    return String(text || '').length;
+  };
+
+  WindowTextAdapter.install(root, orchestrator);
+  const windowInstance = new root.Window_Base();
+  windowInstance.contents.fillRect(0, 0, 80, 24, '#112233');
+  windowInstance.drawText('Quest', 0, 0, 80, 'left');
+  windowInstance.drawText('Later', 40, 0, 80, 'left');
+
+  assert.deepEqual(calls, [
+    ['fillRect', 0, 0, 80, 24, '#112233'],
+    ['drawText', 'Quest', 0, 0, 80, 'left'],
+    ['clearRect', 0, 0, 80, 24],
+    ['fillRect', 0, 0, 80, 24, '#112233'],
+    ['drawText', '퀘스트', 0, 0, 80, 'left'],
+    ['drawText', 'Later', 40, 0, 80, 'left'],
+  ]);
+  const trace = diagnostics.snapshot().drawTrace.events;
+  assert.ok(trace.some((event) => event.stage === 'background.restore' && event.clearMode === 'replay'));
+  assert.ok(trace.some((event) => event.stage === 'render.accepted' && event.adapter === 'window-text'));
 });
 
 test('message adapter translates joined message blocks instead of individual 401 lines', () => {
@@ -6466,6 +6534,61 @@ test('bitmap text adapter aggregates same-line fragments and retires on mutation
   assert.equal(orchestrator.claimText(bitmapSlotKey, 'sprite-text:slot'), true);
 });
 
+test('bitmap text adapter replays earlier render ops before translated text', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Label') return '라벨';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() {
+      this.width = 160;
+      this.height = 64;
+      this.fontSize = 20;
+    },
+    SceneManager: {
+      updateScene() {
+        calls.push(['frame']);
+      },
+    },
+  };
+  root.Bitmap.prototype.textWidth = function textWidth(text) {
+    return String(text).length * 10;
+  };
+  root.Bitmap.prototype.fillRect = function fillRect(x, y, width, height, color) {
+    calls.push(['fillRect', x, y, width, height, color]);
+  };
+  root.Bitmap.prototype.clearRect = function clearRect(x, y, width, height) {
+    calls.push(['clearRect', x, y, width, height]);
+  };
+  root.Bitmap.prototype.drawText = function drawText(text, x, y, maxWidth, lineHeight, align) {
+    calls.push(['drawText', text, x, y, maxWidth, lineHeight, align]);
+  };
+
+  BitmapTextAdapter.install(root, orchestrator);
+  const bitmap = new root.Bitmap();
+  bitmap.fillRect(0, 0, 80, 24, '#223344');
+  bitmap.drawText('Label', 0, 0, 80, 24, 'left');
+  root.SceneManager.updateScene();
+
+  assert.deepEqual(calls, [
+    ['fillRect', 0, 0, 80, 24, '#223344'],
+    ['drawText', 'Label', 0, 0, 80, 24, 'left'],
+    ['frame'],
+    ['clearRect', 0, 0, 80, 24],
+    ['fillRect', 0, 0, 80, 24, '#223344'],
+    ['drawText', '라벨', 0, 0, 80, 24, 'left'],
+  ]);
+});
+
 test('bitmap text adapter flushes queued fragments through every frame render hook', () => {
   const requests = [];
   const index = {
@@ -7598,6 +7721,7 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}render-guard.js`,
     `${baseUrl}wrapping.js`,
     `${baseUrl}runtime-diagnostics.js`,
+    `${baseUrl}replay-state.js`,
     `${baseUrl}orchestrator.js`,
     `${baseUrl}adapter-contract.js`,
     `${baseUrl}foresight-scanner.js`,
