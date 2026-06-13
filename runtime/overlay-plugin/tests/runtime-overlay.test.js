@@ -3893,6 +3893,44 @@ test('message adapter wraps translated cache hits with RPG Maker escapes and ico
   assert.deepEqual(calls, [root.$gameMessage._texts]);
 });
 
+test('message adapter claims message glyph source to block bitmap fallback duplicates', () => {
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['A hidden message glyph'] },
+    Window_Message: function WindowMessage() {},
+  };
+  root.Window_Message.prototype.startMessage = function startMessage() {};
+  const orchestrator = new TextOrchestrator({
+    translate(request) {
+      if (request.text === 'A hidden message glyph') return '숨겨진 메시지 글리프';
+      return null;
+    },
+  }, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    renderGuard: new RenderGuard(),
+  });
+
+  assert.equal(MessageAdapter.install(root, orchestrator), true);
+  const messageWindow = new root.Window_Message();
+  messageWindow.startMessage();
+
+  const glyphFallback = orchestrator.claimText({
+    target: {},
+    slotKey: 'bitmap:glyph',
+    text: 'hidden',
+    mode: 'bitmapFallback',
+    priority: 10,
+  });
+
+  assert.equal(glyphFallback.status, 'denied');
+  assert.equal(glyphFallback.reason, 'message-glyph-source');
+  assert.equal(glyphFallback.ownerAdapter, 'message');
+
+  root.$gameMessage.clear && root.$gameMessage.clear();
+});
+
 test('message adapter retires active message item when Game_Message.clear runs', () => {
   const clearCalls = [];
   function GameMessage() {

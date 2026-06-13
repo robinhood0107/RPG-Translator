@@ -215,6 +215,7 @@
       state.itemId = result.itemId;
       state.slotKey = result.slotKey;
       state.textOwner = result.textOwner;
+      state.textClaim = result.textClaim || null;
       state.surfaceOwner = result.surfaceOwner;
     }
     return translated;
@@ -315,13 +316,14 @@
     const surfaceOwner = `message:${state.windowId}`;
     const textOwner = `${surfaceOwner}:${slotKey}`;
     if (translator && typeof translator.claimSurface === 'function' && !translator.claimSurface(surface, surfaceOwner)) {
-      return { text, itemId: '', slotKey, surfaceOwner, textOwner };
+      return { text, itemId: '', slotKey, surfaceOwner, textOwner, textClaim: null };
     }
-    if (translator && typeof translator.claimText === 'function' && !translator.claimText(slotKey, textOwner)) {
+    const textClaim = claimMessageGlyphSource(translator, surface, slotKey, textOwner, text);
+    if (!textClaim.accepted) {
       if (translator && typeof translator.releaseSurface === 'function') {
         translator.releaseSurface(surface, surfaceOwner);
       }
-      return { text, itemId: '', slotKey, surfaceOwner, textOwner };
+      return { text, itemId: '', slotKey, surfaceOwner, textOwner, textClaim: null };
     }
     const request = {
       engine: overlay(scope).engine || 'unknown',
@@ -339,7 +341,7 @@
       const itemId = command && command.itemId ? command.itemId : '';
       if (command && command.status === 'hit' && translator && typeof translator.acceptRender === 'function') {
         if (!translator.acceptRender(command, surface, text)) {
-          return { text, itemId, slotKey, surfaceOwner, textOwner };
+          return { text, itemId, slotKey, surfaceOwner, textOwner, textClaim: textClaim.token };
         }
       }
       return {
@@ -348,6 +350,7 @@
         slotKey,
         surfaceOwner,
         textOwner,
+        textClaim: textClaim.token,
       };
     }
     const translated = translator && typeof translator.translateText === 'function'
@@ -355,7 +358,34 @@
       : translator && typeof translator.translate === 'function'
         ? translator.translate(request)
         : null;
-    return { text: translated || text, itemId: '', slotKey, surfaceOwner, textOwner };
+    return { text: translated || text, itemId: '', slotKey, surfaceOwner, textOwner, textClaim: textClaim.token };
+  }
+
+  function claimMessageGlyphSource(translator, surface, slotKey, textOwner, text) {
+    if (!translator || typeof translator.claimText !== 'function') {
+      return { accepted: true, token: null };
+    }
+    const result = translator.claimText({
+      target: surface,
+      slotKey,
+      text,
+      searchText: text,
+      mode: 'messageGlyphSource',
+      owner: 'message',
+      adapterId: 'message',
+      priority: 100,
+    });
+    if (result && typeof result === 'object') {
+      return {
+        accepted: result.accepted === true || result.status === 'claimed' || result.status === 'provisional',
+        token: result.token || null,
+      };
+    }
+    if (result === true) return { accepted: true, token: null };
+    if (result === undefined && translator.claimText.length >= 2) {
+      return { accepted: translator.claimText(slotKey, textOwner) === true, token: null };
+    }
+    return { accepted: false, token: null };
   }
 
   function wrapGameMessageClear(scope, translator, trackedWindows) {
@@ -816,7 +846,9 @@
     if (state.itemId && translator && typeof translator.archiveItem === 'function') {
       translator.archiveItem(state.itemId);
     }
-    if (state.slotKey && translator && typeof translator.releaseTextClaim === 'function') {
+    if (state.textClaim && translator && typeof translator.releaseTextClaim === 'function') {
+      translator.releaseTextClaim(state.textClaim, reason || 'message-retired');
+    } else if (state.slotKey && translator && typeof translator.releaseTextClaim === 'function') {
       translator.releaseTextClaim(state.slotKey, state.textOwner);
     }
     if (translator && typeof translator.releaseSurface === 'function') {
@@ -831,6 +863,7 @@
     state.itemId = '';
     state.slotKey = '';
     state.textOwner = '';
+    state.textClaim = null;
     state.surfaceOwner = '';
     state.startMessageHandled = false;
     state.processCharacterText = '';
@@ -850,6 +883,7 @@
         itemId: '',
         slotKey: '',
         textOwner: '',
+        textClaim: null,
         surfaceOwner: '',
         startMessageHandled: false,
         processCharacterText: '',
