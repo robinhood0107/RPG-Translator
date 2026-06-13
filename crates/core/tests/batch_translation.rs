@@ -3,8 +3,8 @@ use std::{collections::VecDeque, fs, thread, time::Duration};
 use rpg_translator_core::{
     BatchPlanner, BatchPlannerConfig, BatchRunStatus, BatchTranslator, BatchTranslatorConfig,
     BatchValidator, CheckpointWriter, Engine, Error, FakeProvider, NewOccurrence, NewProject,
-    NewQaFinding, NewSourceText, ProviderBatchItem, ProviderBatchRequest, ProviderBatchResponse,
-    ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
+    NewQaFinding, NewSourceText, NewTranslation, ProviderBatchItem, ProviderBatchRequest,
+    ProviderBatchResponse, ProviderClient, ProviderRequestSpacingConfig, ProviderSpeedBenchmark,
     ProviderSpeedBenchmarkConfig, TextCodec, TranslateProgressEvent, TranslationDb,
     TranslationSpeedSample, adaptive_translation_tuning_from_samples,
     adaptive_translation_tuning_from_samples_for_lanes,
@@ -163,10 +163,41 @@ fn adaptive_tuning_uses_failure_only_history_conservatively() {
     let tuning = adaptive_translation_tuning_from_samples(&failure_samples, 16, 4096, spacing);
 
     assert_eq!(tuning.max_items_per_batch, 8);
-    assert_eq!(tuning.input_token_budget, 2048);
+    assert_eq!(tuning.input_token_budget, 4096);
     assert_eq!(tuning.provider_spacing.base_success_spacing_ms, 1500);
     assert!(tuning.decision_reason.contains("conservative"));
     assert!(tuning.decision_reason.contains("failure_rate=100%"));
+}
+
+#[test]
+fn adaptive_tuning_recommends_provider_restart_after_connection_failure_cluster() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let mut samples = vec![
+        speed_sample("success", 8, 6_000),
+        speed_sample("recoverable_provider", 8, 1_000),
+        speed_sample("recoverable_provider", 8, 1_000),
+        speed_sample("final_failed", 8, 1_000),
+    ];
+    for sample in samples.iter_mut().skip(1) {
+        sample.failure_type = Some("provider-connection".to_string());
+    }
+
+    let tuning = adaptive_translation_tuning_from_samples_for_lanes(
+        &samples,
+        &["plain_block"],
+        8,
+        3072,
+        spacing,
+    );
+
+    assert_eq!(tuning.max_items_per_batch, 4);
+    assert!(
+        tuning
+            .decision_reason
+            .contains("provider_restart_recommended"),
+        "connection failure clusters should leave a visible DB/UI reason: {}",
+        tuning.decision_reason
+    );
 }
 
 #[test]
@@ -211,24 +242,25 @@ fn adaptive_tuning_filters_history_to_current_lanes() {
         &samples,
         &["short"],
         8,
-        4096,
+        3072,
         spacing.clone(),
     );
-    assert_eq!(short_tuning.max_items_per_batch, 32);
+    assert_eq!(short_tuning.max_items_per_batch, 16);
     assert_eq!(short_tuning.provider_spacing.base_success_spacing_ms, 1250);
     assert!(short_tuning.decision_reason.contains("accelerating"));
+    assert!(short_tuning.decision_reason.contains("lane_cap=16"));
     assert!(short_tuning.decision_reason.contains("lanes=short"));
     assert!(short_tuning.decision_reason.contains("lane_samples=3/6"));
 
     let complex_tuning = adaptive_translation_tuning_from_samples_for_lanes(
         &samples,
         &["complex"],
-        16,
-        4096,
+        8,
+        3072,
         spacing,
     );
-    assert_eq!(complex_tuning.max_items_per_batch, 8);
-    assert_eq!(complex_tuning.input_token_budget, 2048);
+    assert_eq!(complex_tuning.max_items_per_batch, 4);
+    assert_eq!(complex_tuning.input_token_budget, 3072);
     assert_eq!(
         complex_tuning.provider_spacing.base_success_spacing_ms,
         1500
@@ -236,6 +268,70 @@ fn adaptive_tuning_filters_history_to_current_lanes() {
     assert!(complex_tuning.decision_reason.contains("conservative"));
     assert!(complex_tuning.decision_reason.contains("lanes=complex"));
     assert!(complex_tuning.decision_reason.contains("lane_samples=3/6"));
+}
+
+#[test]
+fn stable_translation_defaults_use_phase8_speed_profile() {
+    let config = BatchTranslatorConfig::default();
+
+    assert_eq!(config.max_items_per_batch, 8);
+    assert_eq!(config.input_token_budget, 3072);
+}
+
+#[test]
+fn adaptive_tuning_caps_batch_by_translation_lane() {
+    let spacing = ProviderRequestSpacingConfig::stable();
+    let mut short_samples = vec![
+        speed_sample("success", 8, 2_000),
+        speed_sample("success", 8, 2_500),
+        speed_sample("success", 8, 3_000),
+    ];
+    for sample in &mut short_samples {
+        sample.lane = "short".to_string();
+    }
+    let short = adaptive_translation_tuning_from_samples_for_lanes(
+        &short_samples,
+        &["short"],
+        8,
+        3072,
+        spacing.clone(),
+    );
+    assert_eq!(short.max_items_per_batch, 16);
+    assert!(short.decision_reason.contains("lane_cap=16"));
+
+    let plain = adaptive_translation_tuning_from_samples_for_lanes(
+        &short_samples
+            .iter()
+            .cloned()
+            .map(|mut sample| {
+                sample.lane = "plain_block".to_string();
+                sample
+            })
+            .collect::<Vec<_>>(),
+        &["plain_block"],
+        8,
+        3072,
+        spacing.clone(),
+    );
+    assert_eq!(plain.max_items_per_batch, 8);
+    assert!(plain.decision_reason.contains("lane_cap=8"));
+
+    let quality = adaptive_translation_tuning_from_samples_for_lanes(
+        &short_samples
+            .iter()
+            .cloned()
+            .map(|mut sample| {
+                sample.lane = "quality_retry".to_string();
+                sample
+            })
+            .collect::<Vec<_>>(),
+        &["quality_retry"],
+        8,
+        3072,
+        spacing,
+    );
+    assert_eq!(quality.max_items_per_batch, 4);
+    assert!(quality.decision_reason.contains("lane_cap=4"));
 }
 
 #[test]
@@ -390,6 +486,33 @@ fn planner_deduplicates_same_normalized_text_and_signature() {
 }
 
 #[test]
+fn planner_skips_generic_candidates_by_default() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let display_safe = seed_source_with_kind(&mut db, "en", "Potion", "db_field");
+    let generic = seed_source_with_kind(&mut db, "en", "GALV_MapTravelMZ", "generic_candidate");
+
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan batches");
+
+    assert_eq!(plan.jobs.len(), 1);
+    assert_eq!(plan.jobs[0].source_text_ids, vec![display_safe]);
+    assert!(
+        !plan
+            .jobs
+            .iter()
+            .any(|job| job.source_text_ids.contains(&generic))
+    );
+}
+
+#[test]
 fn planner_deduplicates_block_units_with_multiple_occurrences() {
     let mut db = TranslationDb::open_in_memory().expect("open db");
     db.migrate().expect("migrate db");
@@ -482,6 +605,8 @@ fn validator_rejects_bad_model_output_shapes() {
     for raw in [
         "",
         r#"{"id":2,"translation":"x"}"#,
+        r#"{"id":"1","translation":"x"}"#,
+        r#"{"*id":1,"translation":"x"}"#,
         r#"{"id":1,"translation":""}"#,
         r#"{"id":1,"translation":"x"}\n{"id":1,"translation":"y"}"#,
         r#"{"id":1,"translation":"x"}\n{"id":2,"translation":"y"}"#,
@@ -498,6 +623,201 @@ fn validator_rejects_bad_model_output_shapes() {
 }
 
 #[test]
+fn validator_accepts_text_field_as_translation_alias_for_provider_compatibility() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "Emma".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    let validated = BatchValidator::validate(r#"{"id":1,"text":"엠마"}"#, &jobs)
+        .expect("provider text field alias should be accepted");
+
+    assert_eq!(validated[0].translated_text, "엠마");
+}
+
+#[test]
+fn translator_records_warning_for_text_field_alias() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let source = seed_source(&mut db, "en", "Emma");
+    let mut provider = FakeProvider::from_outputs(vec![r#"{"id":1,"text":"엠마"}"#.to_string()]);
+
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 1,
+            retry_attempts: 0,
+            ..test_config()
+        },
+    )
+    .expect("translate with text field alias");
+
+    assert_eq!(report.completed_source_text_ids, vec![source]);
+    let findings = db.qa_findings_for_source(source).expect("findings");
+    assert!(
+        findings.iter().any(|finding| {
+            finding.finding_type == "provider-output-used-text-alias"
+                && finding.severity == "warning"
+                && finding.status == "resolved"
+        }),
+        "expected provider-output-used-text-alias warning, got {findings:?}"
+    );
+}
+
+#[test]
+fn validator_allows_unchanged_output_for_technical_token_only_text() {
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![
+        ProviderBatchItem {
+            id: 1,
+            text: "ExNo".to_string(),
+        },
+        ProviderBatchItem {
+            id: 2,
+            text: "ATK+100%".to_string(),
+        },
+        ProviderBatchItem {
+            id: 3,
+            text: "MHP +5%".to_string(),
+        },
+        ProviderBatchItem {
+            id: 4,
+            text: "Lv".to_string(),
+        },
+        ProviderBatchItem {
+            id: 5,
+            text: "Crypt_Tileset_Outside".to_string(),
+        },
+        ProviderBatchItem {
+            id: 6,
+            text: "\u{25ba}D1-F1".to_string(),
+        },
+        ProviderBatchItem {
+            id: 7,
+            text: "${Text1}".to_string(),
+        },
+        ProviderBatchItem {
+            id: 8,
+            text: "t".to_string(),
+        },
+    ]);
+
+    let validated = BatchValidator::validate(
+        r#"{"id":1,"translation":"ExNo"}
+{"id":2,"translation":"ATK+100%"}
+{"id":3,"translation":"MHP +5%"}
+{"id":4,"translation":"Lv"}
+{"id":5,"translation":"Crypt_Tileset_Outside"}
+{"id":6,"translation":"►D1-F1"}
+{"id":7,"translation":"${Text1}"}
+{"id":8,"translation":"t"}"#,
+        &jobs,
+    )
+    .expect("technical tokens may remain unchanged");
+
+    assert_eq!(validated[0].translated_text, "ExNo");
+    assert_eq!(validated[1].translated_text, "ATK+100%");
+    assert_eq!(validated[2].translated_text, "MHP +5%");
+    assert_eq!(validated[3].translated_text, "Lv");
+    assert_eq!(validated[4].translated_text, "Crypt_Tileset_Outside");
+    assert_eq!(validated[5].translated_text, "\u{25ba}D1-F1");
+    assert_eq!(validated[6].translated_text, "${Text1}");
+    assert_eq!(validated[7].translated_text, "t");
+}
+
+#[test]
+fn validator_rejects_unchanged_short_effect_and_skill_name_text() {
+    for text in [
+        "Zzz...",
+        "X-113?",
+        "Err-",
+        "F-fading...",
+        "B-BWUB?!?",
+        "H-hu- *glug*",
+        "Darkness One 2",
+        "Soulplay 4",
+    ] {
+        let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![ProviderBatchItem {
+            id: 1,
+            text: text.to_string(),
+        }]);
+
+        let error = BatchValidator::validate(
+            &format!(
+                r#"{{"id":1,"translation":{}}}"#,
+                serde_json::to_string(text).expect("fixture text should JSON-encode")
+            ),
+            &jobs,
+        )
+        .expect_err("short visible text should not pass through unchanged");
+
+        assert!(
+            error.to_string().contains("unchanged provider output"),
+            "unexpected error for {text}: {error}"
+        );
+    }
+}
+
+#[test]
+fn validator_rejects_mutated_independent_angle_metadata_tag() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "<Disable Switch: 8>Diluted Blood of the Goddess".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    let error = BatchValidator::validate(
+        r#"{"id":1,"translation":"<Disable Switch: 나 8>희석된 여신의 피"}"#,
+        &jobs,
+    )
+    .expect_err("mutated metadata tag should be rejected");
+
+    assert!(
+        error.to_string().contains("protected tag mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validator_accepts_preserved_independent_angle_metadata_tag() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "<Disable Switch: 8>Diluted Blood of the Goddess".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    let validated = BatchValidator::validate(
+        r#"{"id":1,"translation":"<Disable Switch: 8>희석된 여신의 피"}"#,
+        &jobs,
+    )
+    .expect("preserved metadata tag should pass");
+
+    assert_eq!(
+        validated[0].translated_text,
+        "<Disable Switch: 8>희석된 여신의 피"
+    );
+}
+
+#[test]
+fn validator_accepts_preserved_inline_angle_formatting_tags() {
+    let item = ProviderBatchItem {
+        id: 1,
+        text: "(Is it doing <i>that</i> again?)".to_string(),
+    };
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![item]);
+
+    let validated = BatchValidator::validate(
+        r#"{"id":1,"translation":"(또 <i>그걸</i> 하는 거야?)"}"#,
+        &jobs,
+    )
+    .expect("paired inline formatting tags should pass when preserved");
+
+    assert_eq!(validated[0].translated_text, "(또 <i>그걸</i> 하는 거야?)");
+}
+
+#[test]
 fn validator_rejects_line_local_placeholder_drift() {
     let item = ProviderBatchItem {
         id: 1,
@@ -507,6 +827,105 @@ fn validator_rejects_line_local_placeholder_drift() {
 
     let error = BatchValidator::validate(r#"{"id":1,"translation":"첫 줄\n둘째 줄¤"}"#, &jobs)
         .expect_err("placeholder moved to another line should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("line-local placeholder mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validator_allows_message_block_placeholder_reflow_with_total_count_preserved() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source_with_kind(
+        &mut db,
+        "en",
+        "\\c[7]What else... Ah, how about we have \\Effect<Pulse>you get turned on by my\nvoice now?",
+        "message_block",
+    );
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan message block");
+
+    assert_eq!(plan.jobs[0].provider_text.matches('\u{00a4}').count(), 2);
+    let validated = BatchValidator::validate(
+        r#"{"id":1,"translation":"¤또 뭐가 있을까... 아, 내 목소리에\n¤흥분하게 만들어볼까?"}"#,
+        &plan.jobs,
+    )
+    .expect("message blocks may reflow placeholders across lines");
+
+    assert_eq!(
+        validated[0].translated_text,
+        "\\c[7]또 뭐가 있을까... 아, 내 목소리에\n\\Effect<Pulse>흥분하게 만들어볼까?"
+    );
+}
+
+#[test]
+fn validator_rejects_message_block_placeholder_count_loss() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source_with_kind(
+        &mut db,
+        "en",
+        "\\c[7]Hmm... Let's give you an \\Effect<Pulse>uncontrollable desire to be touched\nby me.",
+        "message_block",
+    );
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan message block");
+
+    let error = BatchValidator::validate(
+        r#"{"id":1,"translation":"¤흠... 네가 나에게\n만져지고 싶은 욕망을 느끼게 해볼까."}"#,
+        &plan.jobs,
+    )
+    .expect_err("missing placeholder should still fail");
+
+    assert!(
+        error.to_string().contains("placeholder mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn validator_keeps_db_field_placeholder_reflow_strict() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    seed_source_with_kind(
+        &mut db,
+        "en",
+        "Skill \\Effect<Pulse>one\nline two",
+        "db_field",
+    );
+    let plan = BatchPlanner::plan(
+        &db,
+        "ko",
+        BatchPlannerConfig {
+            max_items_per_batch: 16,
+            ..BatchPlannerConfig::default()
+        },
+    )
+    .expect("plan db field");
+
+    let error = BatchValidator::validate(
+        r#"{"id":1,"translation":"스킬 하나\n¤둘째 줄"}"#,
+        &plan.jobs,
+    )
+    .expect_err("non-message units should keep line-local strictness");
 
     assert!(
         error
@@ -599,6 +1018,35 @@ fn validator_strips_gemma_channel_wrappers_before_json_parsing() {
         });
         assert_eq!(rows[0].translated_text, "\u{d1b5}\u{acfc}\\TEST");
     }
+}
+
+#[test]
+fn validator_repairs_common_invalid_json_string_escapes() {
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![ProviderBatchItem {
+        id: 1,
+        text: "*Yawn*".to_string(),
+    }]);
+
+    let validated = BatchValidator::validate("{\"id\":1,\"translation\":\"\\*하품\\*\"}", &jobs)
+        .expect("common invalid model escapes should be repaired");
+
+    assert_eq!(validated[0].translated_text, "*하품*");
+}
+
+#[test]
+fn validator_repairs_unescaped_quotes_inside_provider_json_row() {
+    let jobs = BatchPlanner::jobs_from_provider_items_for_test(vec![ProviderBatchItem {
+        id: 1,
+        text: "(I feel sleepy.)".to_string(),
+    }]);
+
+    let validated = BatchValidator::validate(
+        "{\"id\":1,\"translation\":\"(다시... \"졸려\"...)\"}",
+        &jobs,
+    )
+    .expect("unescaped provider quotes should be recovered");
+
+    assert_eq!(validated[0].translated_text, "(다시... \"졸려\"...)");
 }
 
 #[test]
@@ -719,6 +1167,179 @@ fn translator_rejects_unchanged_provider_output() {
             .any(|finding| finding.message.contains("unchanged provider output")),
         "expected unchanged provider output finding, got {findings:?}"
     );
+}
+
+#[test]
+fn translator_retries_unchanged_output_with_localization_instruction() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let source = seed_source_with_kind(&mut db, "en", "Darkness All 2", "db_field");
+    let mut provider = SequenceProvider::new(vec![
+        Ok(output(&[(1, "Darkness All 2")])),
+        Ok(output(&[(1, "어둠 전체 2")])),
+    ]);
+
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 1,
+            retry_attempts: 1,
+            ..test_config()
+        },
+    )
+    .expect("translate unchanged output after retry");
+
+    assert_eq!(provider.requests().len(), 2);
+    let retry_instruction = provider.requests()[1]
+        .instruction
+        .as_deref()
+        .expect("retry instruction");
+    assert!(retry_instruction.starts_with(
+        "Repair note: Keep the configured system prompt and all prior rules. Fix only this validation failure:"
+    ));
+    assert!(retry_instruction.contains("previous output copied the source unchanged"));
+    assert_eq!(report.failed_source_text_ids, Vec::<i64>::new());
+    assert_eq!(report.completed_source_text_ids, vec![source]);
+    assert_eq!(
+        db.get_translation(source, "ko")
+            .expect("lookup")
+            .expect("translation")
+            .translated_text,
+        "어둠 전체 2"
+    );
+}
+
+#[test]
+fn translator_retries_unchanged_short_effect_and_skill_names_like_runtime() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    for text in [
+        "Zzz...",
+        "X-113?",
+        "Err-",
+        "F-fading...",
+        "B-BWUB?!?",
+        "H-hu- *glug*",
+        "Darkness One 2",
+        "Soulplay 4",
+    ] {
+        seed_source_with_kind(&mut db, "en", text, "db_field");
+    }
+    let mut provider = SequenceProvider::new(vec![
+        Ok(output(&[
+            (1, "Zzz..."),
+            (2, "X-113?"),
+            (3, "Err-"),
+            (4, "F-fading..."),
+            (5, "B-BWUB?!?"),
+            (6, "H-hu- *glug*"),
+            (7, "Darkness One 2"),
+            (8, "Soulplay 4"),
+        ])),
+        Ok(output(&[
+            (1, "쿨..."),
+            (2, "X-113인가?"),
+            (3, "어-"),
+            (4, "사-사라져..."),
+            (5, "브-부웁?!?"),
+            (6, "허- *꿀꺽*"),
+            (7, "어둠의 일격 2"),
+            (8, "소울플레이 4"),
+        ])),
+    ]);
+
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 8,
+            retry_attempts: 1,
+            ..test_config()
+        },
+    )
+    .expect("translate short/effect/name rows after retry");
+
+    assert_eq!(provider.requests().len(), 2);
+    let retry_instruction = provider.requests()[1]
+        .instruction
+        .as_deref()
+        .expect("retry instruction");
+    assert!(retry_instruction.starts_with(
+        "Repair note: Keep the configured system prompt and all prior rules. Fix only this validation failure:"
+    ));
+    assert!(retry_instruction.contains("short terms"));
+    assert_eq!(report.failed_source_text_ids, Vec::<i64>::new());
+    assert_eq!(report.completed_source_text_ids.len(), 8);
+}
+
+#[test]
+fn translator_retry_instruction_preserves_prompt_and_placeholder_counts() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let source = seed_source_with_kind(&mut db, "en", "Line \u{1b}C[1]\nSecond line", "db_field");
+    let mut provider = SequenceProvider::new(vec![
+        Ok(r#"{"id":1,"translation":"첫 줄\n둘째 줄¤"}"#.to_string()),
+        Ok(r#"{"id":1,"translation":"첫 줄 ¤\n둘째 줄"}"#.to_string()),
+    ]);
+
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 1,
+            retry_attempts: 1,
+            ..test_config()
+        },
+    )
+    .expect("translate after placeholder repair");
+
+    assert_eq!(provider.requests().len(), 2);
+    let retry_instruction = provider.requests()[1]
+        .instruction
+        .as_deref()
+        .expect("retry instruction");
+    assert!(retry_instruction.starts_with(
+        "Repair note: Keep the configured system prompt and all prior rules. Fix only this validation failure:"
+    ));
+    assert!(retry_instruction.contains("exact total number of ¤ placeholders"));
+    assert!(retry_instruction.contains("Message and scroll blocks may use natural line reflow"));
+    assert!(retry_instruction.contains("same number of ¤ placeholders on each original line"));
+    assert!(retry_instruction.contains("Do not create any new backslash escape sequences"));
+    assert!(retry_instruction.contains("never literal \\n"));
+    assert!(retry_instruction.contains("do not add \\N[n], \\C[n], \\H, \\h"));
+    assert_eq!(report.failed_source_text_ids, Vec::<i64>::new());
+    assert_eq!(report.completed_source_text_ids, vec![source]);
+}
+
+#[test]
+fn translator_persists_requested_review_state_per_batch() {
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let source = seed_source_with_kind(&mut db, "en", "Emma", "db_field");
+    let mut provider = SequenceProvider::new(vec![Ok(output(&[(1, "엠마")]))]);
+
+    BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            output_review_state: "accepted".to_string(),
+            max_items_per_batch: 1,
+            ..test_config()
+        },
+    )
+    .expect("translate with requested review state");
+
+    let row = db
+        .get_translation(source, "ko")
+        .expect("lookup translation")
+        .expect("translation exists");
+    assert_eq!(row.review_state, "accepted");
+    assert_eq!(row.qa_state, "passed");
 }
 
 #[test]
@@ -1030,6 +1651,60 @@ fn progress_reports_item_and_batch_eta_separately() {
                 && snapshot.best_items_per_minute.is_some()
                 && (snapshot.item_eta_ms.is_some() || snapshot.batch_eta_ms.is_some())
         }
+        _ => false,
+    }));
+}
+
+#[test]
+fn progress_starts_from_existing_db_translations() {
+    let temp = tempdir().expect("create temp dir");
+    let checkpoint_path = temp.path().join("checkpoint.json");
+    let mut db = TranslationDb::open_in_memory().expect("open db");
+    db.migrate().expect("migrate db");
+    let first = seed_source(&mut db, "en", "Already one");
+    let second = seed_source(&mut db, "en", "Already two");
+    let pending = seed_source(&mut db, "en", "Pending three");
+    for (source_text_id, translated_text) in [(first, "이미 하나"), (second, "이미 둘")] {
+        db.upsert_translation(&NewTranslation {
+            source_text_id,
+            target_language: "ko".to_string(),
+            translated_text: translated_text.to_string(),
+            provider: "fixture".to_string(),
+            model: None,
+            provider_run_id: None,
+            review_state: "pending".to_string(),
+            qa_state: "passed".to_string(),
+        })
+        .expect("seed existing translation");
+    }
+    let mut provider = FakeProvider::from_outputs(vec![output(&[(1, "대기 셋")])]);
+    let mut events = Vec::new();
+
+    let report = BatchTranslator::run_with_checkpoint_and_progress(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            max_items_per_batch: 1,
+            retry_attempts: 0,
+            ..test_config()
+        },
+        Some(&checkpoint_path),
+        |event| events.push(event.clone()),
+        || false,
+    )
+    .expect("translate remaining row with DB baseline");
+
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(provider.requests()[0].items.len(), 1);
+    assert_eq!(report.initial_completed_source_text_count, 2);
+    assert_eq!(report.total_source_text_count, 3);
+    assert_eq!(report.completed_source_text_ids, vec![pending]);
+    assert!(events.iter().any(|event| match event {
+        TranslateProgressEvent::Started(snapshot) =>
+            snapshot.started_completed_items == 2
+                && snapshot.completed_items == 2
+                && snapshot.total_items == 3,
         _ => false,
     }));
 }

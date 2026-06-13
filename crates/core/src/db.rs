@@ -5,6 +5,7 @@ use std::{
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -13,9 +14,11 @@ use crate::{
     InstallStatusRecord, NewInstallRecord, NewOccurrence, NewProject, NewProviderRun, NewQaFinding,
     NewSourceText, NewTranslation, NewTranslationSpeedSample, OccurrenceContext, OccurrenceSegment,
     ProjectRecord, ProviderRunStatusRecord, QaFindingRecord, Result, ReviewCounts, ReviewQueueRow,
-    ReviewUpdateRequest, ScanPersistenceStats, SourceTextRecord, TextCodec,
-    TranslationJobProgressUpdate, TranslationJobSummary, TranslationRecord, TranslationSpeedSample,
-    WorkbenchDashboardSummary, WorkbenchSettingsRecord, WorkbenchSettingsUpdate,
+    ReviewUpdateRequest, ScanPersistenceStats, SourceTextRecord, SyntaxRepair, SyntaxRepairInput,
+    SyntaxRepairReport, SyntaxRepairSample, TextCodec, TranslationJobProgressUpdate,
+    TranslationJobSummary, TranslationQualityAuditReport, TranslationQualityAuditor,
+    TranslationRecord, TranslationSpeedSample, WorkbenchDashboardSummary, WorkbenchSettingsRecord,
+    WorkbenchSettingsUpdate, is_allowed_technical_token,
 };
 
 pub struct TranslationDb {
@@ -31,6 +34,18 @@ pub struct SchemaMigrationReport {
 struct SpeedMetricSample {
     item_count: i64,
     total_elapsed_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SyntaxRepairDbRow {
+    source_text_id: i64,
+    unit_kind: String,
+    source_text: String,
+    source_control_code_signature: String,
+    translation_id: i64,
+    translated_text: String,
+    provider_run_id: Option<i64>,
+    open_validation_count: i64,
 }
 
 impl TranslationDb {
@@ -410,6 +425,26 @@ impl TranslationDb {
         Ok(())
     }
 
+    pub fn verify_database_integrity(&self) -> Result<()> {
+        self.verify_integrity()
+    }
+
+    pub fn create_verified_backup(
+        &self,
+        db_path: impl AsRef<Path>,
+        label: &str,
+    ) -> Result<PathBuf> {
+        let db_path = db_path.as_ref();
+        self.checkpoint_wal()?;
+        self.verify_integrity()?;
+        let backup_path = database_backup_path(db_path, label)?;
+        let backup_path_text = backup_path.to_string_lossy().to_string();
+        self.conn
+            .execute("VACUUM INTO ?1", params![backup_path_text])?;
+        verify_database_file(&backup_path)?;
+        Ok(backup_path)
+    }
+
     fn verify_integrity(&self) -> Result<()> {
         let quick_check: String = self
             .conn
@@ -429,11 +464,7 @@ impl TranslationDb {
     }
 
     fn backup_before_schema_upgrade(&self, db_path: &Path) -> Result<PathBuf> {
-        let backup_path = schema_backup_path(db_path)?;
-        let backup_path_text = backup_path.to_string_lossy().to_string();
-        self.conn
-            .execute("VACUUM INTO ?1", params![backup_path_text])?;
-        Ok(backup_path)
+        self.create_verified_backup(db_path, "schema-upgrade")
     }
 
     fn recreate_translation_units_if_incompatible(&self) -> Result<()> {
@@ -1158,6 +1189,71 @@ impl TranslationDb {
         self.insert_occurrence_with_project(Some(project_id), input)
     }
 
+    pub fn upsert_runtime_candidate_occurrence(
+        &mut self,
+        project_id: i64,
+        source_text: &NewSourceText,
+        occurrence: &NewOccurrence,
+    ) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        let source_text_id = Self::upsert_source_text_in_tx(&tx, source_text)?;
+        let mut occurrence = occurrence.clone();
+        occurrence.source_text_id = source_text_id;
+        occurrence.project_id = Some(project_id);
+        let identity = occurrence_identity_from_new(&occurrence);
+        let existing_id = tx
+            .query_row(
+                "
+                SELECT id
+                FROM occurrences
+                WHERE project_id = ?1
+                  AND occurrence_identity = ?2
+                ",
+                params![project_id, identity],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(id) = existing_id {
+            tx.execute(
+                "
+                UPDATE occurrences
+                SET source_text_id = ?2,
+                    file_path = ?3,
+                    json_path = ?4,
+                    entity_type = ?5,
+                    event_id = ?6,
+                    page_index = ?7,
+                    command_index = ?8,
+                    command_code = ?9,
+                    parameter_index = ?10,
+                    object_key = ?11,
+                    extraction_rule_id = ?12,
+                    active = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?1
+                ",
+                params![
+                    id,
+                    occurrence.source_text_id,
+                    occurrence.file_path,
+                    occurrence.json_path,
+                    occurrence.entity_type,
+                    occurrence.event_id,
+                    occurrence.page_index,
+                    occurrence.command_index,
+                    occurrence.command_code,
+                    occurrence.parameter_index,
+                    occurrence.object_key,
+                    occurrence.extraction_rule_id,
+                ],
+            )?;
+        } else {
+            Self::insert_occurrence_with_project_in_tx(&tx, Some(project_id), &occurrence)?;
+        }
+        tx.commit()?;
+        Ok(source_text_id)
+    }
+
     fn insert_occurrence_with_project(
         &mut self,
         project_id: Option<i64>,
@@ -1397,6 +1493,9 @@ impl TranslationDb {
         target_language: &str,
     ) -> Result<WorkbenchDashboardSummary> {
         let source_text_count = self.count_project_source_texts(project_id)?;
+        let translatable_source_text_count =
+            self.count_project_translatable_source_texts(project_id)?;
+        let unsupported_candidate_count = self.count_project_unsupported_candidates(project_id)?;
         let occurrence_count = self.count_project_occurrences(project_id)?;
         let translated_count =
             self.count_project_translations(project_id, target_language, None)?;
@@ -1404,12 +1503,20 @@ impl TranslationDb {
             self.count_project_translations(project_id, target_language, Some("accepted"))?;
         let reviewed_count =
             self.count_project_translations(project_id, target_language, Some("reviewed"))?;
+        let missing_translatable_count =
+            self.count_project_missing_translatable_source_texts(project_id, target_language)?;
+        let failed_translatable_count =
+            self.count_project_failed_translatable_source_texts(project_id, target_language)?;
         let review_queue_count = self.count_project_review_queue(project_id, target_language)?;
         let qa_finding_count = self.count_project_qa_findings(project_id)?;
         Ok(WorkbenchDashboardSummary {
             project_id,
             target_language: target_language.to_string(),
             source_text_count,
+            translatable_source_text_count,
+            unsupported_candidate_count,
+            missing_translatable_count,
+            failed_translatable_count,
             occurrence_count,
             translated_count,
             accepted_count,
@@ -1458,6 +1565,7 @@ impl TranslationDb {
                AND translations.target_language = ?2
             WHERE occurrences.project_id = ?1
               AND occurrences.active = 1
+              AND source_texts.unit_kind <> 'generic_candidate'
             GROUP BY
                 source_texts.id,
                 source_texts.source_language,
@@ -1589,6 +1697,7 @@ impl TranslationDb {
                    AND translations.target_language = ?2
                 WHERE occurrences.project_id = ?1
                   AND occurrences.active = 1
+                  AND source_texts.unit_kind <> 'generic_candidate'
                 GROUP BY
                     source_texts.id,
                     source_texts.source_language,
@@ -2230,6 +2339,61 @@ impl TranslationDb {
         Ok(records)
     }
 
+    pub fn existing_translation_source_text_ids(
+        &self,
+        target_language: &str,
+        source_text_ids: Option<&BTreeSet<i64>>,
+        project_id: Option<i64>,
+    ) -> Result<BTreeSet<i64>> {
+        let mut ids = BTreeSet::new();
+        if let Some(project_id) = project_id {
+            let mut statement = self.conn.prepare(
+                "
+                SELECT DISTINCT source_texts.id
+                FROM source_texts
+                INNER JOIN translations
+                    ON translations.source_text_id = source_texts.id
+                   AND translations.target_language = ?1
+                INNER JOIN occurrences
+                    ON occurrences.source_text_id = source_texts.id
+                WHERE occurrences.project_id = ?2
+                  AND occurrences.active = 1
+                  AND source_texts.unit_kind <> 'generic_candidate'
+                ORDER BY source_texts.id
+                ",
+            )?;
+            let rows =
+                statement.query_map(params![target_language, project_id], |row| row.get(0))?;
+            for row in rows {
+                let id = row?;
+                if source_text_ids.is_none_or(|filter| filter.contains(&id)) {
+                    ids.insert(id);
+                }
+            }
+            return Ok(ids);
+        }
+
+        let mut statement = self.conn.prepare(
+            "
+            SELECT DISTINCT source_texts.id
+            FROM source_texts
+            INNER JOIN translations
+                ON translations.source_text_id = source_texts.id
+               AND translations.target_language = ?1
+            WHERE source_texts.unit_kind <> 'generic_candidate'
+            ORDER BY source_texts.id
+            ",
+        )?;
+        let rows = statement.query_map(params![target_language], |row| row.get(0))?;
+        for row in rows {
+            let id = row?;
+            if source_text_ids.is_none_or(|filter| filter.contains(&id)) {
+                ids.insert(id);
+            }
+        }
+        Ok(ids)
+    }
+
     pub fn benchmark_source_texts(
         &self,
         project_id: Option<i64>,
@@ -2353,6 +2517,7 @@ impl TranslationDb {
                    AND translations.target_language = ?2
                 WHERE occurrences.project_id = ?1
                   AND occurrences.active = 1
+                  AND source_texts.unit_kind <> 'generic_candidate'
                 GROUP BY
                     source_texts.id,
                     translations.translated_text,
@@ -3048,6 +3213,202 @@ impl TranslationDb {
         Ok(changed)
     }
 
+    pub fn repair_translation_syntax(
+        &mut self,
+        project_id: i64,
+        target_language: &str,
+        apply: bool,
+        backup_path: Option<&Path>,
+    ) -> Result<SyntaxRepairReport> {
+        let total_open_validation_count =
+            self.open_translation_validation_count_for_project(project_id, target_language)?;
+        let rows = self.open_translation_validation_repair_rows(project_id, target_language)?;
+        let mut outcomes = Vec::with_capacity(rows.len());
+        let mut action_counts = BTreeMap::new();
+        for row in &rows {
+            let outcome = SyntaxRepair::repair(&SyntaxRepairInput {
+                source_text_id: row.source_text_id,
+                unit_kind: row.unit_kind.clone(),
+                source_text: row.source_text.clone(),
+                source_control_code_signature: row.source_control_code_signature.clone(),
+                translated_text: row.translated_text.clone(),
+            });
+            for action in &outcome.actions {
+                *action_counts.entry(action.clone()).or_insert(0) += 1;
+            }
+            outcomes.push(outcome);
+        }
+
+        let safe_candidate_count = outcomes
+            .iter()
+            .filter(|outcome| outcome.safe_to_apply)
+            .count() as i64;
+        let unsafe_count = outcomes.len() as i64 - safe_candidate_count;
+        let samples = outcomes
+            .iter()
+            .take(20)
+            .map(|outcome| SyntaxRepairSample {
+                source_text_id: outcome.source_text_id,
+                safe_to_apply: outcome.safe_to_apply,
+                actions: outcome.actions.clone(),
+                original_text: outcome.original_text.clone(),
+                repaired_text: outcome.repaired_text.clone(),
+                validation_messages: outcome.validation_messages.clone(),
+                unsafe_reason: outcome.unsafe_reason.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut applied_count = 0i64;
+        let mut resolved_finding_count = 0i64;
+        if apply {
+            let tx = self.conn.transaction()?;
+            for (row, outcome) in rows.iter().zip(outcomes.iter()) {
+                if !outcome.safe_to_apply {
+                    continue;
+                }
+                tx.execute(
+                    "
+                    UPDATE translations
+                    SET translated_text = ?1,
+                        qa_state = 'passed',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?2
+                    ",
+                    params![outcome.repaired_text, row.translation_id],
+                )?;
+                let resolved = tx.execute(
+                    "
+                    UPDATE qa_findings
+                    SET status = 'resolved',
+                        resolved_at = CURRENT_TIMESTAMP
+                    WHERE source_text_id = ?1
+                      AND (target_language IS NULL OR target_language = ?2)
+                      AND status = 'open'
+                      AND finding_type = 'translation-validation'
+                    ",
+                    params![row.source_text_id, target_language],
+                )?;
+                resolved_finding_count += i64::try_from(resolved).unwrap_or(i64::MAX);
+                insert_qa_finding_tx(
+                    &tx,
+                    &NewQaFinding {
+                        source_text_id: row.source_text_id,
+                        translation_id: Some(row.translation_id),
+                        target_language: Some(target_language.to_string()),
+                        provider_run_id: row.provider_run_id,
+                        finding_type: "syntax-auto-repair".to_string(),
+                        severity: "warning".to_string(),
+                        message: "자동 문법 보정이 적용되었습니다.".to_string(),
+                        status: "resolved".to_string(),
+                        details_json: json!({
+                            "actions": outcome.actions,
+                            "original_text": outcome.original_text,
+                            "repaired_text": outcome.repaired_text,
+                            "open_validation_count": row.open_validation_count
+                        })
+                        .to_string(),
+                    },
+                )?;
+                applied_count += 1;
+            }
+            tx.commit()?;
+            self.verify_integrity()?;
+        }
+
+        Ok(SyntaxRepairReport {
+            target_language: target_language.to_string(),
+            total_open_validation_count,
+            unique_source_count: rows.len() as i64,
+            safe_candidate_count,
+            unsafe_count,
+            applied_count,
+            resolved_finding_count,
+            backup_path: backup_path.map(|path| path.display().to_string()),
+            action_counts,
+            samples,
+        })
+    }
+
+    fn open_translation_validation_count_for_project(
+        &self,
+        project_id: i64,
+        target_language: &str,
+    ) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(DISTINCT qa_findings.id)
+            FROM qa_findings
+            INNER JOIN source_texts ON source_texts.id = qa_findings.source_text_id
+            INNER JOIN occurrences
+                ON occurrences.source_text_id = source_texts.id
+               AND occurrences.project_id = ?1
+               AND occurrences.active = 1
+            WHERE qa_findings.status = 'open'
+              AND qa_findings.finding_type = 'translation-validation'
+              AND (qa_findings.target_language IS NULL OR qa_findings.target_language = ?2)
+              AND source_texts.unit_kind <> 'generic_candidate'
+            ",
+            params![project_id, target_language],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn open_translation_validation_repair_rows(
+        &self,
+        project_id: i64,
+        target_language: &str,
+    ) -> Result<Vec<SyntaxRepairDbRow>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                source_texts.id,
+                source_texts.unit_kind,
+                source_texts.normalized_text,
+                source_texts.control_code_signature,
+                translations.id,
+                translations.translated_text,
+                translations.provider_run_id,
+                COUNT(DISTINCT qa_findings.id)
+            FROM qa_findings
+            INNER JOIN source_texts ON source_texts.id = qa_findings.source_text_id
+            INNER JOIN occurrences
+                ON occurrences.source_text_id = source_texts.id
+               AND occurrences.project_id = ?1
+               AND occurrences.active = 1
+            INNER JOIN translations
+                ON translations.source_text_id = source_texts.id
+               AND translations.target_language = ?2
+            WHERE qa_findings.status = 'open'
+              AND qa_findings.finding_type = 'translation-validation'
+              AND (qa_findings.target_language IS NULL OR qa_findings.target_language = ?2)
+              AND source_texts.unit_kind <> 'generic_candidate'
+            GROUP BY
+                source_texts.id,
+                source_texts.unit_kind,
+                source_texts.normalized_text,
+                source_texts.control_code_signature,
+                translations.id,
+                translations.translated_text,
+                translations.provider_run_id
+            ORDER BY source_texts.id
+            ",
+        )?;
+        let rows = statement.query_map(params![project_id, target_language], |row| {
+            Ok(SyntaxRepairDbRow {
+                source_text_id: row.get(0)?,
+                unit_kind: row.get(1)?,
+                source_text: row.get(2)?,
+                source_control_code_signature: row.get(3)?,
+                translation_id: row.get(4)?,
+                translated_text: row.get(5)?,
+                provider_run_id: row.get(6)?,
+                open_validation_count: row.get(7)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn qa_findings_for_source(&self, source_text_id: i64) -> Result<Vec<QaFindingRecord>> {
         let mut statement = self.conn.prepare(
             "
@@ -3144,6 +3505,94 @@ impl TranslationDb {
         Ok(self
             .conn
             .query_row("SELECT COUNT(*) FROM qa_findings", [], |row| row.get(0))?)
+    }
+
+    pub fn audit_translation_quality(
+        &self,
+        project_id: i64,
+        target_language: &str,
+        issue_limit: usize,
+    ) -> Result<TranslationQualityAuditReport> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT
+                source_texts.id,
+                translations.id,
+                source_texts.unit_kind,
+                source_texts.normalized_text,
+                source_texts.visible_text,
+                translations.translated_text
+            FROM translations
+            INNER JOIN source_texts
+                ON source_texts.id = translations.source_text_id
+            INNER JOIN occurrences
+                ON occurrences.source_text_id = source_texts.id
+               AND occurrences.active = 1
+            WHERE occurrences.project_id = ?1
+              AND translations.target_language = ?2
+              AND translations.translated_text <> ''
+            GROUP BY
+                source_texts.id,
+                translations.id,
+                source_texts.unit_kind,
+                source_texts.normalized_text,
+                source_texts.visible_text,
+                translations.translated_text
+            ORDER BY translations.id, source_texts.id
+            ",
+        )?;
+        let rows = statement.query_map(params![project_id, target_language], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut total_rows = 0i64;
+        let mut allowlisted_technical_count = 0i64;
+        let mut issues = Vec::new();
+        for row in rows {
+            let (
+                source_text_id,
+                translation_id,
+                unit_kind,
+                normalized_text,
+                visible_text,
+                translated_text,
+            ) = row?;
+            total_rows += 1;
+            let source_text = if visible_text.trim().is_empty() {
+                normalized_text
+            } else {
+                visible_text
+            };
+            if is_allowed_technical_token(&source_text)
+                && translated_text.trim() == source_text.trim()
+            {
+                allowlisted_technical_count += 1;
+            }
+            for mut issue in TranslationQualityAuditor::audit_text(
+                &source_text,
+                &translated_text,
+                target_language,
+            ) {
+                issue.source_text_id = Some(source_text_id);
+                issue.translation_id = Some(translation_id);
+                issue.unit_kind = Some(unit_kind.clone());
+                issues.push(issue);
+            }
+        }
+        Ok(
+            TranslationQualityAuditor::report_from_issues_with_allowlist(
+                total_rows,
+                issues,
+                issue_limit,
+                allowlisted_technical_count,
+            ),
+        )
     }
 
     pub fn record_export(
@@ -3508,6 +3957,7 @@ impl TranslationDb {
                 "WHERE review_state = 'pending' AND translated_text <> '' AND qa_finding_count = 0 AND ?3 IS NULL",
                 None,
             )?,
+            unsupported: self.count_project_unsupported_candidates(project_id)?,
         })
     }
 
@@ -3520,6 +3970,81 @@ impl TranslationDb {
               AND active = 1
             ",
             params![project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn count_project_translatable_source_texts(&self, project_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(DISTINCT source_texts.id)
+            FROM source_texts
+            INNER JOIN occurrences ON occurrences.source_text_id = source_texts.id
+            WHERE occurrences.project_id = ?1
+              AND occurrences.active = 1
+              AND source_texts.unit_kind <> 'generic_candidate'
+            ",
+            params![project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn count_project_unsupported_candidates(&self, project_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(DISTINCT source_texts.id)
+            FROM source_texts
+            INNER JOIN occurrences ON occurrences.source_text_id = source_texts.id
+            WHERE occurrences.project_id = ?1
+              AND occurrences.active = 1
+              AND source_texts.unit_kind = 'generic_candidate'
+            ",
+            params![project_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn count_project_missing_translatable_source_texts(
+        &self,
+        project_id: i64,
+        target_language: &str,
+    ) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(DISTINCT source_texts.id)
+            FROM source_texts
+            INNER JOIN occurrences ON occurrences.source_text_id = source_texts.id
+            LEFT JOIN translations
+                ON translations.source_text_id = source_texts.id
+               AND translations.target_language = ?2
+            WHERE occurrences.project_id = ?1
+              AND occurrences.active = 1
+              AND source_texts.unit_kind <> 'generic_candidate'
+              AND translations.id IS NULL
+            ",
+            params![project_id, target_language],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn count_project_failed_translatable_source_texts(
+        &self,
+        project_id: i64,
+        target_language: &str,
+    ) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "
+            SELECT COUNT(DISTINCT source_texts.id)
+            FROM source_texts
+            INNER JOIN occurrences ON occurrences.source_text_id = source_texts.id
+            INNER JOIN qa_findings ON qa_findings.source_text_id = source_texts.id
+            WHERE occurrences.project_id = ?1
+              AND occurrences.active = 1
+              AND source_texts.unit_kind <> 'generic_candidate'
+              AND qa_findings.status = 'open'
+              AND (qa_findings.target_language IS NULL OR qa_findings.target_language = ?2)
+            ",
+            params![project_id, target_language],
             |row| row.get(0),
         )?)
     }
@@ -3549,8 +4074,10 @@ impl TranslationDb {
             SELECT DISTINCT translations.source_text_id, translations.review_state
             FROM translations
             INNER JOIN occurrences ON occurrences.source_text_id = translations.source_text_id
+            INNER JOIN source_texts ON source_texts.id = translations.source_text_id
             WHERE occurrences.project_id = ?1
               AND occurrences.active = 1
+              AND source_texts.unit_kind <> 'generic_candidate'
               AND translations.target_language = ?2
             ",
         )?;
@@ -3618,6 +4145,7 @@ impl TranslationDb {
                    AND translations.target_language = ?2
                 WHERE occurrences.project_id = ?1
                   AND occurrences.active = 1
+                  AND source_texts.unit_kind <> 'generic_candidate'
                 GROUP BY
                     source_texts.id,
                     translations.translated_text,
@@ -3857,7 +4385,7 @@ fn review_translation_validation_messages_tx(
             "줄바꿈 수가 원문과 다릅니다. 원문 {source_line_breaks}개, 번역 {translated_line_breaks}개"
         ));
     }
-    if source_line_breaks == translated_line_breaks {
+    if source_line_breaks == translated_line_breaks && !is_wrapped_runtime_unit(&unit_kind) {
         let source_line_placeholders = TextCodec::control_code_counts_by_line(&source_normalized);
         let translated_line_placeholders =
             TextCodec::control_code_counts_by_line(&translated.normalized_text);
@@ -4263,7 +4791,7 @@ fn required_index_names() -> &'static [&'static str] {
     ]
 }
 
-fn schema_backup_path(db_path: &Path) -> Result<PathBuf> {
+fn database_backup_path(db_path: &Path, label: &str) -> Result<PathBuf> {
     let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
     let artifact_root = if parent.file_name().and_then(|value| value.to_str()) == Some("db") {
         parent.parent().unwrap_or(parent)
@@ -4295,8 +4823,7 @@ fn schema_backup_path(db_path: &Path) -> Result<PathBuf> {
         } else {
             format!("-{counter}")
         };
-        let candidate =
-            backup_dir.join(format!("schema-upgrade-{timestamp}-{stem}{suffix}.sqlite"));
+        let candidate = backup_dir.join(format!("{label}-{timestamp}-{stem}{suffix}.sqlite"));
         if !candidate.exists() {
             return Ok(candidate);
         }

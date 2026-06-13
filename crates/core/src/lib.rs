@@ -7,7 +7,9 @@ mod export;
 mod install;
 mod project_manifest;
 mod provider;
+mod quality;
 mod scanner;
+mod syntax_repair;
 mod text_codec;
 mod workbench;
 
@@ -53,9 +55,16 @@ pub use project_manifest::{
 };
 pub use provider::{
     DEFAULT_SYSTEM_PROMPT, LocalOpenAiConfig, LocalOpenAiProvider, LocalProviderTransport,
-    build_provider_system_prompt,
+    build_provider_system_prompt, build_quality_retry_instruction,
+};
+pub use quality::{
+    TranslationQualityAuditReport, TranslationQualityAuditor, TranslationQualityIssue,
+    is_allowed_technical_token,
 };
 pub use scanner::{ExtractionRuleSet, GameScanner, RpgMakerDetector, ScanOptions};
+pub use syntax_repair::{
+    SyntaxRepair, SyntaxRepairInput, SyntaxRepairOutcome, SyntaxRepairReport, SyntaxRepairSample,
+};
 pub use text_codec::{ProviderTextState, TextCodec};
 pub use workbench::WorkbenchService;
 

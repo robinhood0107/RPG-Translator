@@ -164,6 +164,58 @@ test('lookup index writes cache-only miss diagnostics when logger is enabled', (
   });
 });
 
+test('lookup index writes runtime miss surface metadata for importable candidates', () => {
+  const misses = [];
+  const index = new LookupIndex({
+    manifest: {
+      schema_version: 1,
+      key_schema_version: 'v1',
+      source_language: 'en',
+      target_language: 'ko',
+    },
+    records: [],
+    missLogger: {
+      recordMiss(miss) {
+        misses.push(miss);
+      },
+    },
+  });
+
+  assert.equal(index.translate({
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    text: 'Quest',
+    adapter: 'window-text',
+    kind: 'drawText',
+    methodName: 'drawText',
+    slotKey: 'window:command:1',
+    visible: true,
+    screenState: 'visible',
+    owner: 'window-text:7',
+    sceneName: 'Scene_Menu',
+    mapId: 3,
+    eventId: 9,
+    reason: 'cache-miss',
+    bbox: { x: 12, y: 32, width: 80, height: 24 },
+    contextHash: 'scene-menu-command',
+  }), null);
+
+  assert.equal(misses.length, 1);
+  assert.equal(misses[0].adapter, 'window-text');
+  assert.equal(misses[0].kind, 'drawText');
+  assert.equal(misses[0].methodName, 'drawText');
+  assert.equal(misses[0].slotKey, 'window:command:1');
+  assert.equal(misses[0].visible, true);
+  assert.equal(misses[0].screenState, 'visible');
+  assert.equal(misses[0].owner, 'window-text:7');
+  assert.equal(misses[0].sceneName, 'Scene_Menu');
+  assert.equal(misses[0].mapId, 3);
+  assert.equal(misses[0].eventId, 9);
+  assert.equal(misses[0].reason, 'cache-miss');
+  assert.deepEqual(misses[0].bbox, { x: 12, y: 32, width: 80, height: 24 });
+});
+
 test('lookup index suppresses duplicate miss log writes with bounded negative cache', () => {
   const misses = [];
   const index = new LookupIndex({
@@ -195,6 +247,35 @@ test('lookup index suppresses duplicate miss log writes with bounded negative ca
   assert.equal(index.diagnostics().cache_misses, 3);
   assert.equal(misses.length, 2);
   assert.equal(index.diagnostics().recent_misses.length, 2);
+});
+
+test('orchestrator records layout overflow diagnostics for narrow draw slots', () => {
+  const diagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: { enabled: true, record_all: true },
+    },
+  });
+  const orchestrator = new TextOrchestrator(null, { diagnostics });
+  const surface = {};
+
+  const result = orchestrator.recordSurfaceDraw({
+    target: surface,
+    adapterId: 'bitmap-text',
+    methodName: 'drawText',
+    text: '긴 번역 텍스트',
+    x: 10,
+    y: 20,
+    maxWidth: 60,
+    lineHeight: 24,
+    measuredWidth: 140,
+    candidateAdapters: [],
+  });
+  const snapshot = diagnostics.snapshot({ detailView: true });
+
+  assert.equal(result.reason, 'layout-overflow');
+  assert.equal(snapshot.performance.counters.layout_overflow, 1);
+  assert.equal(snapshot.drawTrace.events.some((event) => event.stage === 'layout-overflow'), true);
 });
 
 test('cache loader parses static manifest config and jsonl records', async () => {
@@ -3561,7 +3642,11 @@ test('window text adapter defers hidden window cache hits until ready', () => {
     Window_Base: function WindowBase() {
       this.visible = false;
       this.openness = 0;
-      this.contents = {};
+      this.contents = {
+        clearRect(x, y, width, height) {
+          calls.push(['clearRect', x, y, width, height]);
+        },
+      };
     },
   };
   root.Window_Base.prototype.drawText = function drawText(text, x, y, width, align) {
@@ -3591,9 +3676,60 @@ test('window text adapter defers hidden window cache hits until ready', () => {
   assert.deepEqual(calls, [
     ['drawText', 'Hidden JP', 1, 2, 80, 'center'],
     ['update'],
+    ['clearRect', 1, 2, 80, 24],
     ['drawText', 'Hidden KO', 1, 2, 80, 'center'],
   ]);
   assert.equal(orchestrator.diagnostics().render_accepted, 1);
+});
+
+test('window text adapter scales translated text to fit narrow draw slots and restores font size', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'Quest') return '아주 긴 퀘스트 메뉴';
+      return null;
+    },
+  };
+  const diagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: { enabled: true, record_all: true },
+    },
+  });
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+    diagnostics,
+  });
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.visible = true;
+      this.openness = 255;
+      this.contents = { fontSize: 20 };
+    },
+  };
+  root.Window_Base.prototype.textWidth = function textWidth(text) {
+    return String(text || '').length * (this.contents.fontSize / 2);
+  };
+  root.Window_Base.prototype.drawText = function drawText(text, x, y, width, align) {
+    calls.push(['drawText', text, x, y, width, align, this.contents.fontSize]);
+  };
+  root.Window_Base.prototype.drawTextEx = function drawTextEx(text) {
+    calls.push(['drawTextEx', text, this.contents.fontSize]);
+    return text.length;
+  };
+
+  WindowTextAdapter.install(root, orchestrator);
+  const windowInstance = new root.Window_Base();
+  windowInstance.drawText('Quest', 0, 0, 36, 'left');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1], '아주 긴 퀘스트 메뉴');
+  assert.ok(calls[0][6] < 20, `expected fitted font size below 20, got ${calls[0][6]}`);
+  assert.equal(windowInstance.contents.fontSize, 20);
+  assert.equal(orchestrator.diagnostics().runtime_diagnostics.performance.counters.layout_overflow, 1);
 });
 
 test('message adapter translates joined message blocks instead of individual 401 lines', () => {
@@ -6316,6 +6452,7 @@ test('bitmap text adapter aggregates same-line fragments and retires on mutation
   assert.deepEqual(requests, ['Hello World']);
   assert.deepEqual(calls.slice(2), [
     ['frame'],
+    ['clearRect', 0, 0, 111, 24],
     ['drawText', '안녕 세계', 0, 0, 111, 24, 'left'],
   ]);
   assert.equal(orchestrator.diagnostics().active_items, 1);

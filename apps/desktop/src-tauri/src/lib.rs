@@ -30,6 +30,7 @@ pub fn run() {
             commands::translate::translate_with_local_provider,
             commands::translate::pause_translation,
             commands::translate::prepare_safe_shutdown,
+            commands::translate::force_close_workbench,
             commands::translate::test_local_provider,
             commands::translate::benchmark_provider_translation_speed,
             commands::review::review_queue,

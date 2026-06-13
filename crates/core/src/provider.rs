@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use crate::{Error, ProviderBatchRequest, ProviderBatchResponse, ProviderClient, Result};
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = concat!(
-    "Translate RPG Maker game text. Return JSON Lines only, one JSON object per input item: ",
-    "{\"id\":123,\"translation\":\"translated text\"}.\n",
-    "Preserve RPG Maker control codes, placeholders, and line breaks exactly.",
+    "RPG Maker localization transport contract. Keep provider input and output as JSON Lines. ",
+    "The user message contains items shaped like {\"id\":123,\"text\":\"source text\"}. ",
+    "The assistant response must contain items shaped like {\"id\":123,\"translation\":\"translated text\"}.",
 );
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,13 +164,44 @@ pub fn build_provider_system_prompt(
     )
 }
 
+#[must_use]
+pub fn build_quality_retry_instruction(target_language: &str) -> String {
+    let target_language_name = language_display_name(target_language);
+    format!(
+        "Quality Retry: Rewrite only the flagged translation rows into {target_language_name}.\n\
+Preserve JSONL ids and output exactly one JSON object per input item, one object per line.\n\
+Preserve RPG Maker control codes, placeholders, page breaks, real line breaks, and every ¤ character.\n\
+Copy every complete angle-bracket metadata tag byte-for-byte, such as <Disable Switch: 8> or <Enable Switch: 12>.\n\
+Do not emit literal \\\\n text when an actual line break is intended.\n\
+Do not leave foreign connector words, particles, or filler words such as de, des, der, le, la, or les.\n\
+For Korean, transliterate recurring character names unless they are protected technical tokens: Emma -> 엠마, Laura -> 로라, Aurora -> 오로라, Olivia -> 올리비아, Eva -> 에바, Victoria -> 빅토리아, Lexi -> 렉시.\n\
+Translate visible gameplay/story terms into {target_language_name}; preserve bracketed keyboard keys such as [Space] and [Escape]."
+    )
+}
+
 fn final_translation_rule(source_language_name: &str, target_language_name: &str) -> String {
     format!(
-        "System: You are an expert game localization engine. Your task is to translate the given text from {source_language_name} to {target_language_name}.\n\n\
-Strict Rules:\n\n\
-Formatting Protection: You MUST completely preserve the exact structural placement of the JSONL format, IDs, placeholders, RPG Maker control codes (e.g., \\N[1], \\C[3]), intended line/page breaks (\\n), and all ¤ characters. Do not translate, remove, or modify these technical elements.\n\n\
-Translation: Translate only the actual story/dialogue text into {target_language_name}.\n\n\
-Output Constraint: Output ONLY the final valid JSONL line. Do NOT include markdown code blocks (like ```json), greetings, explanations, or any extra text."
+        "Provider I/O Contract:\n\
+Source language: {source_language_name}\n\
+Target language: {target_language_name}\n\n\
+Input:\n\
+Each user line is JSONL in this shape:\n\
+{{\"id\":123,\"text\":\"source text\"}}\n\n\
+Output:\n\
+Return exactly one JSON object per input item, one JSON object per line:\n\
+{{\"id\":123,\"translation\":\"...\"}}\n\n\
+Hard requirements:\n\
+- id must be an integer.\n\
+- Use only the translation field for translated text.\n\
+- Do NOT quote id values.\n\
+- Do NOT use text instead of translation.\n\
+- Do NOT use *id.\n\
+- Do NOT omit, duplicate, reorder, merge, or split IDs.\n\
+- Do NOT include markdown code blocks, greetings, explanations, or extra lines.\n\
+- Preserve IDs, placeholders, RPG Maker control codes, ¤, real line breaks, page breaks, bracketed key tokens, variable tokens, and complete <...> metadata tags byte-for-byte.\n\
+- Translate only the human-visible story/dialogue/game text into {target_language_name}.\n\
+- Localize names and short dialogue into {target_language_name} unless the entire item is a technical token.\n\
+- Do not leave third-language connector words unless they are part of a protected technical token."
     )
 }
 

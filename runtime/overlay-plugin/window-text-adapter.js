@@ -27,7 +27,8 @@
         return original.call(this, text, ...rest);
       }
       const translated = translateText(translator, scope, text, this, name, rest);
-      return withTranslatedDraw(this, () => original.call(this, translated, ...rest));
+      recordWindowOverflow(translator, this, name, translated, rest);
+      return withTranslatedDraw(this, () => withFittedWindowText(this, name, translated, rest, () => original.call(this, translated, ...rest)));
     };
     prototype[name].__rpgTranslatorOriginal = original;
   }
@@ -69,8 +70,15 @@
       metadata: {
         windowId: state.windowId,
         methodName,
+        owner: surfaceOwner,
+        sceneName: currentSceneName(scope),
+        mapId: currentMapId(scope),
         x: rest && rest.length ? rest[0] : undefined,
         y: rest && rest.length > 1 ? rest[1] : undefined,
+        width: rest && rest.length > 2 ? rest[2] : undefined,
+        height: rest && rest.length > 3 ? rest[3] : undefined,
+        maxWidth: rest && rest.length > 2 ? rest[2] : undefined,
+        lineHeight: rest && rest.length > 3 ? rest[3] : undefined,
       },
     };
 
@@ -149,7 +157,7 @@
       if (typeof original !== 'function') continue;
       if (original.__rpgTranslatorWindowLifecycle === LIFECYCLE_TOKEN) continue;
       contents[methodName] = function translatedContentsMutation(...args) {
-        retireWindowSurface(translator, windowInstance, `contents-${methodName}`);
+        if (!isTranslatedDrawActive(windowInstance)) retireWindowSurface(translator, windowInstance, `contents-${methodName}`);
         return original.apply(this, args);
       };
       contents[methodName].__rpgTranslatorOriginal = original;
@@ -266,7 +274,17 @@
         return;
       }
       state.pendingDraws.delete(slotKey);
-      withTranslatedDraw(windowInstance, () => draw.call(windowInstance, entry.translatedText, ...(entry.args || [])));
+      recordWindowOverflow(translator, windowInstance, entry.methodName, entry.translatedText, entry.args || []);
+      withTranslatedDraw(windowInstance, () => {
+        clearWindowTextRegion(windowInstance, entry.methodName, entry.args || []);
+        return withFittedWindowText(
+          windowInstance,
+          entry.methodName,
+          entry.translatedText,
+          entry.args || [],
+          () => draw.call(windowInstance, entry.translatedText, ...(entry.args || [])),
+        );
+      });
       flushed = true;
     });
     return flushed;
@@ -285,6 +303,112 @@
     return Number(windowInstance && windowInstance.__rpgTranslatorWindowTextDrawDepth) > 0;
   }
 
+  function recordWindowOverflow(translator, windowInstance, methodName, text, args) {
+    if (!translator || typeof translator.recordSurfaceDraw !== 'function') return false;
+    const fit = calculateWindowTextFit(windowInstance, methodName, text, args);
+    if (!fit || !fit.overflow) return false;
+    translator.recordSurfaceDraw({
+      target: windowInstance,
+      adapterId: 'window-text',
+      methodName,
+      text: String(text ?? ''),
+      x: numberAt(args, 0, 0),
+      y: numberAt(args, 1, 0),
+      maxWidth: fit.maxWidth,
+      lineHeight: resolveLineHeight(windowInstance, args),
+      measuredWidth: fit.measuredWidth,
+      ownerType: 'window',
+      candidateAdapters: [],
+    });
+    return true;
+  }
+
+  function withFittedWindowText(windowInstance, methodName, text, args, callback) {
+    const fit = calculateWindowTextFit(windowInstance, methodName, text, args);
+    const contents = windowInstance && windowInstance.contents;
+    if (!fit || !fit.overflow || !contents || !Number.isFinite(fit.originalFontSize)) {
+      return callback();
+    }
+    const nextFontSize = Math.max(8, Math.floor(fit.originalFontSize * fit.scale));
+    if (!Number.isFinite(nextFontSize) || nextFontSize >= fit.originalFontSize) return callback();
+    const previousFontSize = contents.fontSize;
+    contents.fontSize = nextFontSize;
+    try {
+      return callback();
+    } finally {
+      contents.fontSize = previousFontSize;
+    }
+  }
+
+  function clearWindowTextRegion(windowInstance, methodName, args) {
+    if (methodName !== 'drawText') return false;
+    const contents = windowInstance && windowInstance.contents;
+    const clear = contents && typeof contents.clearRect === 'function' ? contents.clearRect : null;
+    const width = numberAt(args, 2, 0);
+    if (typeof clear !== 'function' || width <= 0) return false;
+    clear.call(contents, numberAt(args, 0, 0), numberAt(args, 1, 0), width, resolveLineHeight(windowInstance, args));
+    return true;
+  }
+
+  function calculateWindowTextFit(windowInstance, methodName, text, args) {
+    const contents = windowInstance && windowInstance.contents;
+    const maxWidth = resolveWindowTextWidth(windowInstance, methodName, args);
+    const originalFontSize = Number(contents && contents.fontSize);
+    if (!contents || !Number.isFinite(maxWidth) || maxWidth <= 0 || !Number.isFinite(originalFontSize) || originalFontSize <= 0) {
+      return null;
+    }
+    const measuredWidth = measureWindowTextWidth(windowInstance, contents, text);
+    if (!Number.isFinite(measuredWidth) || measuredWidth <= maxWidth) {
+      return { overflow: false, maxWidth, measuredWidth, originalFontSize, scale: 1 };
+    }
+    const scale = Math.max(0.35, Math.min(1, maxWidth / measuredWidth));
+    return { overflow: true, maxWidth, measuredWidth, originalFontSize, scale };
+  }
+
+  function resolveWindowTextWidth(windowInstance, methodName, args) {
+    if (methodName === 'drawText') return numberAt(args, 2, 0);
+    if (methodName === 'drawTextEx') {
+      const contents = windowInstance && windowInstance.contents;
+      const x = numberAt(args, 0, 0);
+      const width = Number(contents && contents.width);
+      if (Number.isFinite(width) && width > x) return width - x;
+      const innerWidth = Number(windowInstance && windowInstance.innerWidth);
+      if (Number.isFinite(innerWidth) && innerWidth > x) return innerWidth - x;
+    }
+    return 0;
+  }
+
+  function resolveLineHeight(windowInstance, args) {
+    const explicit = numberAt(args, 3, 0);
+    if (explicit > 0) return explicit;
+    if (windowInstance && typeof windowInstance.lineHeight === 'function') {
+      const value = Number(windowInstance.lineHeight());
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    const contents = windowInstance && windowInstance.contents;
+    const fontSize = Number(contents && contents.fontSize);
+    return Number.isFinite(fontSize) && fontSize > 0 ? Math.ceil(fontSize * 1.2) : 24;
+  }
+
+  function measureWindowTextWidth(windowInstance, contents, text) {
+    const value = String(text ?? '');
+    const candidates = [
+      () => (windowInstance && typeof windowInstance.textWidth === 'function' ? windowInstance.textWidth(value) : 0),
+      () => (contents && typeof contents.measureTextWidth === 'function' ? contents.measureTextWidth(value) : 0),
+      () => (contents && typeof contents.textWidth === 'function' ? contents.textWidth(value) : 0),
+    ];
+    for (const measure of candidates) {
+      try {
+        const width = Number(measure());
+        if (Number.isFinite(width) && width > 0) return Math.ceil(width);
+      } catch (_error) {
+        // Fall through to the next measurement strategy.
+      }
+    }
+    const fontSize = Number(contents && contents.fontSize);
+    return Math.ceil(value.length * Math.max(6, (Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 20) * 0.6));
+  }
+
   function isDedicatedMessageWindow(scope, windowInstance) {
     if (!windowInstance) return false;
     if (scope && scope.Window_Message && windowInstance instanceof scope.Window_Message) return true;
@@ -300,6 +424,25 @@
     const opacity = Number(windowInstance.contentsOpacity);
     if (Number.isFinite(opacity) && opacity <= 0) return false;
     return true;
+  }
+
+  function currentSceneName(scope) {
+    const scene = scope && scope.SceneManager && scope.SceneManager._scene;
+    return scene && scene.constructor && scene.constructor.name ? scene.constructor.name : '';
+  }
+
+  function currentMapId(scope) {
+    const gameMap = scope && scope.$gameMap;
+    if (gameMap && typeof gameMap.mapId === 'function') {
+      const value = Number(gameMap.mapId());
+      return Number.isFinite(value) ? value : undefined;
+    }
+    return undefined;
+  }
+
+  function numberAt(values, index, fallback) {
+    const value = Number(values && values.length > index ? values[index] : fallback);
+    return Number.isFinite(value) ? value : fallback;
   }
 
   function overlay(scope) {

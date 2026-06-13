@@ -59,6 +59,7 @@ fn usable_parity_smoke_scans_exports_installs_and_rolls_back_copy_game() -> Resu
     assert_eq!(scan.added_source_text_count, scan.source_text_count);
 
     let rows = db.review_queue_rows(scan.project_id, "ko", None)?;
+    let translatable_source_count = rows.len() as i64;
     assert!(
         rows.iter().any(|row| row.normalized_text
             == "Emma looks at the locked gate.\nThe city keeps its secrets."),
@@ -84,7 +85,10 @@ fn usable_parity_smoke_scans_exports_installs_and_rolls_back_copy_game() -> Resu
         &export,
         ExportPolicy::accepted_and_reviewed(),
     )?;
-    assert_eq!(export_report.included_count as i64, scan.source_text_count);
+    assert_eq!(
+        export_report.included_count as i64,
+        translatable_source_count
+    );
     ExportBuilder::verify_bundle(&export)?;
 
     let cache_text = fs::read_to_string(export.join("cache.jsonl")).expect("read cache");

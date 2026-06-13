@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rpg_translator_core::{
-    InstallOptions, Installer, OverlayConfig, Result, RollbackManager, RollbackOptions,
+    ExportBuilder, InstallOptions, Installer, OverlayConfig, Result, RollbackManager,
+    RollbackOptions,
 };
 use serde_json::Value;
 use tempfile::tempdir;
@@ -151,21 +152,6 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .all(|file| { file["sha256"].as_str().expect("hash").len() == 64 })
     );
 
-    let second_report =
-        Installer::install(&install_options(game.clone(), temp.path().join("export")))?;
-    let plugins_after_second =
-        fs::read_to_string(game.join("js/plugins.js")).expect("read plugins");
-    assert_eq!(
-        plugins_after_second
-            .matches("\"name\": \"RPGTranslator\"")
-            .count(),
-        1
-    );
-    assert_eq!(
-        second_report.plugins_backup_path,
-        report.plugins_backup_path
-    );
-
     let rollback = RollbackManager::rollback(&RollbackOptions {
         manifest_path: report.install_manifest_path,
     })?;
@@ -182,6 +168,191 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .removed_files
             .iter()
             .any(|path| path.ends_with("RPGTranslator.js"))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn reinstall_rollback_restores_previous_overlay_state_byte_for_byte() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let export = temp.path().join("export");
+    let export2 = temp.path().join("export2");
+    let original_plugins =
+        r#"var $plugins = [{"name":"Existing","status":true,"description":"","parameters":{}}];"#;
+    make_direct_game(&game, original_plugins);
+    make_export_bundle(&export);
+    make_export_bundle(&export2);
+    write_text(
+        &export2.join("cache.jsonl"),
+        r#"{"cache_key":"ck:v1:1111111111111111111111111111111111111111111111111111111111111111","cache_aliases":["ck:v1:1111111111111111111111111111111111111111111111111111111111111111"],"source_text_id":2,"source_hash":"1111111111111111111111111111111111111111111111111111111111111111","source_language":"ja","target_language":"ko","normalized_text":"再インストール","visible_text":"再インストール","translation":"재설치","control_code_signature":"","context_hash":null}"#,
+    );
+
+    Installer::install(&install_options(game.clone(), export.clone()))?;
+    let plugins_before_reinstall =
+        fs::read_to_string(game.join("js/plugins.js")).expect("read installed plugins");
+    let cache_before_reinstall =
+        fs::read_to_string(game.join("js/plugins/rpg-translator/cache.jsonl"))
+            .expect("read installed cache");
+    let boot_before_reinstall =
+        fs::read(game.join("js/plugins/rpg-translator/boot.js")).expect("read installed boot");
+
+    let reinstall_report = Installer::install(&install_options(game.clone(), export2))?;
+    let reinstall_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(&reinstall_report.install_manifest_path)
+            .expect("read reinstall manifest"),
+    )
+    .expect("parse reinstall manifest");
+    assert!(
+        reinstall_manifest["installed_files"]
+            .as_array()
+            .expect("installed files")
+            .iter()
+            .any(|file| file["previous_path"].as_str().is_some())
+    );
+
+    RollbackManager::rollback(&RollbackOptions {
+        manifest_path: reinstall_report.install_manifest_path,
+    })?;
+
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read restored plugins"),
+        plugins_before_reinstall
+    );
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins/rpg-translator/cache.jsonl"))
+            .expect("read restored cache"),
+        cache_before_reinstall
+    );
+    assert_eq!(
+        fs::read(game.join("js/plugins/rpg-translator/boot.js")).expect("read restored boot"),
+        boot_before_reinstall
+    );
+    assert!(game.join("js/plugins/RPGTranslator.js").exists());
+    assert!(game.join("js/plugins/rpg-translator/boot.js").exists());
+
+    Ok(())
+}
+
+#[test]
+fn phase_6_7_completion_matrix_locks_export_install_and_rollback_evidence() -> Result<()> {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let export = temp.path().join("export");
+    let original_plugins =
+        r#"var $plugins = [{"name":"Existing","status":true,"description":"","parameters":{}}];"#;
+    make_direct_game(&game, original_plugins);
+    make_export_bundle(&export);
+
+    let export_report = ExportBuilder::verify_bundle(&export)?;
+    assert_eq!(export_report.included_count, 1);
+    assert_eq!(export_report.skipped_count, 0);
+    assert_eq!(export_report.manifest_hash.len(), 64);
+
+    let report = Installer::install(&install_options(game.clone(), export.clone()))?;
+    let manifest_text =
+        fs::read_to_string(&report.install_manifest_path).expect("read install manifest");
+    let manifest: Value = serde_json::from_str(&manifest_text).expect("parse install manifest");
+    let installed = manifest["installed_files"]
+        .as_array()
+        .expect("installed files");
+
+    assert_eq!(manifest["export_id"], 42);
+    assert_eq!(
+        manifest["plugins_backup_sha256"]
+            .as_str()
+            .expect("plugins backup hash")
+            .len(),
+        64
+    );
+    assert_eq!(
+        manifest["required_asset_files"]
+            .as_array()
+            .expect("required asset files")
+            .len(),
+        3
+    );
+    assert_eq!(installed.len(), 21);
+    assert!(
+        installed[0]["path"]
+            .as_str()
+            .expect("runtime entry path")
+            .ends_with("RPGTranslator.js")
+    );
+    assert!(
+        installed[1]["path"]
+            .as_str()
+            .expect("text codec path")
+            .ends_with("text-codec.js")
+    );
+    assert!(
+        installed[18]["path"]
+            .as_str()
+            .expect("manifest path")
+            .ends_with("manifest.json")
+    );
+    assert!(
+        installed[19]["path"]
+            .as_str()
+            .expect("overlay config path")
+            .ends_with("overlay-config.json")
+    );
+    assert!(
+        installed[20]["path"]
+            .as_str()
+            .expect("cache jsonl path")
+            .ends_with("cache.jsonl")
+    );
+    assert!(
+        installed
+            .iter()
+            .all(|file| file["sha256"].as_str().expect("installed file hash").len() == 64)
+    );
+    assert_eq!(
+        fs::read_to_string(&report.plugins_backup_path).expect("read plugins backup"),
+        original_plugins
+    );
+    assert!(
+        fs::read_to_string(game.join("js/plugins.js"))
+            .expect("read installed plugins")
+            .contains("\"name\": \"RPGTranslator\"")
+    );
+
+    write_text(
+        &game.join("js/plugins/rpg-translator/cache.jsonl"),
+        "tampered",
+    );
+    let tamper_error = RollbackManager::rollback(&RollbackOptions {
+        manifest_path: report.install_manifest_path.clone(),
+    })
+    .expect_err("tampered installed cache fails rollback");
+    assert!(tamper_error.to_string().contains("hash mismatch"));
+    assert!(
+        fs::read_to_string(game.join("js/plugins.js"))
+            .expect("read plugins after failed rollback")
+            .contains("\"name\": \"RPGTranslator\"")
+    );
+
+    fs::copy(
+        export.join("cache.jsonl"),
+        game.join("js/plugins/rpg-translator/cache.jsonl"),
+    )
+    .expect("restore installed cache");
+    let rollback = RollbackManager::rollback(&RollbackOptions {
+        manifest_path: report.install_manifest_path,
+    })?;
+    assert_eq!(
+        fs::read_to_string(game.join("js/plugins.js")).expect("read restored plugins"),
+        original_plugins
+    );
+    assert!(!game.join("js/plugins/RPGTranslator.js").exists());
+    assert!(!game.join("js/plugins/rpg-translator").exists());
+    assert!(
+        rollback
+            .removed_files
+            .iter()
+            .any(|path| path.ends_with("plugins.js.backup"))
     );
 
     Ok(())

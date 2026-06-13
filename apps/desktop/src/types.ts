@@ -30,6 +30,10 @@ export type DashboardSummary = {
   project_id: number;
   target_language: string;
   source_text_count: number;
+  translatable_source_text_count?: number;
+  unsupported_candidate_count?: number;
+  missing_translatable_count?: number;
+  failed_translatable_count?: number;
   occurrence_count: number;
   translated_count: number;
   accepted_count: number;
@@ -93,6 +97,7 @@ export type ReviewCounts = {
   validation?: number;
   final_failed?: number;
   clean_approvable?: number;
+  unsupported?: number;
 };
 
 export type CheckpointSummary = {
@@ -292,6 +297,10 @@ export type DiagnosticsResponse = {
   unscanned_occurrence_count?: number;
   export_missing_count?: number;
   unsupported_string_candidate_count?: number;
+  runtime_candidate_count?: number;
+  runtime_imported_translatable_count?: number;
+  unsupported_image_text_count?: number;
+  layout_overflow_count?: number;
   coverage_samples?: CoverageAuditSample[];
   latest_job?: TranslationJobSummary | null;
 };

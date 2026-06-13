@@ -5,13 +5,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
     Error, NewProviderRun, NewQaFinding, NewTranslation, NewTranslationSpeedSample,
     ProviderTextState, Result, SourceTextRecord, TextCodec, TranslateProgressEvent,
     TranslateProgressSnapshot, TranslationDb, TranslationJobProgressUpdate, TranslationSpeedSample,
+    quality::is_allowed_technical_token,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +101,7 @@ pub struct BatchJob {
     pub token_estimate: usize,
     lane: BatchLane,
     provider_state: ProviderTextState,
+    allow_line_placeholder_reflow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -157,6 +159,9 @@ impl BatchPlanner {
         let mut group_indexes: BTreeMap<(String, String), usize> = BTreeMap::new();
         let mut groups: Vec<Vec<SourceTextRecord>> = Vec::new();
         for record in records {
+            if !is_translation_unit_kind(&record.unit_kind) {
+                continue;
+            }
             if completed_source_text_ids.contains(&record.id) {
                 continue;
             }
@@ -187,6 +192,9 @@ impl BatchPlanner {
                 token_estimate,
                 lane: lane_for_record(first),
                 provider_state,
+                allow_line_placeholder_reflow: records
+                    .iter()
+                    .all(|record| is_wrapped_runtime_unit(&record.unit_kind)),
             });
         }
         jobs.sort_by_key(|job| (job.lane, job.id));
@@ -213,10 +221,19 @@ impl BatchPlanner {
                     token_estimate: 1,
                     lane: BatchLane::Short,
                     provider_state,
+                    allow_line_placeholder_reflow: false,
                 }
             })
             .collect()
     }
+}
+
+fn is_translation_unit_kind(unit_kind: &str) -> bool {
+    unit_kind != "generic_candidate"
+}
+
+fn is_wrapped_runtime_unit(unit_kind: &str) -> bool {
+    matches!(unit_kind, "message_block" | "scroll_block")
 }
 
 pub struct BatchValidator;
@@ -255,12 +272,7 @@ impl BatchValidator {
                     "provider returned duplicate id {id}"
                 )));
             }
-            let translation = row
-                .get("translation")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    Error::invalid_input(format!("provider row {id} missing translation"))
-                })?;
+            let (translation, warnings) = provider_translation_field(id, &row)?;
             if translation.trim().is_empty() {
                 return Err(Error::invalid_input(format!(
                     "provider returned empty translation for id {id}"
@@ -271,13 +283,17 @@ impl BatchValidator {
                     "provider returned unchanged provider output for id {id}"
                 )));
             }
-            validate_line_local_placeholders(id, &job.provider_text, translation)?;
+            if !job.allow_line_placeholder_reflow {
+                validate_line_local_placeholders(id, &job.provider_text, translation)?;
+            }
+            validate_protected_angle_tags(id, &job.provider_text, translation)?;
             let restored =
                 TextCodec::restore_provider_translation(translation, &job.provider_state)?;
             validated.push(ValidatedTranslation {
                 job_id: id,
                 source_text_ids: job.source_text_ids.clone(),
                 translated_text: restored,
+                warnings,
             });
         }
 
@@ -289,6 +305,21 @@ impl BatchValidator {
 
         Ok(validated)
     }
+}
+
+fn provider_translation_field(id: i64, row: &Value) -> Result<(&str, Vec<String>)> {
+    if let Some(translation) = row.get("translation").and_then(Value::as_str) {
+        return Ok((translation, Vec::new()));
+    }
+    if let Some(translation) = row.get("text").and_then(Value::as_str) {
+        return Ok((
+            translation,
+            vec!["provider-output-used-text-alias".to_string()],
+        ));
+    }
+    Err(Error::invalid_input(format!(
+        "provider row {id} missing translation"
+    )))
 }
 
 fn validate_line_local_placeholders(id: i64, source: &str, translation: &str) -> Result<()> {
@@ -314,14 +345,64 @@ fn validate_line_local_placeholders(id: i64, source: &str, translation: &str) ->
     Ok(())
 }
 
+fn validate_protected_angle_tags(id: i64, source: &str, translation: &str) -> Result<()> {
+    let expected = independent_angle_tags(source);
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let actual = independent_angle_tags(translation);
+    if expected != actual {
+        return Err(Error::invalid_input(format!(
+            "protected tag mismatch for id {id}: expected {}, got {}",
+            expected.join(", "),
+            actual.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 fn is_unchanged_provider_output(source: &str, translation: &str) -> bool {
     let source = source.trim();
     let translation = translation.trim();
-    !source.is_empty() && !translation.is_empty() && source == translation
+    !source.is_empty()
+        && !translation.is_empty()
+        && source == translation
+        && !is_allowed_technical_token(source)
 }
 
 fn placeholder_count(input: &str) -> usize {
     input.chars().filter(|ch| *ch == '\u{00a4}').count()
+}
+
+fn independent_angle_tags(input: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        let tag_is_closing = input[index..].starts_with("</");
+        if !tag_is_closing && index > 0 && is_ascii_identifier_byte(bytes[index - 1]) {
+            index += 1;
+            continue;
+        }
+        let Some(relative_end) = input[index..].find('>') else {
+            break;
+        };
+        let end = index + relative_end + 1;
+        let tag = &input[index..end];
+        if tag.len() > 2 && tag.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            tags.push(tag.to_string());
+        }
+        index = end;
+    }
+    tags
+}
+
+fn is_ascii_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'\\'
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +410,7 @@ pub struct ValidatedTranslation {
     pub job_id: i64,
     pub source_text_ids: Vec<i64>,
     pub translated_text: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,6 +450,19 @@ impl ProviderRequestSpacingConfig {
             provider_connection_backoff_ms: Vec::new(),
         }
     }
+
+    #[must_use]
+    pub fn failure_backoff_only() -> Self {
+        Self {
+            base_success_spacing_ms: 0,
+            min_success_spacing_ms: 0,
+            max_success_spacing_ms: 0,
+            success_spacing_step_ms: 0,
+            success_recovery_threshold: 4,
+            provider_503_backoff_ms: vec![3_000, 8_000, 20_000, 45_000, 90_000],
+            provider_connection_backoff_ms: vec![3_000, 8_000, 20_000, 45_000, 90_000],
+        }
+    }
 }
 
 impl Default for ProviderRequestSpacingConfig {
@@ -388,6 +483,7 @@ pub struct BatchTranslatorConfig {
     pub include_existing_translations: bool,
     pub prompt_hash: String,
     pub adaptive_decision_reason: String,
+    pub output_review_state: String,
 }
 
 #[must_use]
@@ -416,14 +512,15 @@ impl Default for BatchTranslatorConfig {
         Self {
             project_id: Option::<i64>::default(),
             source_language: String::default(),
-            max_items_per_batch: 16,
-            input_token_budget: 4096,
+            max_items_per_batch: 8,
+            input_token_budget: 3072,
             retry_attempts: 1,
             provider_spacing: ProviderRequestSpacingConfig::stable(),
             source_text_ids: None,
             include_existing_translations: false,
             prompt_hash: String::default(),
             adaptive_decision_reason: "adaptive: no speed history loaded".to_string(),
+            output_review_state: "pending".to_string(),
         }
     }
 }
@@ -464,17 +561,22 @@ pub fn adaptive_translation_tuning_from_samples(
         .iter()
         .filter(|sample| is_success_speed_sample(sample) && sample.total_elapsed_ms > 0)
         .collect::<Vec<_>>();
+    let provider_restart_reason = provider_restart_recommendation(samples);
     if success_samples.is_empty() {
         if !samples.is_empty() {
             let suggested_batch = (requested_batch_size / 2).max(1);
-            let token_budget = (default_token_budget / 2).clamp(1024, default_token_budget);
+            let token_budget = default_token_budget;
             spacing.base_success_spacing_ms = spacing.base_success_spacing_ms.max(1_500);
+            let restart_suffix = provider_restart_reason
+                .as_deref()
+                .map(|reason| format!("; {reason}"))
+                .unwrap_or_default();
             return AdaptiveTranslationTuning {
                 max_items_per_batch: suggested_batch,
                 input_token_budget: token_budget,
                 provider_spacing: spacing.clone(),
                 decision_reason: format!(
-                    "adaptive: conservative from {} samples; failure_rate=100%; p95=unavailable; batch={suggested_batch}; token_budget={token_budget}; success_floor={}ms",
+                    "adaptive: conservative from {} samples; failure_rate=100%; p95=unavailable; batch={suggested_batch}; token_budget={token_budget}; success_floor={}ms{restart_suffix}",
                     samples.len(),
                     spacing.base_success_spacing_ms
                 ),
@@ -533,12 +635,16 @@ pub fn adaptive_translation_tuning_from_samples(
         .unwrap_or(default_token_budget)
         .max(default_token_budget.min(1024))
         .clamp(1024, 8192);
+    let restart_suffix = provider_restart_reason
+        .as_deref()
+        .map(|reason| format!("; {reason}"))
+        .unwrap_or_default();
     AdaptiveTranslationTuning {
         max_items_per_batch: suggested_batch,
         input_token_budget: token_budget,
         provider_spacing: spacing.clone(),
         decision_reason: format!(
-            "adaptive: {mode} from {} samples; failure_rate={:.0}%; p95={}ms; batch={}; token_budget={}; success_floor={}ms",
+            "adaptive: {mode} from {} samples; failure_rate={:.0}%; p95={}ms; batch={}; token_budget={}; success_floor={}ms{restart_suffix}",
             samples.len(),
             failure_rate * 100.0,
             p95_ms,
@@ -590,6 +696,10 @@ pub fn adaptive_translation_tuning_from_samples_for_lanes(
         default_token_budget,
         default_spacing,
     );
+    if let Some(lane_cap) = lane_batch_cap(&lanes, requested_batch_size) {
+        tuning.max_items_per_batch = tuning.max_items_per_batch.min(lane_cap);
+        tuning.decision_reason = format!("{}; lane_cap={lane_cap}", tuning.decision_reason);
+    }
     let lane_list = lanes.iter().copied().collect::<Vec<_>>().join(",");
     if used_fallback {
         tuning.decision_reason = format!(
@@ -607,8 +717,40 @@ pub fn adaptive_translation_tuning_from_samples_for_lanes(
     tuning
 }
 
+fn lane_batch_cap(lanes: &BTreeSet<&str>, requested_batch_size: usize) -> Option<usize> {
+    if lanes
+        .iter()
+        .any(|lane| matches!(*lane, "quality_retry" | "previous_failed" | "complex"))
+    {
+        return Some(4);
+    }
+    if lanes.iter().any(|lane| *lane == "plain_block") {
+        return Some(requested_batch_size.clamp(1, 8));
+    }
+    if lanes.iter().all(|lane| *lane == "short") {
+        return Some(16);
+    }
+    None
+}
+
 fn is_success_speed_sample(sample: &TranslationSpeedSample) -> bool {
     sample.status.starts_with("success") || sample.status == "benchmark"
+}
+
+fn provider_restart_recommendation(samples: &[TranslationSpeedSample]) -> Option<String> {
+    let connection_failures = samples
+        .iter()
+        .filter(|sample| {
+            sample.failure_type.as_deref() == Some("provider-connection")
+                || sample.status == "recoverable_provider"
+                    && sample.failure_type.as_deref() == Some("provider-connection")
+                || sample.status == "final_failed"
+                    && sample.failure_type.as_deref() == Some("provider-connection")
+        })
+        .count();
+    (connection_failures >= 3).then(|| {
+        format!("provider_restart_recommended: provider-connection failures={connection_failures}")
+    })
 }
 
 fn suggested_token_budget(
@@ -885,12 +1027,23 @@ impl BatchTranslator {
             .iter()
             .copied()
             .collect();
+        let source_text_id_filter = config
+            .source_text_ids
+            .as_ref()
+            .map(|ids| ids.iter().copied().collect::<BTreeSet<_>>());
         if config.include_existing_translations
             && let Some(source_text_ids) = config.source_text_ids.as_ref()
         {
             for source_text_id in source_text_ids {
                 completed_set.remove(source_text_id);
             }
+        }
+        if !config.include_existing_translations {
+            completed_set.extend(db.existing_translation_source_text_ids(
+                target_language,
+                source_text_id_filter.as_ref(),
+                config.project_id,
+            )?);
         }
         let plan = BatchPlanner::plan_with_completed(
             db,
@@ -1469,7 +1622,7 @@ impl BatchProcessor<'_> {
         }
 
         let mut last_error = Error::invalid_input("batch failed without provider call");
-        for _attempt in 0..=self.config.retry_attempts {
+        for attempt in 0..=self.config.retry_attempts {
             let request = ProviderBatchRequest {
                 items: batch
                     .iter()
@@ -1478,7 +1631,8 @@ impl BatchProcessor<'_> {
                         text: job.provider_text.clone(),
                     })
                     .collect(),
-                instruction: None,
+                instruction: (attempt > 0)
+                    .then(|| validation_retry_instruction(&last_error.to_string())),
             };
             let request_started = Instant::now();
             match self.provider.translate_batch(&request) {
@@ -1495,9 +1649,12 @@ impl BatchProcessor<'_> {
                             split_censored_translations(batch, translations);
                         persist_translations(
                             self.db,
-                            self.target_language,
-                            self.provider,
-                            self.provider_run_id,
+                            TranslationPersistenceContext {
+                                target_language: self.target_language,
+                                provider: self.provider,
+                                provider_run_id: self.provider_run_id,
+                                output_review_state: &self.config.output_review_state,
+                            },
                             translations,
                             self.report,
                             self.checkpoint,
@@ -1667,9 +1824,12 @@ impl BatchProcessor<'_> {
                             split_censored_translations(batch, translations);
                         persist_translations(
                             self.db,
-                            self.target_language,
-                            self.provider,
-                            self.provider_run_id,
+                            TranslationPersistenceContext {
+                                target_language: self.target_language,
+                                provider: self.provider,
+                                provider_run_id: self.provider_run_id,
+                                output_review_state: &self.config.output_review_state,
+                            },
                             translations,
                             self.report,
                             self.checkpoint,
@@ -1900,9 +2060,12 @@ impl BatchProcessor<'_> {
                 }
                 persist_translations(
                     self.db,
-                    self.target_language,
-                    self.provider,
-                    self.provider_run_id,
+                    TranslationPersistenceContext {
+                        target_language: self.target_language,
+                        provider: self.provider,
+                        provider_run_id: self.provider_run_id,
+                        output_review_state: &self.config.output_review_state,
+                    },
                     translations,
                     self.report,
                     self.checkpoint,
@@ -1979,6 +2142,9 @@ impl BatchProcessor<'_> {
 }
 
 fn finding_type_for_batch_message(message: &str) -> &'static str {
+    if message.contains("protected tag mismatch") {
+        return "protected-tag-mismatch";
+    }
     if message.contains("invalid provider output JSON")
         || message.contains("provider returned markdown fence")
         || message.contains("provider returned think tag")
@@ -2164,30 +2330,80 @@ where
     }
 }
 
+fn validation_retry_instruction(message: &str) -> String {
+    fn repair_note(detail: &str) -> String {
+        format!(
+            "Repair note: Keep the configured system prompt and all prior rules. Fix only this validation failure: {detail}"
+        )
+    }
+    if message.contains("unchanged provider output") {
+        return repair_note(
+            "The previous output copied the source unchanged. Translate or localize every translatable word, including character names, labels, skill names, effect names, stutters, sound effects, and short terms. Keep IDs, JSONL, placeholders, and control codes unchanged.",
+        );
+    }
+    if message.contains("protected tag mismatch") {
+        return repair_note(
+            "The previous output changed protected angle-bracket metadata. Copy every complete <...> tag byte-for-byte, such as <Disable Switch: 8>, while translating only visible text outside protected tags. Return strict JSONL with integer id and translation fields.",
+        );
+    }
+    if message.contains("placeholder mismatch") {
+        return repair_note(
+            "The previous output changed placeholder/control-code placement. Preserve the exact total number of ¤ placeholders in the original global order. Message and scroll blocks may use natural line reflow, but every ¤ must remain present. For non-message UI/database text, keep the same number of ¤ placeholders on each original line. Do not create any new backslash escape sequences. If a line break is needed, use a real line break, never literal \\n. Preserve only the RPG Maker control codes that already exist in the source; do not add \\N[n], \\C[n], \\H, \\h, or escaped Korean text. Keep every id, RPG Maker control code placeholder, protected <...> metadata tag, real line break, and technical token unchanged while translating only visible text.",
+        );
+    }
+    if message.contains("missing integer id") || message.contains("missing translation") {
+        return repair_note(
+            "The previous output used the wrong JSONL shape. Return exactly one JSON object per input id, shaped {\"id\":123,\"translation\":\"...\"}. id must be an integer and the translated string must use the translation field.",
+        );
+    }
+    repair_note(
+        "The previous output failed validation. Do not create any new backslash escape sequences. If a line break is needed, use a real line break, never literal \\n. Preserve only the RPG Maker control codes that already exist in the source; do not add \\N[n], \\C[n], \\H, \\h, or escaped Korean text. Return exactly one JSON object for each input id. Keep every id, placeholder, RPG Maker control code, protected angle-bracket metadata tag, and technical token unchanged while translating only visible text.",
+    )
+}
+
+struct TranslationPersistenceContext<'a> {
+    target_language: &'a str,
+    provider: &'a dyn ProviderClient,
+    provider_run_id: i64,
+    output_review_state: &'a str,
+}
+
 fn persist_translations(
     db: &mut TranslationDb,
-    target_language: &str,
-    provider: &dyn ProviderClient,
-    provider_run_id: i64,
+    context: TranslationPersistenceContext<'_>,
     translations: Vec<ValidatedTranslation>,
     report: &mut BatchRunReport,
     checkpoint: &mut BatchCheckpoint,
 ) -> Result<()> {
     let mut rows = Vec::new();
     let mut completed_source_text_ids = Vec::new();
+    let mut warning_findings = Vec::new();
     for translation in translations {
         for source_text_id in translation.source_text_ids.iter().copied() {
             rows.push(NewTranslation {
                 source_text_id,
-                target_language: target_language.to_string(),
+                target_language: context.target_language.to_string(),
                 translated_text: translation.translated_text.clone(),
-                provider: provider.provider_name().to_string(),
-                model: provider.model_name().map(str::to_string),
-                provider_run_id: Some(provider_run_id),
-                review_state: "pending".to_string(),
+                provider: context.provider.provider_name().to_string(),
+                model: context.provider.model_name().map(str::to_string),
+                provider_run_id: Some(context.provider_run_id),
+                review_state: context.output_review_state.to_string(),
                 qa_state: "passed".to_string(),
             });
             completed_source_text_ids.push(source_text_id);
+            for warning in &translation.warnings {
+                warning_findings.push(NewQaFinding {
+                    source_text_id,
+                    translation_id: None,
+                    target_language: Some(context.target_language.to_string()),
+                    provider_run_id: Some(context.provider_run_id),
+                    finding_type: warning.to_string(),
+                    severity: "warning".to_string(),
+                    message: "provider output used a compatibility alias field; accepted as translation text".to_string(),
+                    status: "resolved".to_string(),
+                    details_json: "{\"field\":\"text\",\"expected\":\"translation\"}".to_string(),
+                });
+            }
         }
     }
     db.upsert_translations_in_transaction(&rows)?;
@@ -2202,7 +2418,10 @@ fn persist_translations(
             .failure_details
             .retain(|detail| detail.source_text_id != source_text_id);
     }
-    db.resolve_open_qa_findings_for_sources(&completed_source_text_ids, target_language)?;
+    db.resolve_open_qa_findings_for_sources(&completed_source_text_ids, context.target_language)?;
+    for warning in warning_findings {
+        db.insert_qa_finding(&warning)?;
+    }
     Ok(())
 }
 
@@ -2364,15 +2583,12 @@ fn strip_one_known_suffix(raw: &str) -> Option<&str> {
 
 fn parse_rows(raw: &str) -> Result<Vec<Value>> {
     if raw.starts_with('[') {
-        let rows: Vec<Value> = serde_json::from_str(raw).map_err(|error| {
-            Error::invalid_input(format!("invalid provider output JSON array: {error}"))
-        })?;
+        let rows: Vec<Value> =
+            parse_json_value_with_repair(raw, "invalid provider output JSON array")?;
         return Ok(rows);
     }
     if raw.starts_with('{') && !raw.contains('\n') {
-        let row: Value = serde_json::from_str(raw).map_err(|error| {
-            Error::invalid_input(format!("invalid provider output JSON row: {error}"))
-        })?;
+        let row = parse_json_row_value(raw, "invalid provider output JSON row")?;
         return Ok(vec![row]);
     }
 
@@ -2382,12 +2598,94 @@ fn parse_rows(raw: &str) -> Result<Vec<Value>> {
         if trimmed.is_empty() {
             continue;
         }
-        let row = serde_json::from_str(trimmed).map_err(|error| {
-            Error::invalid_input(format!("invalid provider output JSONL row: {error}"))
-        })?;
+        let row = parse_json_row_value(trimmed, "invalid provider output JSONL row")?;
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn parse_json_row_value(raw: &str, context: &str) -> Result<Value> {
+    match parse_json_value_with_repair(raw, context) {
+        Ok(row) => Ok(row),
+        Err(error) => parse_relaxed_provider_row(raw).ok_or(error),
+    }
+}
+
+fn parse_json_value_with_repair<T>(raw: &str, context: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match serde_json::from_str(raw) {
+        Ok(value) => Ok(value),
+        Err(first_error) => {
+            let repaired = repair_common_invalid_json_string_escapes(raw);
+            serde_json::from_str(&repaired)
+                .map_err(|_| Error::invalid_input(format!("{context}: {first_error}")))
+        }
+    }
+}
+
+fn parse_relaxed_provider_row(raw: &str) -> Option<Value> {
+    let id = relaxed_json_integer_field(raw, "id")?;
+    let (field, translation) = relaxed_json_string_field(raw, "translation")
+        .map(|value| ("translation", value))
+        .or_else(|| relaxed_json_string_field(raw, "text").map(|value| ("text", value)))?;
+    Some(json!({
+        "id": id,
+        field: translation,
+    }))
+}
+
+fn relaxed_json_integer_field(raw: &str, key: &str) -> Option<i64> {
+    let key_index = raw.find(&format!("\"{key}\""))?;
+    let after_key = &raw[key_index + key.len() + 2..];
+    let colon_index = after_key.find(':')?;
+    let after_colon = after_key[colon_index + 1..].trim_start();
+    let end = after_colon
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '-')
+        .unwrap_or(after_colon.len());
+    after_colon[..end].parse().ok()
+}
+
+fn relaxed_json_string_field(raw: &str, key: &str) -> Option<String> {
+    let key_index = raw.find(&format!("\"{key}\""))?;
+    let after_key = &raw[key_index + key.len() + 2..];
+    let colon_index = after_key.find(':')?;
+    let after_colon = after_key[colon_index + 1..].trim_start();
+    let value_start = after_colon.find('"')? + 1;
+    let value_slice = &after_colon[value_start..];
+    let value_end = value_slice.rfind('"')?;
+    Some(
+        value_slice[..value_end]
+            .replace("\\*", "*")
+            .replace("\\_", "_")
+            .replace("\\~", "~"),
+    )
+}
+
+fn repair_common_invalid_json_string_escapes(raw: &str) -> String {
+    let mut repaired = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            repaired.push(ch);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            repaired.push_str("\\\\");
+            break;
+        };
+        if matches!(next, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') {
+            repaired.push('\\');
+            repaired.push(next);
+        } else if matches!(next, '*' | '_' | '~') {
+            repaired.push(next);
+        } else {
+            repaired.push_str("\\\\");
+            repaired.push(next);
+        }
+    }
+    repaired
 }
 
 fn estimate_tokens(text: &str) -> usize {

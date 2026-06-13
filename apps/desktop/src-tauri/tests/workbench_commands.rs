@@ -681,6 +681,59 @@ fn diagnostics_reports_unscanned_runtime_candidates_and_export_misses() {
 }
 
 #[test]
+fn diagnostics_imports_runtime_misses_as_translatable_candidates() {
+    tauri::async_runtime::block_on(async {
+        let temp = tempdir().expect("create temp dir");
+        let game_root = temp.path().join("EnglishGame");
+        let db_path = temp.path().join("workbench.sqlite");
+        make_english_direct_game(&game_root);
+
+        let scan = scan::scan_game_for_test(ScanGameRequest {
+            db_path: path_string(&db_path),
+            game_root: path_string(&game_root),
+            source_language: Some("en".to_string()),
+            disable_cjk_filter: Some(false),
+        })
+        .await
+        .expect("scan english game");
+
+        write_text(
+            &game_root
+                .join("rpg-translator")
+                .join("logs")
+                .join("runtime-misses.jsonl"),
+            r#"{"text":"Quest","normalized_text":"Quest","control_code_signature":"","cache_key":"runtime-menu-quest","source_language":"en","target_language":"ko","adapter":"window-text","kind":"drawText","methodName":"drawText","slotKey":"menu-command-quest","visible":true,"screenState":"visible","owner":"window-text:1","sceneName":"Scene_Menu","mapId":1,"eventId":2,"reason":"cache-miss","bbox":{"x":10,"y":20,"width":80,"height":24}}"#,
+        );
+
+        let diagnostics = diagnostics::diagnostics_summary(DiagnosticsRequest {
+            db_path: path_string(&db_path),
+            project_id: scan.report.project_id,
+            target_language: "ko".to_string(),
+        })
+        .await
+        .expect("diagnostics");
+
+        assert_eq!(diagnostics.runtime_candidate_count, 1);
+        assert_eq!(diagnostics.runtime_imported_translatable_count, 1);
+        assert_eq!(diagnostics.unsupported_image_text_count, 0);
+        assert!(diagnostics.dashboard.translatable_source_text_count >= 1);
+        assert!(
+            diagnostics.coverage_samples.iter().any(|sample| {
+                sample.category == "runtime-cache-miss" && sample.text == "Quest"
+            })
+        );
+
+        let db = TranslationDb::open(&db_path).expect("open db");
+        let pending = db.pending_source_texts("ko").expect("pending source texts");
+        assert!(
+            pending.iter().any(|row| {
+                row.unit_kind == "runtime_candidate" && row.normalized_text == "Quest"
+            })
+        );
+    });
+}
+
+#[test]
 fn scanned_common_events_flow_into_review_counts_and_export() {
     tauri::async_runtime::block_on(async {
         let temp = tempdir().expect("create temp dir");
@@ -714,6 +767,7 @@ fn scanned_common_events_flow_into_review_counts_and_export() {
         assert_eq!(common_line.first_file_path, "data/CommonEvents.json");
         assert_eq!(common_line.first_json_path, "$[1].list[0]");
         assert_eq!(common_line.review_state, "missing");
+        let translatable_row_count = rows.len();
 
         for row in rows {
             db.upsert_translation(&NewTranslation {
@@ -731,7 +785,7 @@ fn scanned_common_events_flow_into_review_counts_and_export() {
         let counts = db
             .review_counts(scan.report.project_id, "ko")
             .expect("review counts");
-        assert_eq!(counts.exportable, 7);
+        assert_eq!(counts.exportable, translatable_row_count as i64);
 
         let exported = export_install::export_bundle(ExportBundleRequest {
             db_path: path_string(&db_path),
@@ -741,8 +795,11 @@ fn scanned_common_events_flow_into_review_counts_and_export() {
         })
         .await
         .expect("export bundle");
-        assert_eq!(exported.included_count, 7);
-        assert_eq!(exported.skipped_count, 0);
+        assert_eq!(exported.included_count as usize, translatable_row_count);
+        assert_eq!(
+            exported.skipped_count as i64,
+            scan.report.source_text_count - translatable_row_count as i64
+        );
     });
 }
 
@@ -1424,7 +1481,7 @@ fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
         }
         let provider = spawn_local_provider_expect(
             r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"알파\"}\n{\"id\":2,\"translation\":\"베타\"}"}}]}"#,
-            "from English to Korean",
+            "Target language: Korean",
         );
 
         let response = translate::translate_with_local_provider_for_test(TranslateRequest {
@@ -1447,8 +1504,9 @@ fn translate_command_uses_speed_samples_for_initial_adaptive_settings() {
         .expect("translate with adaptive speed samples");
 
         assert_eq!(response.accepted_count, 2);
-        assert_eq!(response.effective_batch_size, 32);
+        assert_eq!(response.effective_batch_size, 16);
         assert!(response.adaptive_decision_reason.contains("accelerating"));
+        assert!(response.adaptive_decision_reason.contains("lane_cap=16"));
         assert!(response.adaptive_decision_reason.contains("lanes=short"));
         assert!(
             response
@@ -1537,7 +1595,7 @@ fn translate_command_tunes_from_pending_checkpoint_lanes_only() {
         .expect("write checkpoint");
         let provider = spawn_local_provider_expect(
             r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"대기\"}"}}]}"#,
-            "from English to Korean",
+            "Target language: Korean",
         );
 
         let response = translate::translate_with_local_provider_for_test(TranslateRequest {
@@ -1560,8 +1618,9 @@ fn translate_command_tunes_from_pending_checkpoint_lanes_only() {
         .expect("translate with checkpoint lane-aware adaptive samples");
 
         assert_eq!(response.accepted_count, 1);
-        assert_eq!(response.effective_batch_size, 32);
+        assert_eq!(response.effective_batch_size, 16);
         assert!(response.adaptive_decision_reason.contains("accelerating"));
+        assert!(response.adaptive_decision_reason.contains("lane_cap=16"));
         assert!(response.adaptive_decision_reason.contains("lanes=short"));
         assert!(
             response
@@ -1599,7 +1658,7 @@ fn local_provider_commands_allow_empty_and_custom_prompts() {
     tauri::async_runtime::block_on(async {
         let empty_prompt_provider = spawn_local_provider_expect(
             r#"{"choices":[{"message":{"content":"{\"id\":1,\"translation\":\"안녕\"}"}}]}"#,
-            "Return JSON Lines only",
+            "JSON Lines",
         );
         let empty = translate::test_local_provider(ProviderTestRequest {
             base_url: empty_prompt_provider.base_url.clone(),
@@ -1755,9 +1814,7 @@ fn spawn_local_provider_expect_repeated(
     let handle = thread::spawn(move || {
         for _ in 0..request_count {
             let (mut stream, _) = listener.accept().expect("accept provider request");
-            let mut request = [0_u8; 8192];
-            let read = stream.read(&mut request).expect("read provider request");
-            let request_text = String::from_utf8_lossy(&request[..read]);
+            let request_text = read_http_request_text(&mut stream);
             assert!(request_text.contains("POST /v1/chat/completions"));
             assert!(request_text.contains("fixture-model"));
             assert!(request_text.contains(expected_request_snippet));
@@ -1786,9 +1843,7 @@ fn spawn_local_provider_with_expected_request(
     let address = listener.local_addr().expect("provider server address");
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept provider request");
-        let mut request = [0_u8; 8192];
-        let read = stream.read(&mut request).expect("read provider request");
-        let request_text = String::from_utf8_lossy(&request[..read]);
+        let request_text = read_http_request_text(&mut stream);
         assert!(request_text.contains("POST /v1/chat/completions"));
         assert!(request_text.contains("fixture-model"));
         if let Some(expected) = expected_request_snippet {
@@ -1808,6 +1863,39 @@ fn spawn_local_provider_with_expected_request(
         base_url: format!("http://{address}"),
         handle: Some(handle),
     }
+}
+
+fn read_http_request_text(stream: &mut impl Read) -> String {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut chunk).expect("read provider request");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if http_request_complete(&request) {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&request).into_owned()
+}
+
+fn http_request_complete(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    request.len() >= header_end + 4 + content_length
 }
 
 fn spawn_hanging_local_provider() -> (ProviderServer, mpsc::Receiver<()>) {

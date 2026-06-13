@@ -3,7 +3,8 @@ use std::{collections::HashSet, fs, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
 use rpg_translator_core::{
-    CheckpointWriter, GameScanner, ScanOptions, TranslationJobSummary, WorkbenchDashboardSummary,
+    CheckpointWriter, GameScanner, NewOccurrence, NewSourceText, ScanOptions, TextCodec,
+    TranslationJobSummary, WorkbenchDashboardSummary,
 };
 
 use super::shared::{CommandResult, open_db_existing, run_blocking};
@@ -34,6 +35,10 @@ pub struct DiagnosticsResponse {
     pub unscanned_occurrence_count: i64,
     pub export_missing_count: i64,
     pub unsupported_string_candidate_count: i64,
+    pub runtime_candidate_count: i64,
+    pub runtime_imported_translatable_count: i64,
+    pub unsupported_image_text_count: i64,
+    pub layout_overflow_count: i64,
     pub coverage_samples: Vec<CoverageAuditSample>,
     pub latest_job: Option<TranslationJobSummary>,
 }
@@ -52,7 +57,8 @@ pub async fn diagnostics_summary(
     request: DiagnosticsRequest,
 ) -> CommandResult<DiagnosticsResponse> {
     run_blocking(move || {
-        let db = open_db_existing(&request.db_path)?;
+        let mut db = open_db_existing(&request.db_path)?;
+        let runtime_import = import_runtime_misses(&mut db, request.project_id)?;
         let dashboard =
             db.workbench_dashboard_summary(request.project_id, &request.target_language)?;
         let review_counts = db.review_counts(request.project_id, &request.target_language)?;
@@ -91,6 +97,10 @@ pub async fn diagnostics_summary(
             unscanned_occurrence_count: coverage.unscanned_occurrence_count,
             export_missing_count: coverage.export_missing_count,
             unsupported_string_candidate_count: coverage.unsupported_string_candidate_count,
+            runtime_candidate_count: runtime_import.runtime_candidate_count,
+            runtime_imported_translatable_count: runtime_import.runtime_imported_translatable_count,
+            unsupported_image_text_count: runtime_import.unsupported_image_text_count,
+            layout_overflow_count: runtime_import.layout_overflow_count,
             coverage_samples: coverage.samples,
             latest_job: db.latest_translation_job_summary(Some(&request.target_language))?,
         })
@@ -105,6 +115,93 @@ struct CoverageAuditSummary {
     export_missing_count: i64,
     unsupported_string_candidate_count: i64,
     samples: Vec<CoverageAuditSample>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RuntimeMissImportSummary {
+    runtime_candidate_count: i64,
+    runtime_imported_translatable_count: i64,
+    unsupported_image_text_count: i64,
+    layout_overflow_count: i64,
+}
+
+fn import_runtime_misses(
+    db: &mut rpg_translator_core::TranslationDb,
+    project_id: i64,
+) -> rpg_translator_core::Result<RuntimeMissImportSummary> {
+    let Some(project) = db.get_project(project_id)? else {
+        return Ok(RuntimeMissImportSummary::default());
+    };
+    let settings = db.load_workbench_settings()?;
+    let entries = runtime_miss_entries(&project.game_root);
+    let mut summary = RuntimeMissImportSummary::default();
+    let mut seen_cache_keys = HashSet::new();
+    for entry in entries {
+        let category = json_string(&entry, "category");
+        let reason = json_string(&entry, "reason");
+        if category == "unsupported-image-text" || reason == "unsupported-image-text" {
+            summary.unsupported_image_text_count += 1;
+            continue;
+        }
+        if reason == "layout-overflow" {
+            summary.layout_overflow_count += 1;
+        }
+        let text = json_string(&entry, "text");
+        if !is_display_safe_runtime_candidate(&text) {
+            continue;
+        }
+        let cache_key = json_string(&entry, "cache_key");
+        let unique_key = if cache_key.is_empty() {
+            text.clone()
+        } else {
+            cache_key.clone()
+        };
+        if !seen_cache_keys.insert(unique_key.clone()) {
+            continue;
+        }
+        summary.runtime_candidate_count += 1;
+        let source_language = json_string(&entry, "source_language");
+        let source_language = if source_language.trim().is_empty() {
+            settings.source_language.clone()
+        } else {
+            source_language
+        };
+        let analysis = TextCodec::analyze(&text);
+        let provider_state = TextCodec::encode_for_provider(&analysis.normalized_text);
+        let source_text = NewSourceText {
+            source_language,
+            unit_kind: "runtime_candidate".to_string(),
+            normalized_hash: String::new(),
+            normalized_text: analysis.normalized_text.clone(),
+            visible_text: analysis.visible_text.trim().to_string(),
+            codec_text: provider_state.provider_text,
+            control_code_signature: analysis.control_code_signature,
+            line_count: analysis.normalized_text.matches('\n').count() as i64 + 1,
+            newline_count: analysis.normalized_text.matches('\n').count() as i64,
+            placeholder_count: provider_state.control_codes.len() as i64,
+        };
+        let occurrence = NewOccurrence {
+            project_id: Some(project_id),
+            source_text_id: 0,
+            file_path: "rpg-translator/logs/runtime-misses.jsonl".to_string(),
+            json_path: runtime_miss_json_path(&cache_key, &text),
+            entity_type: "runtime.visible_text".to_string(),
+            event_id: json_i64(&entry, "eventId"),
+            page_index: None,
+            command_index: None,
+            command_code: None,
+            parameter_index: None,
+            object_key: Some(first_non_empty_string(&[
+                json_string(&entry, "adapter"),
+                json_string(&entry, "methodName"),
+                "runtime".to_string(),
+            ])),
+            extraction_rule_id: "runtime.cache-miss".to_string(),
+        };
+        db.upsert_runtime_candidate_occurrence(project_id, &source_text, &occurrence)?;
+        summary.runtime_imported_translatable_count += 1;
+    }
+    Ok(summary)
 }
 
 fn coverage_audit_summary(
@@ -226,6 +323,24 @@ fn coverage_audit_summary(
 }
 
 fn runtime_miss_samples(game_root: &str) -> Vec<CoverageAuditSample> {
+    runtime_miss_entries(game_root)
+        .into_iter()
+        .rev()
+        .take(4)
+        .map(|value| CoverageAuditSample {
+            category: "runtime-cache-miss".to_string(),
+            text: json_string(&value, "text"),
+            file_path: json_string(&value, "adapter"),
+            json_path: json_string(&value, "slotKey"),
+            reason: Some(first_non_empty_string(&[
+                json_string(&value, "reason"),
+                json_string(&value, "cache_key"),
+            ])),
+        })
+        .collect()
+}
+
+fn runtime_miss_entries(game_root: &str) -> Vec<serde_json::Value> {
     let log_path = PathBuf::from(game_root)
         .join("rpg-translator")
         .join("logs")
@@ -235,22 +350,44 @@ fn runtime_miss_samples(game_root: &str) -> Vec<CoverageAuditSample> {
     };
     content
         .lines()
-        .rev()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .take(4)
-        .map(|value| CoverageAuditSample {
-            category: "runtime-cache-miss".to_string(),
-            text: value
-                .get("text")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            file_path: String::new(),
-            json_path: String::new(),
-            reason: value
-                .get("cache_key")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string),
-        })
         .collect()
+}
+
+fn is_display_safe_runtime_candidate(text: &str) -> bool {
+    let value = text.trim();
+    !value.is_empty()
+        && value.len() <= 512
+        && value.chars().any(|ch| ch.is_alphabetic())
+        && !value.starts_with("data:image/")
+}
+
+fn runtime_miss_json_path(cache_key: &str, text: &str) -> String {
+    let key = if cache_key.trim().is_empty() {
+        text.chars().take(48).collect::<String>()
+    } else {
+        cache_key.to_string()
+    };
+    let encoded = serde_json::to_string(&key).unwrap_or_else(|_| "\"runtime\"".to_string());
+    format!("$.runtime_misses[{encoded}]")
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|value| value.as_i64())
+}
+
+fn first_non_empty_string(values: &[String]) -> String {
+    values
+        .iter()
+        .find(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
 }
