@@ -6231,6 +6231,171 @@ test('sprite text adapter groups sibling glyph sprites into one parent run overl
   assert.equal(orchestrator.claimText(parentRunSlotKey, 'bitmap-text:slot'), true);
 });
 
+test('sprite text adapter suppresses original parent-run glyphs while translated overlay is active', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'ABC') return '가나다';
+      return null;
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap(width, height) {
+      this.width = width || 120;
+      this.height = height || 32;
+    },
+    Sprite: function Sprite(bitmap) {
+      this.bitmap = bitmap || null;
+      this.children = [];
+      this.visible = true;
+      this.renderable = true;
+      this.opacity = 255;
+      this.x = 0;
+      this.y = 0;
+    },
+  };
+  root.Bitmap.prototype.drawText = function drawText(text) {
+    this._lastDrawText = text;
+  };
+  root.Sprite.prototype.addChild = function addChild(child) {
+    this.children.push(child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.addChildAt = function addChildAt(child, index) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    this.children.splice(index, 0, child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.Sprite.prototype.update = function update() {};
+
+  assert.equal(SpriteTextAdapter.install(root, orchestrator), true);
+  const parent = new root.Sprite(null);
+  const makeGlyph = (text, x) => {
+    const sprite = new root.Sprite({ width: 16, height: 24, _rpgTranslatorGlyphText: text });
+    sprite.x = x;
+    sprite.y = 4;
+    parent.addChild(sprite);
+    return sprite;
+  };
+  const a = makeGlyph('A', 0);
+  const b = makeGlyph('B', 11);
+  const c = makeGlyph('C', 22);
+
+  a.update();
+
+  const runOverlay = parent.children[3];
+  assert.equal(runOverlay._rpgTranslatorSpriteTextParentRunOverlay, true);
+  assert.equal(runOverlay.bitmap._lastDrawText, '가나다');
+  assert.equal(runOverlay.renderable, true);
+  assert.equal(a.renderable, false);
+  assert.equal(b.renderable, false);
+  assert.equal(c.renderable, false);
+
+  parent.removeChild(b);
+  a.update();
+
+  assert.equal(parent.children.includes(runOverlay), false);
+  assert.equal(a.renderable, true);
+  assert.equal(b.renderable, true);
+  assert.equal(c.renderable, true);
+});
+
+test('sprite text adapter restores original glyphs when parent-run render is rejected as stale', () => {
+  const index = {
+    translate({ text }) {
+      if (text === 'ABC') return '가나다';
+      return null;
+    },
+  };
+  const baseOrchestrator = new TextOrchestrator(index, {
+    engine: 'mz',
+    sourceLanguage: 'en',
+    targetLanguage: 'ko',
+  });
+  const staleTranslator = Object.create(baseOrchestrator);
+  staleTranslator.observeRecord = (request) => {
+    const command = baseOrchestrator.observeRecord(request);
+    baseOrchestrator.markSurfaceChanged(request.surface);
+    return command;
+  };
+  staleTranslator.acceptRender = (...args) => baseOrchestrator.acceptRender(...args);
+  staleTranslator.claimSurface = (...args) => baseOrchestrator.claimSurface(...args);
+  staleTranslator.claimText = (...args) => baseOrchestrator.claimText(...args);
+  staleTranslator.releaseSurface = (...args) => baseOrchestrator.releaseSurface(...args);
+  staleTranslator.releaseTextClaim = (...args) => baseOrchestrator.releaseTextClaim(...args);
+  staleTranslator.archiveItem = (...args) => baseOrchestrator.archiveItem(...args);
+  staleTranslator.markSurfaceChanged = (...args) => baseOrchestrator.markSurfaceChanged(...args);
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap(width, height) {
+      this.width = width || 120;
+      this.height = height || 32;
+    },
+    Sprite: function Sprite(bitmap) {
+      this.bitmap = bitmap || null;
+      this.children = [];
+      this.visible = true;
+      this.renderable = true;
+      this.opacity = 255;
+      this.x = 0;
+      this.y = 0;
+    },
+  };
+  root.Bitmap.prototype.drawText = function drawText(text) {
+    this._lastDrawText = text;
+  };
+  root.Sprite.prototype.addChild = function addChild(child) {
+    this.children.push(child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.addChildAt = function addChildAt(child, index) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    this.children.splice(index, 0, child);
+    child.parent = this;
+    return child;
+  };
+  root.Sprite.prototype.removeChild = function removeChild(child) {
+    this.children = this.children.filter((candidate) => candidate !== child);
+    child.parent = null;
+    return child;
+  };
+  root.Sprite.prototype.update = function update() {};
+
+  assert.equal(SpriteTextAdapter.install(root, staleTranslator), true);
+  const parent = new root.Sprite(null);
+  const makeGlyph = (text, x) => {
+    const sprite = new root.Sprite({ width: 16, height: 24, _rpgTranslatorGlyphText: text });
+    sprite.x = x;
+    sprite.y = 4;
+    parent.addChild(sprite);
+    return sprite;
+  };
+  const a = makeGlyph('A', 0);
+  const b = makeGlyph('B', 11);
+  const c = makeGlyph('C', 22);
+
+  a.update();
+
+  assert.equal(parent.children.length, 3);
+  assert.equal(a.renderable, true);
+  assert.equal(b.renderable, true);
+  assert.equal(c.renderable, true);
+  assert.equal(baseOrchestrator.diagnostics().render_rejected, 1);
+});
+
 test('sprite text adapter retires parent run overlays when glyph child is removed by index', () => {
   const requests = [];
   const index = {
