@@ -484,6 +484,16 @@ td small,
   white-space: nowrap;
 }
 
+.status-cell small {
+  grid-column: 2;
+  overflow: hidden;
+  color: #647477;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .error-banner {
   display: flex;
   align-items: center;

@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use rpg_translator_core::{
     BatchTranslator, BatchTranslatorConfig, DEFAULT_SYSTEM_PROMPT, ExportBuilder, ExportPolicy,
     InstallOptions, Installer, LocalOpenAiConfig, LocalOpenAiProvider, LocalProviderTransport,
     ProviderRequestSpacingConfig, Result, RollbackManager, RollbackOptions, ScanOptions,
-    TranslationDb, WorkbenchService, translation_prompt_hash,
+    TranslationDb, WorkbenchService, build_quality_retry_instruction, translation_prompt_hash,
 };
 use serde_json::Value;
 
@@ -25,6 +25,8 @@ fn run(args: Vec<String>) -> Result<()> {
     match args[0].as_str() {
         "scan-game" => scan_game(&args[1..]),
         "translate-local" => translate_local(&args[1..]),
+        "audit-quality" => audit_quality(&args[1..]),
+        "repair-syntax" => repair_syntax(&args[1..]),
         "export-bundle" => export_bundle(&args[1..]),
         "install-overlay" => install_overlay(&args[1..]),
         "rollback-overlay" => rollback_overlay(&args[1..]),
@@ -83,15 +85,57 @@ fn translate_local(args: &[String]) -> Result<()> {
     let model = parsed
         .get("--model")
         .ok_or_else(|| rpg_translator_core::Error::invalid_input("--model is required"))?;
-    let batch_size = optional_usize(&parsed, "--batch-size")?.unwrap_or(16);
-    let token_budget = optional_usize(&parsed, "--token-budget")?.unwrap_or(4096);
-    let system_prompt = parsed
+    let batch_size = optional_usize(&parsed, "--batch-size")?.unwrap_or(8);
+    let token_budget = optional_usize(&parsed, "--token-budget")?.unwrap_or(3072);
+    let retry_attempts = optional_usize(&parsed, "--retry-attempts")?.unwrap_or(1);
+    let quality_only = parsed
+        .get("--quality-only")
+        .is_some_and(|value| value == "true");
+    let parsed_system_prompt = parsed
         .get("--system-prompt")
         .cloned()
         .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let system_prompt = if quality_only {
+        let quality_instruction = build_quality_retry_instruction(target_language);
+        if parsed_system_prompt.trim().is_empty() || parsed_system_prompt == DEFAULT_SYSTEM_PROMPT {
+            quality_instruction
+        } else {
+            format!("{parsed_system_prompt}\n\n{quality_instruction}")
+        }
+    } else {
+        parsed_system_prompt
+    };
+    let output_review_state = match parsed.get("--review-state").map(String::as_str) {
+        Some("accepted") => "accepted",
+        Some(value) => {
+            return Err(rpg_translator_core::Error::invalid_input(format!(
+                "--review-state only supports accepted for translate-local, got {value}"
+            )));
+        }
+        None => "pending",
+    };
     let prompt_hash = translation_prompt_hash(&source_language, target_language, &system_prompt);
 
     let mut db = TranslationDb::open_with_schema_guard(&db_path)?;
+    let quality_source_text_ids = if quality_only {
+        let report = db.audit_translation_quality(project_id, target_language, 0)?;
+        let ids = report
+            .issues
+            .iter()
+            .filter(|issue| matches!(issue.classification.as_str(), "high_risk" | "quality_retry"))
+            .filter_map(|issue| issue.source_text_id)
+            .collect::<BTreeSet<_>>();
+        if ids.is_empty() {
+            println!(
+                "quality_candidates=0 translated status=completed provider_run_id=0 accepted=0 failed=0 batches=0/0 elapsed_ms=0"
+            );
+            return Ok(());
+        }
+        Some(ids.into_iter().collect::<Vec<_>>())
+    } else {
+        None
+    };
+    let quality_candidate_count = quality_source_text_ids.as_ref().map_or(0usize, Vec::len);
     let mut provider = LocalOpenAiProvider::new(
         LocalOpenAiConfig {
             base_url: base_url.clone(),
@@ -114,28 +158,23 @@ fn translate_local(args: &[String]) -> Result<()> {
             source_language,
             max_items_per_batch: batch_size.max(1),
             input_token_budget: token_budget.max(1),
-            retry_attempts: 0,
-            provider_spacing: ProviderRequestSpacingConfig::disabled(),
-            source_text_ids: None,
-            include_existing_translations: false,
+            retry_attempts,
+            provider_spacing: ProviderRequestSpacingConfig::failure_backoff_only(),
+            source_text_ids: quality_source_text_ids,
+            include_existing_translations: quality_only,
             prompt_hash,
             adaptive_decision_reason: "cli translate-local fixed batch settings".to_string(),
+            output_review_state: output_review_state.to_string(),
         },
     )?;
-    let approved_count = match parsed.get("--review-state").map(String::as_str) {
-        Some("accepted") => {
-            db.bulk_approve_pending_review_rows(project_id, target_language, None)?
-                .updated_count
-        }
-        Some(value) => {
-            return Err(rpg_translator_core::Error::invalid_input(format!(
-                "--review-state only supports accepted for translate-local, got {value}"
-            )));
-        }
-        None => 0,
+    let approved_count = if output_review_state == "accepted" {
+        report.completed_source_text_ids.len()
+    } else {
+        0
     };
     println!(
-        "translated status={} provider_run_id={} accepted={} failed={} batches={}/{} elapsed_ms={}",
+        "quality_candidates={} translated status={} provider_run_id={} accepted={} failed={} batches={}/{} elapsed_ms={}",
+        quality_candidate_count,
         report.status.as_key(),
         report.provider_run_id,
         approved_count,
@@ -144,6 +183,90 @@ fn translate_local(args: &[String]) -> Result<()> {
         report.total_batches,
         report.elapsed_ms
     );
+    Ok(())
+}
+
+fn audit_quality(args: &[String]) -> Result<()> {
+    let parsed = parse_flags(args)?;
+    let db_path = required_path(&parsed, "--db")?;
+    let project_id = required_i64(&parsed, "--project-id")?;
+    let target_language = parsed.get("--target-language").ok_or_else(|| {
+        rpg_translator_core::Error::invalid_input("--target-language is required")
+    })?;
+    let limit = optional_usize(&parsed, "--limit")?.unwrap_or(50);
+    let db = TranslationDb::open_with_schema_guard(&db_path)?;
+    let report = db.audit_translation_quality(project_id, target_language, limit)?;
+    println!(
+        "quality_audit total_rows={} issues={} high_severity={} retranslation_candidates={} high_risk_sources={} quality_retry_sources={} allowlisted_technical={}",
+        report.total_rows,
+        report.issue_count,
+        report.high_severity_count,
+        report.retranslation_candidate_count,
+        report.high_risk_source_count,
+        report.quality_retry_source_count,
+        report.allowlisted_technical_count
+    );
+    for issue in report.issues {
+        println!(
+            "quality_issue source_text_id={} translation_id={} unit_kind={} code={} severity={} classification={} message={} source=\"{}\" translation=\"{}\"",
+            issue.source_text_id.unwrap_or_default(),
+            issue.translation_id.unwrap_or_default(),
+            issue.unit_kind.unwrap_or_default(),
+            issue.code,
+            issue.severity,
+            issue.classification,
+            one_line(&issue.message),
+            snippet(&issue.source_text, 80),
+            snippet(&issue.translated_text, 80)
+        );
+    }
+    Ok(())
+}
+
+fn repair_syntax(args: &[String]) -> Result<()> {
+    let parsed = parse_flags(args)?;
+    let db_path = required_path(&parsed, "--db")?;
+    let project_id = required_i64(&parsed, "--project-id")?;
+    let target_language = parsed.get("--target-language").ok_or_else(|| {
+        rpg_translator_core::Error::invalid_input("--target-language is required")
+    })?;
+    let apply = parsed.get("--apply").is_some_and(|value| value == "true");
+    let mut db = TranslationDb::open_with_schema_guard(&db_path)?;
+    let backup_path = if apply {
+        Some(db.create_verified_backup(&db_path, "syntax-repair")?)
+    } else {
+        None
+    };
+    let report =
+        db.repair_translation_syntax(project_id, target_language, apply, backup_path.as_deref())?;
+    let mode = if apply { "apply" } else { "dry-run" };
+    println!(
+        "syntax_repair mode={} target_language={} total_open_validation={} unique_sources={} safe_candidates={} unsafe={} applied={} resolved_findings={} backup={}",
+        mode,
+        report.target_language,
+        report.total_open_validation_count,
+        report.unique_source_count,
+        report.safe_candidate_count,
+        report.unsafe_count,
+        report.applied_count,
+        report.resolved_finding_count,
+        report.backup_path.as_deref().unwrap_or("")
+    );
+    for (action, count) in &report.action_counts {
+        println!("syntax_repair_action action={} count={}", action, count);
+    }
+    for sample in &report.samples {
+        println!(
+            "syntax_repair_sample source_text_id={} safe={} actions={} unsafe_reason={} remaining={} original=\"{}\" repaired=\"{}\"",
+            sample.source_text_id,
+            sample.safe_to_apply,
+            sample.actions.join(","),
+            sample.unsafe_reason.as_deref().unwrap_or(""),
+            sample.validation_messages.join(" | "),
+            snippet(&sample.original_text, 120),
+            snippet(&sample.repaired_text, 120)
+        );
+    }
     Ok(())
 }
 
@@ -172,6 +295,21 @@ fn export_bundle(args: &[String]) -> Result<()> {
         report.output_dir.display()
     );
     Ok(())
+}
+
+fn one_line(input: &str) -> String {
+    input.replace(['\r', '\n'], " ")
+}
+
+fn snippet(input: &str, max_chars: usize) -> String {
+    let one_line = one_line(input).replace('"', "'");
+    let mut chars = one_line.chars();
+    let snippet = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{snippet}...")
+    } else {
+        snippet
+    }
 }
 
 struct BlockingHttpTransport {
@@ -288,6 +426,11 @@ fn parse_flags(args: &[String]) -> Result<HashMap<String, String>> {
                 "unexpected argument {key}"
             )));
         }
+        if is_boolean_flag(key) {
+            parsed.insert(key.clone(), "true".to_string());
+            index += 1;
+            continue;
+        }
         let value = args.get(index + 1).ok_or_else(|| {
             rpg_translator_core::Error::invalid_input(format!("missing value for {key}"))
         })?;
@@ -295,6 +438,10 @@ fn parse_flags(args: &[String]) -> Result<HashMap<String, String>> {
         index += 2;
     }
     Ok(parsed)
+}
+
+fn is_boolean_flag(key: &str) -> bool {
+    matches!(key, "--quality-only" | "--dry-run" | "--apply")
 }
 
 fn required_path(parsed: &HashMap<String, String>, key: &str) -> Result<PathBuf> {

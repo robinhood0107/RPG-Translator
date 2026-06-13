@@ -142,6 +142,10 @@ type CommandMap = {
       stale_runs_interrupted: number;
     };
   };
+  force_close_workbench: {
+    request: { reason?: string | null };
+    response: { requested: boolean };
+  };
 	  test_local_provider: {
     request: {
       base_url: string;

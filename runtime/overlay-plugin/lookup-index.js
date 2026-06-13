@@ -84,6 +84,7 @@
         target_language: request.targetLanguage || this.manifest.target_language || '',
         context_hash: request.contextHash || null,
       };
+      attachOptionalMissMetadata(miss, request);
       this.recentMisses.push({
         text: miss.text,
         normalized_text: miss.normalized_text,
@@ -108,6 +109,38 @@
         this.negativeMissKeys.delete(oldest);
       }
       return true;
+    }
+  }
+
+  function attachOptionalMissMetadata(miss, request) {
+    for (const [outputKey, requestKey] of [
+      ['adapter', 'adapter'],
+      ['kind', 'kind'],
+      ['methodName', 'methodName'],
+      ['slotKey', 'slotKey'],
+      ['screenState', 'screenState'],
+      ['owner', 'owner'],
+      ['sceneName', 'sceneName'],
+      ['reason', 'reason'],
+    ]) {
+      const value = request && request[requestKey];
+      if (typeof value === 'string' && value.trim()) miss[outputKey] = value;
+    }
+    for (const [outputKey, requestKey] of [['mapId', 'mapId'], ['eventId', 'eventId']]) {
+      const value = Number(request && request[requestKey]);
+      if (Number.isFinite(value)) miss[outputKey] = value;
+    }
+    if (request && Object.prototype.hasOwnProperty.call(request, 'visible')) {
+      miss.visible = request.visible === true;
+    }
+    const bbox = request && request.bbox;
+    if (bbox && typeof bbox === 'object') {
+      const normalized = {};
+      for (const key of ['x', 'y', 'width', 'height']) {
+        const value = Number(bbox[key]);
+        if (Number.isFinite(value)) normalized[key] = value;
+      }
+      if (Object.keys(normalized).length) miss.bbox = normalized;
     }
   }
 

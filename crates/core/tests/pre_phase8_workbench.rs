@@ -5,7 +5,8 @@ use rpg_translator_core::{
     BatchTranslator, BatchTranslatorConfig, Engine, InstallStatusRecord, LocalOpenAiConfig,
     LocalOpenAiProvider, LocalProviderTransport, NewInstallRecord, NewProject, NewSourceText,
     NewTranslation, ProviderBatchRequest, Result, ScanOptions, TextCodec, TranslationDb,
-    TranslationJobProgressUpdate, WorkbenchService, build_provider_system_prompt,
+    TranslationJobProgressUpdate, TranslationQualityAuditor, WorkbenchService,
+    build_provider_system_prompt, build_quality_retry_instruction,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -114,12 +115,24 @@ fn local_openai_provider_builds_safe_request_and_parses_chat_response() -> Resul
     );
     assert!(system_prompt.contains("JSON Lines"));
     assert!(system_prompt.contains(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
-    assert!(system_prompt.contains("from Japanese to Korean"));
+    assert!(system_prompt.contains("Provider I/O Contract:"));
+    assert!(system_prompt.contains("Source language: Japanese"));
+    assert!(system_prompt.contains("Target language: Korean"));
     assert!(
         system_prompt
-            .contains("Translation: Translate only the actual story/dialogue text into Korean.")
+            .contains("Translate only the human-visible story/dialogue/game text into Korean.")
     );
-    assert!(system_prompt.contains("Output ONLY the final valid JSONL line"));
+    assert!(system_prompt.contains("Return exactly one JSON object per input item"));
+    assert!(system_prompt.contains("one JSON object per line"));
+    assert!(system_prompt.contains("id must be an integer"));
+    assert!(system_prompt.contains("Use only the translation field"));
+    assert!(system_prompt.contains("Do NOT use text instead of translation"));
+    assert!(system_prompt.contains("complete <...> metadata tags byte-for-byte"));
+    assert!(system_prompt.contains("Localize names and short dialogue"));
+    assert!(system_prompt.contains("Do not leave third-language connector words"));
+    assert!(!system_prompt.contains("System: You are an expert game localization engine."));
+    assert!(!system_prompt.contains("Strict Rules:"));
+    assert!(!system_prompt.contains("Output ONLY the final valid JSONL line"));
     assert!(
         system_prompt.find(ui_prompt).expect("ui prompt present")
             < system_prompt
@@ -131,8 +144,8 @@ fn local_openai_provider_builds_safe_request_and_parses_chat_response() -> Resul
             .find(rpg_translator_core::DEFAULT_SYSTEM_PROMPT)
             .expect("rust default prompt present")
             < system_prompt
-                .find("Strict Rules:")
-                .expect("final strict rules present")
+                .find("Provider I/O Contract:")
+                .expect("provider contract present")
     );
     assert_eq!(response.raw_output, "{\"id\":1,\"translation\":\"안녕¤\"}");
 
@@ -144,14 +157,151 @@ fn provider_prompt_builder_forces_display_target_language() {
     let prompt = build_provider_system_prompt("Custom prompt.", "en", "vi");
     assert!(prompt.starts_with("Custom prompt."));
     assert!(prompt.contains(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
-    assert!(prompt.contains("from English to Vietnamese"));
+    assert!(prompt.contains("Source language: English"));
+    assert!(prompt.contains("Target language: Vietnamese"));
     assert!(prompt.contains("into Vietnamese"));
+    assert!(prompt.contains("{\"id\":123,\"translation\":\"...\"}"));
+    assert!(prompt.contains("Do NOT quote id values"));
+    assert!(prompt.contains("Do NOT use text instead of translation"));
+    assert!(prompt.contains("complete <...> metadata tags byte-for-byte"));
     assert!(prompt.contains("Do NOT include markdown code blocks"));
+    assert!(!prompt.contains("System: You are an expert game localization engine."));
 
     let custom_target = build_provider_system_prompt("", "English", "Pirate Korean");
     assert!(custom_target.starts_with(rpg_translator_core::DEFAULT_SYSTEM_PROMPT));
-    assert!(custom_target.contains("from English to Pirate Korean"));
+    assert!(custom_target.contains("Source language: English"));
+    assert!(custom_target.contains("Target language: Pirate Korean"));
     assert!(custom_target.contains("into Pirate Korean"));
+}
+
+#[test]
+fn translation_quality_audit_flags_high_risk_defects_and_allows_technical_tokens() {
+    let issues = TranslationQualityAuditor::audit_text("Horny Man", "욕정 de 있는 남자", "ko");
+    assert!(issues.iter().any(|issue| issue.code == "foreign_connector"));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.classification == "high_risk")
+    );
+
+    let issues = TranslationQualityAuditor::audit_text(
+        "Nether Aura Strike 4",
+        "네더 오I라 스트라이크 4",
+        "ko",
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == "embedded_ascii_in_hangul")
+    );
+
+    let issues = TranslationQualityAuditor::audit_text(
+        "This stolen power is only a fragment.",
+        "이 훔친\\n힘은 파편일 뿐입니다.",
+        "ko",
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == "literal_backslash_n")
+    );
+
+    let issues =
+        TranslationQualityAuditor::audit_text("Emma, you look pale.", "Emma, 얼굴이 창백해.", "ko");
+    assert!(issues.iter().any(|issue| issue.code == "raw_source_token"));
+
+    let issues = TranslationQualityAuditor::audit_text(
+        "Haa~, s-stop making me say those words!",
+        "하아~, way, way s-stop making me say those naughty words~!",
+        "ko",
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == "source_english_fragment")
+    );
+
+    for technical in [
+        "ATK+100%",
+        "Lv",
+        "${Text1}",
+        "[Space]",
+        "[Escape]",
+        "Crypt_Tileset_Outside",
+        "►D1-F1",
+    ] {
+        assert!(
+            TranslationQualityAuditor::audit_text(technical, technical, "ko").is_empty(),
+            "{technical} should stay allowed as a technical token"
+        );
+    }
+    assert!(
+        TranslationQualityAuditor::audit_text(
+            "<Show Switch: 63>Pass Time",
+            "<Show Switch: 63>시간 경과",
+            "ko",
+        )
+        .is_empty(),
+        "angle-bracket command metadata should be protected during quality audit"
+    );
+    assert!(
+        TranslationQualityAuditor::audit_text(
+            "<Disable Switch: 8>Diluted Blood of the Goddess",
+            "<Disable Switch: 나 8>희석된 여신의 피",
+            "ko",
+        )
+        .iter()
+        .any(|issue| {
+            issue.code == "protected_tag_mismatch" && issue.classification == "high_risk"
+        }),
+        "mutated angle-bracket command metadata should be high risk"
+    );
+    assert!(
+        TranslationQualityAuditor::audit_text(
+            "Click [Space] or press [Escape] to exit.",
+            "[Space]를 클릭하거나 종료하려면 [Escape]를 누르세요.",
+            "ko",
+        )
+        .is_empty(),
+        "protected keyboard keys inside sentences should not be retried"
+    );
+    assert!(
+        TranslationQualityAuditor::audit_text(
+            "Office_Tileset (Lexi)",
+            "Office_Tileset (렉시)",
+            "ko",
+        )
+        .is_empty(),
+        "technical tileset tokens may remain while names are localized"
+    );
+
+    let report = TranslationQualityAuditor::report_from_issues_with_allowlist(
+        3,
+        vec![
+            TranslationQualityAuditor::audit_text("Horny Man", "욕정 de 있는 남자", "ko").remove(0),
+            TranslationQualityAuditor::audit_text("Emma looks", "엠마 Emma", "ko")
+                .into_iter()
+                .find(|issue| issue.classification == "quality_retry")
+                .expect("quality retry issue"),
+        ],
+        1,
+        1,
+    );
+    assert_eq!(report.high_risk_source_count, 1);
+    assert_eq!(report.quality_retry_source_count, 1);
+    assert_eq!(report.allowlisted_technical_count, 1);
+}
+
+#[test]
+fn quality_retry_instruction_forces_korean_purity_and_name_localization() {
+    let instruction = build_quality_retry_instruction("ko");
+
+    assert!(instruction.contains("Korean"));
+    assert!(instruction.contains("Emma -> 엠마"));
+    assert!(instruction.contains("Laura -> 로라"));
+    assert!(instruction.contains("literal \\\\n"));
+    assert!(instruction.contains("Do not leave foreign connector words"));
+    assert!(instruction.contains("Preserve JSONL ids"));
 }
 
 #[test]

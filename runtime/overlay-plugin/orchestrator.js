@@ -1151,6 +1151,7 @@
       if (!descriptor.target) {
         return this.surfaceDrawResult('ignored', descriptor, 'missing-target');
       }
+      const overflow = this.detectLayoutOverflow(descriptor);
 
       let deferred = false;
       let drawDecision = null;
@@ -1163,9 +1164,29 @@
       return this.surfaceDrawResult(
         deferred ? 'deferred' : 'fallback',
         descriptor,
-        deferred ? 'deferred-to-owner-candidate' : 'fallback-owned',
+        overflow ? 'layout-overflow' : deferred ? 'deferred-to-owner-candidate' : 'fallback-owned',
         drawDecision,
       );
+    }
+
+    detectLayoutOverflow(descriptor) {
+      if (!descriptor || descriptor.maxWidth <= 0 || descriptor.measuredWidth <= descriptor.maxWidth) return false;
+      if (this.runtimeDiagnostics && typeof this.runtimeDiagnostics.increment === 'function') {
+        this.runtimeDiagnostics.increment('layout_overflow', 1);
+      }
+      this.recordDrawTrace('layout-overflow', {
+        adapter: descriptor.adapterId,
+        methodName: descriptor.methodName,
+        rawText: descriptor.text,
+        visibleText: descriptor.text,
+        reason: 'layout-overflow',
+        ownerType: descriptor.ownerType,
+        force: true,
+        maxWidth: descriptor.maxWidth,
+        measuredWidth: descriptor.measuredWidth,
+        lineHeight: descriptor.lineHeight,
+      });
+      return true;
     }
 
     lookup(item) {
@@ -1185,6 +1206,18 @@
         targetLanguage: this.targetLanguage,
         text: item.sourceText,
         contextHash: item.contextHash,
+        adapter: item.adapter,
+        kind: item.kind,
+        methodName: item.kind,
+        slotKey: item.slotId,
+        visible: item.visible,
+        screenState: item.screenState,
+        owner: item.metadata && item.metadata.owner ? item.metadata.owner : '',
+        sceneName: item.metadata && item.metadata.sceneName ? item.metadata.sceneName : '',
+        mapId: item.metadata && item.metadata.mapId,
+        eventId: item.metadata && item.metadata.eventId,
+        reason: 'cache-miss',
+        bbox: item.metadata && item.metadata.bbox ? item.metadata.bbox : bboxFromMetadata(item.metadata),
       });
       if (translation) this.rememberSourceTranslation(item, translation, 'cache');
       return translation;
@@ -1919,6 +1952,29 @@
     if (!value) return false;
     if (/[A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(value)) return false;
     return /^[\d\s.,:;/%+\-()[\]#]+$/u.test(value);
+  }
+
+  function bboxFromMetadata(metadata) {
+    if (!metadata || typeof metadata !== 'object') return null;
+    const bbox = {};
+    for (const [key, sourceKey] of [
+      ['x', 'x'],
+      ['y', 'y'],
+      ['width', 'width'],
+      ['height', 'height'],
+    ]) {
+      const value = Number(metadata[sourceKey]);
+      if (Number.isFinite(value)) bbox[key] = value;
+    }
+    if (!Object.prototype.hasOwnProperty.call(bbox, 'width')) {
+      const value = Number(metadata.maxWidth);
+      if (Number.isFinite(value)) bbox.width = value;
+    }
+    if (!Object.prototype.hasOwnProperty.call(bbox, 'height')) {
+      const value = Number(metadata.lineHeight);
+      if (Number.isFinite(value)) bbox.height = value;
+    }
+    return Object.keys(bbox).length ? bbox : null;
   }
 
   function normalizeSurfaceDrawDecision(input) {

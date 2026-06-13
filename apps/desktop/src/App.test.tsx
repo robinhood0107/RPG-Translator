@@ -786,7 +786,7 @@ test("translate tab runs a read-only real prompt speed benchmark and renders war
         project_id: 7,
         source_language: "en",
         target_language: "ko",
-        batch_size: 16,
+        batch_size: 8,
         base_url: "http://127.0.0.1:18080",
         model: "auto",
         system_prompt: "prompt",
@@ -969,16 +969,20 @@ test("review queue uses easy Korean labels, a bulk menu, confirmation, and simpl
         active_tab: "review",
         show_hover_help: true,
         dashboard: {
-          source_text_count: 20_774,
-          translated_count: 200,
+          source_text_count: 23_134,
+          translatable_source_text_count: 15_557,
+          unsupported_candidate_count: 7_577,
+          missing_translatable_count: 15,
+          failed_translatable_count: 15,
+          translated_count: 15_542,
           accepted_count: 0,
           reviewed_count: 0,
-          review_queue_count: 20_774,
+          review_queue_count: 15_557,
         },
         review_counts: {
-          all: 20_774,
-          missing: 20_574,
-          pending: 200,
+          all: 15_557,
+          missing: 15,
+          pending: 15_542,
           accepted: 0,
           reviewed: 0,
           attention: 4,
@@ -988,6 +992,7 @@ test("review queue uses easy Korean labels, a bulk menu, confirmation, and simpl
           validation: 2,
           final_failed: 0,
           clean_approvable: 188,
+          unsupported: 7_577,
         },
       }));
     }
@@ -1022,7 +1027,7 @@ test("review queue uses easy Korean labels, a bulk menu, confirmation, and simpl
             first_json_path: "$.events[107].pages[0].list[116].parameters[4]",
           }),
         ],
-        total_count: 20_774,
+        total_count: 15_557,
         next_offset: null,
       });
     }
@@ -1040,6 +1045,10 @@ test("review queue uses easy Korean labels, a bulk menu, confirmation, and simpl
   render(<App />);
 
   expect((await screen.findAllByText("검토 대기열")).length).toBeGreaterThan(0);
+  expect(screen.getByText("15,542 / 15,557")).toBeInTheDocument();
+  expect(screen.getAllByText(/전체 스캔 후보: 23,134/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/지원 외\/generic 후보: 7,577/).length).toBeGreaterThan(0);
+  expect(document.body.textContent).toContain("15,557");
   for (const label of ["전체 보기", "번역 없음", "검토 필요", "내보내기 가능", "직접 확인 필요"]) {
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
   }
@@ -1258,6 +1267,7 @@ test("translate panel shows provider examples, tests the endpoint, and persists 
     if (name === "hydrate_workbench") {
       return Promise.resolve(hydratedWorkbench({
         active_tab: "translate",
+        system_prompt: "",
         project: testProject({ display_name: "Provider Game", game_root: "/tmp/provider-game" }),
         workspace: testWorkspace({
           project_file_path: "/tmp/provider-game/rpg-translator/Provider_Game.rpgmakers",
@@ -1312,6 +1322,10 @@ test("translate panel shows provider examples, tests the endpoint, and persists 
   fireEvent.click(screen.getByRole("button", { name: "Prompt settings" }));
   const promptEditor = await screen.findByLabelText("System prompt");
   expect((promptEditor as HTMLTextAreaElement).value.trim().length).toBeGreaterThan(0);
+  expect((promptEditor as HTMLTextAreaElement).value).toContain("SYSTEM POLICY");
+  expect((promptEditor as HTMLTextAreaElement).value).toContain("strict JSONL only");
+  expect((promptEditor as HTMLTextAreaElement).value).toContain("angle-bracket metadata tag");
+  expect((promptEditor as HTMLTextAreaElement).value).not.toContain("Return only the translated text");
   fireEvent.change(promptEditor, {
     target: { value: "Custom RPG translation prompt. Return JSONL only." },
   });
@@ -1472,7 +1486,7 @@ test("desktop hydration restores checkpoint and latest job metrics after restart
   render(<App />);
 
   expect((await screen.findAllByText("Restored Game")).length).toBeGreaterThan(0);
-  expect(await screen.findByText("3,831 / 20,774")).toBeInTheDocument();
+  expect((await screen.findAllByText("3,975 / 20,774")).length).toBeGreaterThan(0);
   expect(screen.getByText("배치 952 / 1,290")).toBeInTheDocument();
   expect(screen.getByText("텍스트 기준 ETA 07:28:00")).toBeInTheDocument();
   expect(screen.getByText("배치 기준 ETA 00:31:20")).toBeInTheDocument();
@@ -1613,6 +1627,40 @@ test("after-translation analysis decision tree covers every next-action state", 
     expect(analysis.title, item.name).toBe(item.expected.title);
     expect(analysis.action, item.name).toBe(item.expected.action);
   }
+
+  const splitCandidateFacts = buildAfterTranslationAnalysis({
+    t,
+    selectedProject: testProject(),
+    dashboard: testDashboard({
+      source_text_count: 23_134,
+      translatable_source_text_count: 15_557,
+      unsupported_candidate_count: 7_577,
+      missing_translatable_count: 15,
+      failed_translatable_count: 15,
+      translated_count: 15_542,
+    }),
+    reviewCounts: testReviewCounts({
+      all: 15_557,
+      missing: 15,
+      pending: 15_542,
+      unsupported: 7_577,
+      final_failed: 15,
+    }),
+    latestJob: testJob({ final_failed_items: 15 }),
+    checkpoint: null,
+    progress: null,
+    report: null,
+    translationInFlight: false,
+  });
+  expect(splitCandidateFacts.facts).toEqual(
+    expect.arrayContaining([
+      { label: t.totalScanCandidates, value: "23,134" },
+      { label: t.translatableSourceTexts, value: "15,557" },
+      { label: t.unsupportedCandidates, value: "7,577" },
+      { label: t.missingTranslatable, value: "15" },
+      { label: t.finalFailed, value: "15" },
+    ]),
+  );
 });
 
 test("settings tab toggles detailed hover help", async () => {
@@ -1974,6 +2022,10 @@ test("diagnostics panel shows coverage audit counts and samples", async () => {
         unscanned_occurrence_count: 1,
         export_missing_count: 2,
         unsupported_string_candidate_count: 3,
+        runtime_candidate_count: 4,
+        runtime_imported_translatable_count: 4,
+        unsupported_image_text_count: 1,
+        layout_overflow_count: 2,
         coverage_samples: [
           {
             category: "unscanned-static-accepted",
@@ -2002,6 +2054,10 @@ test("diagnostics panel shows coverage audit counts and samples", async () => {
   expect(screen.getByText("Unscanned occurrences")).toBeInTheDocument();
   expect(screen.getByText("Export missing")).toBeInTheDocument();
   expect(screen.getByText("Unsupported string candidates")).toBeInTheDocument();
+  expect(screen.getByText("Runtime text candidates")).toBeInTheDocument();
+  expect(screen.getByText("Runtime candidates imported")).toBeInTheDocument();
+  expect(screen.getByText("Unsupported image text")).toBeInTheDocument();
+  expect(screen.getByText("Layout overflow")).toBeInTheDocument();
   expect(screen.getByText(/Do you have something you need/)).toBeInTheDocument();
 });
 
@@ -2210,6 +2266,134 @@ test("hydrate reports stale translation recovery in desktop status", async () =>
   render(<App />);
 
   expect(await screen.findByText("Recovered interrupted translation jobs: 3")).toBeInTheDocument();
+});
+
+test("hydrate translation progress keeps existing DB translation baseline", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({
+        active_tab: "translate",
+        dashboard: {
+          source_text_count: 23_134,
+          translatable_source_text_count: 15_557,
+          unsupported_candidate_count: 7_577,
+          translated_count: 15_542,
+          missing_translatable_count: 15,
+          review_queue_count: 15_557,
+        },
+        latest_job: testJob({
+          status: "running",
+          completed_items: 0,
+          total_items: 15_557,
+          processed_batches: 0,
+          total_batches: 1_422,
+          current_batch_items: 0,
+          adaptive_decision_reason: "adaptive: fixture",
+        }),
+      }));
+    }
+    if (name === "review_queue") {
+      return Promise.resolve({ rows: [], total_count: 0, next_offset: null });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => {
+    expect(screen.getAllByText("15,542 / 15,557").length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+test("complete DB status shows translation complete and review tab opens pending queue", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  localStorage.setItem("rpg-translator-language", "ko");
+  invokeMock.mockImplementation((name: string, payload?: { request?: Record<string, unknown> }) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({
+        active_tab: "review",
+        dashboard: {
+          source_text_count: 23_134,
+          translatable_source_text_count: 15_557,
+          unsupported_candidate_count: 7_577,
+          translated_count: 15_557,
+          missing_translatable_count: 0,
+          failed_translatable_count: 0,
+          accepted_count: 15_551,
+          reviewed_count: 0,
+          review_queue_count: 6,
+          qa_finding_count: 0,
+        },
+        review_counts: testReviewCounts({
+          all: 15_557,
+          missing: 0,
+          pending: 6,
+          accepted: 15_551,
+          exportable: 15_551,
+          open_issues: 0,
+          json_parse: 0,
+          validation: 0,
+          final_failed: 0,
+          clean_approvable: 6,
+          unsupported: 7_577,
+        }),
+      }));
+    }
+    if (name === "review_queue") {
+      if (payload?.request?.issue_filter === "open") {
+        return Promise.resolve({ rows: [], total_count: 0, next_offset: null });
+      }
+      if (payload?.request?.review_state === "pending" && payload?.request?.issue_filter === null) {
+        return Promise.resolve({
+          rows: [
+            reviewRow({
+              source_text_id: 6,
+              visible_text: "Zzz...",
+              translated_text: "쿨쿨...",
+              translation_id: 6,
+              review_state: "pending",
+              qa_state: "passed",
+            }),
+          ],
+          total_count: 6,
+          next_offset: null,
+        });
+      }
+      return Promise.resolve({ rows: [], total_count: 15_557, next_offset: null });
+    }
+    if (name === "save_workbench_state") {
+      return Promise.resolve({
+        settings: hydratedWorkbench({ active_tab: "review" }).settings,
+        saved_drafts: 0,
+        saved_at: "1",
+      });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  expect(await screen.findByText("번역 완료")).toBeInTheDocument();
+  expect(screen.getByText("15,557 / 15,557")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "문제만 보기" }));
+  expect(await screen.findByText("검토 행 없음")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("tab", { name: "번역" }));
+  fireEvent.click(screen.getByRole("tab", { name: "검토" }));
+
+  expect(await screen.findByText("쿨쿨...")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(invokeMock).toHaveBeenCalledWith("review_queue", {
+      request: expect.objectContaining({
+        review_state: "pending",
+        issue_filter: null,
+      }),
+    }),
+  );
 });
 
 test("desktop translate progress events update progress and pause resumes later", async () => {
@@ -2483,6 +2667,7 @@ test("desktop repeated window close allows native close without restarting safe 
   render(<App />);
 
   await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+  expect((await screen.findAllByText("Fixture Game")).length).toBeGreaterThan(0);
 
   vi.useFakeTimers();
   try {
@@ -2678,6 +2863,50 @@ test("desktop window close falls back when destroy does not settle", async () =>
   }
 });
 
+test("desktop window close asks Rust to force close when frontend close APIs do not settle", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  const never = new Promise<never>(() => {});
+  appWindowDestroyMock.mockReturnValue(never);
+  appWindowCloseMock.mockReturnValue(never);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") {
+      return Promise.resolve(hydratedWorkbench({ active_tab: "scan" }));
+    }
+    if (name === "save_workbench_state") {
+      return Promise.resolve({ settings: hydratedWorkbench({ active_tab: "scan" }).settings, saved_drafts: 0, saved_at: "1" });
+    }
+    if (name === "prepare_safe_shutdown") {
+      return Promise.resolve({ pause_requested: true, provider_run_id: 42, mode: "pause-requested", stale_runs_interrupted: 0 });
+    }
+    if (name === "force_close_workbench") {
+      return Promise.resolve({ requested: true });
+    }
+    throw new Error(`unexpected command ${name}`);
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(appWindowHandlers.closeRequested).toBeTypeOf("function"));
+
+  vi.useFakeTimers();
+  try {
+    const event = { preventDefault: vi.fn() };
+    const closePromise = appWindowHandlers.closeRequested?.(event);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await closePromise;
+
+    expect(appWindowDestroyMock).toHaveBeenCalledOnce();
+    expect(appWindowCloseMock).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledWith("force_close_workbench", {
+      request: { reason: "frontend-close-timeout" },
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("web command API rejects desktop commands instead of returning mock data", async () => {
   await expect(callCommand("list_projects", { db_path: "workbench.sqlite" })).rejects.toThrow(
     "desktop runtime is required",
@@ -2700,6 +2929,7 @@ function hydratedWorkbench(overrides: {
   active_tab?: string;
   show_hover_help?: boolean;
   ui_font_size?: "small" | "medium" | "large";
+  system_prompt?: string;
   project?: ProjectSummary;
   workspace?: ProjectWorkspaceSummary;
   dashboard?: Partial<DashboardSummary>;
@@ -2723,7 +2953,7 @@ function hydratedWorkbench(overrides: {
       target_language: "ko",
       provider_base_url: "http://127.0.0.1:18080",
       provider_model: "auto",
-      system_prompt: "prompt",
+      system_prompt: overrides.system_prompt ?? "prompt",
       export_dir: workspace.exports_path,
       active_tab: overrides.active_tab ?? "review",
       show_hover_help: overrides.show_hover_help ?? true,
@@ -2766,10 +2996,19 @@ function testProject(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
 }
 
 function testDashboard(overrides: Partial<DashboardSummary> = {}): DashboardSummary {
+  const sourceTextCount = overrides.source_text_count ?? 10;
+  const translatableSourceTextCount = overrides.translatable_source_text_count ?? sourceTextCount;
+  const unsupportedCandidateCount =
+    overrides.unsupported_candidate_count ?? Math.max(0, sourceTextCount - translatableSourceTextCount);
   return {
     project_id: 7,
     target_language: "ko",
-    source_text_count: 10,
+    source_text_count: sourceTextCount,
+    translatable_source_text_count: translatableSourceTextCount,
+    unsupported_candidate_count: unsupportedCandidateCount,
+    missing_translatable_count:
+      overrides.missing_translatable_count ?? Math.max(0, translatableSourceTextCount - (overrides.translated_count ?? 0)),
+    failed_translatable_count: overrides.failed_translatable_count ?? 0,
     occurrence_count: 10,
     translated_count: 0,
     accepted_count: 0,
@@ -2797,6 +3036,7 @@ function testReviewCounts(overrides: Partial<ReviewCounts> = {}): ReviewCounts {
     validation: 0,
     final_failed: 0,
     clean_approvable: 0,
+    unsupported: 0,
     ...overrides,
   };
 }

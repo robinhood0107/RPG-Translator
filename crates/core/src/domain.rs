@@ -579,6 +579,7 @@ pub struct ReviewCounts {
     pub validation: i64,
     pub final_failed: i64,
     pub clean_approvable: i64,
+    pub unsupported: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,7 +607,16 @@ pub struct BulkReviewApproveReport {
 pub struct WorkbenchDashboardSummary {
     pub project_id: i64,
     pub target_language: String,
+    /// All active scanned source units, including unsupported/generic candidates.
     pub source_text_count: i64,
+    /// Active source units that are safe to translate/review/export by default.
+    pub translatable_source_text_count: i64,
+    /// Active source units retained for diagnostics but excluded from translation/review by default.
+    pub unsupported_candidate_count: i64,
+    /// Translatable source units without a target-language translation row.
+    pub missing_translatable_count: i64,
+    /// Translatable source units with at least one open machine/provider finding.
+    pub failed_translatable_count: i64,
     pub occurrence_count: i64,
     pub translated_count: i64,
     pub accepted_count: i64,

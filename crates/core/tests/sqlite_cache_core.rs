@@ -469,6 +469,101 @@ fn project_rescan_keeps_translations_and_only_counts_active_occurrences() -> Res
     Ok(())
 }
 
+#[test]
+fn dashboard_and_review_counts_split_total_candidates_from_translatable_units() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let project_id = db.upsert_project(&NewProject {
+        game_root: "/synthetic/game".to_string(),
+        display_name: "Synthetic Game".to_string(),
+        engine: Engine::Mz,
+    })?;
+
+    let mut sources = Vec::new();
+    for (index, (text, unit_kind)) in [
+        ("Line one", "message_block"),
+        ("Line two", "message_block"),
+        ("Line three", "message_block"),
+        ("Darkness One 2", "db_field"),
+        ("GALV_MapTravelMZ", "generic_candidate"),
+        ("SomePluginInternalFlag", "generic_candidate"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut source = source_text(text);
+        source.unit_kind = unit_kind.to_string();
+        let source_id = db.upsert_source_text(&source)?;
+        db.insert_project_occurrence(
+            project_id,
+            &NewOccurrence {
+                project_id: Some(project_id),
+                source_text_id: source_id,
+                file_path: "data/Map001.json".to_string(),
+                json_path: format!("$.events[1].pages[0].list[{index}]"),
+                entity_type: "event_command".to_string(),
+                event_id: Some(1),
+                page_index: Some(0),
+                command_index: Some(index as i64),
+                command_code: Some(401),
+                parameter_index: Some(0),
+                object_key: None,
+                extraction_rule_id: unit_kind.to_string(),
+            },
+        )?;
+        sources.push(source_id);
+    }
+
+    for source_id in sources.iter().take(3) {
+        db.upsert_translation(&NewTranslation {
+            source_text_id: *source_id,
+            target_language: "ko".to_string(),
+            translated_text: "번역".to_string(),
+            provider: "local-openai-compatible".to_string(),
+            model: Some("fixture-model".to_string()),
+            provider_run_id: None,
+            review_state: "pending".to_string(),
+            qa_state: "passed".to_string(),
+        })?;
+    }
+    db.insert_qa_finding(&NewQaFinding {
+        source_text_id: sources[3],
+        translation_id: None,
+        target_language: Some("ko".to_string()),
+        provider_run_id: None,
+        finding_type: "provider-json-parse".to_string(),
+        severity: "error".to_string(),
+        message: "final failed".to_string(),
+        status: "open".to_string(),
+        details_json: "{}".to_string(),
+    })?;
+
+    let dashboard = db.workbench_dashboard_summary(project_id, "ko")?;
+    assert_eq!(dashboard.source_text_count, 6);
+    assert_eq!(dashboard.translatable_source_text_count, 4);
+    assert_eq!(dashboard.unsupported_candidate_count, 2);
+    assert_eq!(dashboard.translated_count, 3);
+    assert_eq!(dashboard.missing_translatable_count, 1);
+    assert_eq!(dashboard.failed_translatable_count, 1);
+    assert_eq!(dashboard.review_queue_count, 4);
+
+    let counts = db.review_counts(project_id, "ko")?;
+    assert_eq!(counts.all, 4);
+    assert_eq!(counts.unsupported, 2);
+    assert_eq!(counts.missing, 1);
+    assert_eq!(counts.pending, 3);
+    assert_eq!(counts.open_issues, 1);
+    assert_eq!(counts.json_parse, 1);
+
+    let (rows, total) = db.review_queue_page(project_id, "ko", None, None, 20, 0)?;
+    assert_eq!(total, 4);
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|row| row.visible_text != "GALV_MapTravelMZ"
+        && row.visible_text != "SomePluginInternalFlag"));
+
+    Ok(())
+}
+
 fn source_text(text: &str) -> NewSourceText {
     source_text_with_signature("en", text, text, "")
 }
@@ -1517,6 +1612,95 @@ fn review_update_resolves_findings_only_after_machine_validation_passes() -> Res
 }
 
 #[test]
+fn syntax_repair_dry_run_preserves_db_and_apply_resolves_safe_findings() -> Result<()> {
+    let file = NamedTempFile::new().expect("create temp db");
+    let mut db = TranslationDb::open(file.path())?;
+    db.migrate()?;
+    let project_id = db.upsert_project(&NewProject {
+        game_root: "/synthetic/game".to_string(),
+        display_name: "Synthetic Game".to_string(),
+        engine: Engine::Mz,
+    })?;
+    let mut source = source_text("Line one\nLine two");
+    source.unit_kind = "message_block".to_string();
+    let source_id = db.upsert_source_text(&source)?;
+    db.insert_occurrence(&NewOccurrence {
+        project_id: Some(project_id),
+        source_text_id: source_id,
+        file_path: "data/CommonEvents.json".to_string(),
+        json_path: "$[1].list[2]".to_string(),
+        entity_type: "event_command".to_string(),
+        event_id: Some(1),
+        page_index: None,
+        command_index: Some(2),
+        command_code: Some(401),
+        parameter_index: Some(0),
+        object_key: None,
+        extraction_rule_id: "event.message.block".to_string(),
+    })?;
+    let translation_id = db.upsert_translation(&NewTranslation {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text: "첫 줄\\n둘째 줄".to_string(),
+        provider: "fake".to_string(),
+        model: None,
+        provider_run_id: None,
+        review_state: "pending".to_string(),
+        qa_state: "needs-review".to_string(),
+    })?;
+    db.insert_qa_finding(&NewQaFinding {
+        source_text_id: source_id,
+        translation_id: Some(translation_id),
+        target_language: Some("ko".to_string()),
+        provider_run_id: None,
+        finding_type: "translation-validation".to_string(),
+        severity: "error".to_string(),
+        message: "제어코드가 원문과 다릅니다.".to_string(),
+        status: "open".to_string(),
+        details_json: "{}".to_string(),
+    })?;
+
+    let dry_run = db.repair_translation_syntax(project_id, "ko", false, None)?;
+    assert_eq!(dry_run.total_open_validation_count, 1);
+    assert_eq!(dry_run.safe_candidate_count, 1);
+    assert_eq!(dry_run.applied_count, 0);
+    assert_eq!(
+        db.get_translation(source_id, "ko")?
+            .expect("translation after dry-run")
+            .translated_text,
+        "첫 줄\\n둘째 줄"
+    );
+    assert_eq!(
+        db.qa_findings_for_source(source_id)?
+            .iter()
+            .filter(|finding| finding.status == "open")
+            .count(),
+        1
+    );
+
+    let backup = db.create_verified_backup(file.path(), "syntax-repair")?;
+    assert!(backup.exists());
+    let applied = db.repair_translation_syntax(project_id, "ko", true, Some(&backup))?;
+    assert_eq!(applied.applied_count, 1);
+    assert_eq!(applied.resolved_finding_count, 1);
+    db.verify_database_integrity()?;
+    let updated = db
+        .get_translation(source_id, "ko")?
+        .expect("translation after apply");
+    assert_eq!(updated.translated_text, "첫 줄\n둘째 줄");
+    assert_eq!(updated.qa_state, "passed");
+    let findings = db.qa_findings_for_source(source_id)?;
+    assert!(findings.iter().any(|finding| {
+        finding.finding_type == "translation-validation" && finding.status == "resolved"
+    }));
+    assert!(findings.iter().any(|finding| {
+        finding.finding_type == "syntax-auto-repair" && finding.status == "resolved"
+    }));
+
+    Ok(())
+}
+
+#[test]
 fn review_update_rejects_line_local_control_code_drift() -> Result<()> {
     let mut db = TranslationDb::open_in_memory()?;
     db.migrate()?;
@@ -1553,6 +1737,42 @@ fn review_update_rejects_line_local_control_code_drift() -> Result<()> {
             .any(|message| message.contains("줄별 제어코드 수가 원문과 다릅니다")),
         "expected line-local control-code finding, got {messages:?}"
     );
+
+    Ok(())
+}
+
+#[test]
+fn review_update_allows_message_block_control_code_line_reflow() -> Result<()> {
+    let mut db = TranslationDb::open_in_memory()?;
+    db.migrate()?;
+    let source = "\\c[7]What else... Ah, how about we have \\Effect<Pulse>you get turned on by my\nvoice now?";
+    let analysis = TextCodec::analyze(source);
+    let mut source_row = source_text_with_signature(
+        "en",
+        &analysis.normalized_text,
+        &analysis.visible_text,
+        &analysis.control_code_signature,
+    );
+    source_row.unit_kind = "message_block".to_string();
+    let source_id = db.upsert_source_text(&source_row)?;
+
+    let updated = db.update_review_row(&ReviewUpdateRequest {
+        source_text_id: source_id,
+        target_language: "ko".to_string(),
+        translated_text:
+            "\\c[7]또 뭐가 있을까... 아, 내 목소리에\n\\Effect<Pulse>흥분하게 만들어볼까?"
+                .to_string(),
+        provider: "manual-review".to_string(),
+        model: None,
+        review_state: "accepted".to_string(),
+        qa_state: "passed".to_string(),
+        expected_updated_at: None,
+    })?;
+
+    assert_eq!(updated.review_state, "accepted");
+    assert_eq!(updated.qa_state, "passed");
+    assert_eq!(updated.qa_finding_count, 0);
+    assert!(db.qa_findings_for_source(source_id)?.is_empty());
 
     Ok(())
 }

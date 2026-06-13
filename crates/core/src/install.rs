@@ -15,6 +15,7 @@ pub(crate) const PLUGIN_ENTRY_FILE: &str = "RPGTranslator.js";
 const PLUGIN_ENTRY_NAME: &str = "RPGTranslator";
 const INSTALL_MANIFEST_FILE: &str = "install-manifest.json";
 const PLUGINS_BACKUP_FILE: &str = "plugins.js.backup";
+const INSTALLED_FILE_BACKUP_DIRECTORY: &str = "installed-file-backups";
 pub(crate) const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
     "text-codec.js",
     "runtime-miss-logger.js",
@@ -112,6 +113,10 @@ pub struct InstallManifest {
 pub struct InstalledFileRecord {
     pub path: String,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_sha256: Option<String>,
 }
 
 pub struct Installer;
@@ -142,8 +147,8 @@ impl Installer {
             .join("plugins");
         let support_dir = plugins_dir.join(SUPPORT_DIRECTORY);
         let install_manifest_path = support_dir.join(INSTALL_MANIFEST_FILE);
-        let plugins_backup_path = existing_backup_path(&install_manifest_path)
-            .unwrap_or_else(|| support_dir.join(PLUGINS_BACKUP_FILE));
+        let plugins_backup_path = support_dir.join(PLUGINS_BACKUP_FILE);
+        let installed_file_backup_dir = support_dir.join(INSTALLED_FILE_BACKUP_DIRECTORY);
 
         let plugins_state = PluginsFile::read(&plugins_file)?;
         let runtime_dir = options
@@ -159,14 +164,20 @@ impl Installer {
                 support_dir.display()
             ))
         })?;
-        if !plugins_backup_path.exists() {
-            fs::write(&plugins_backup_path, &plugins_state.original_text).map_err(|error| {
+        if installed_file_backup_dir.exists() {
+            fs::remove_dir_all(&installed_file_backup_dir).map_err(|error| {
                 Error::invalid_input(format!(
-                    "failed to write plugins.js backup {}: {error}",
-                    plugins_backup_path.display()
+                    "failed to reset installed file backup directory {}: {error}",
+                    installed_file_backup_dir.display()
                 ))
             })?;
         }
+        fs::write(&plugins_backup_path, &plugins_state.original_text).map_err(|error| {
+            Error::invalid_input(format!(
+                "failed to write plugins.js backup {}: {error}",
+                plugins_backup_path.display()
+            ))
+        })?;
 
         let mut installed_files = Vec::new();
         copy_recorded(
@@ -174,6 +185,7 @@ impl Installer {
             &plugins_dir.join(PLUGIN_ENTRY_FILE),
             &options.game_root,
             &mut installed_files,
+            &installed_file_backup_dir,
         )?;
         for file in RUNTIME_SUPPORT_FILES {
             copy_recorded(
@@ -181,6 +193,7 @@ impl Installer {
                 &support_dir.join(file),
                 &options.game_root,
                 &mut installed_files,
+                &installed_file_backup_dir,
             )?;
         }
         for file in &export_files {
@@ -189,6 +202,7 @@ impl Installer {
                 &support_dir.join(file),
                 &options.game_root,
                 &mut installed_files,
+                &installed_file_backup_dir,
             )?;
         }
 
@@ -285,6 +299,7 @@ impl RollbackManager {
         ensure_within(&game_root, &plugins_backup_path)?;
         verify_file_hash(&plugins_backup_path, &manifest.plugins_backup_sha256)?;
         verify_installed_files(&game_root, &manifest.installed_files)?;
+        verify_previous_file_backups(&game_root, &manifest.installed_files)?;
         fs::copy(&plugins_backup_path, &plugins_file).map_err(|error| {
             Error::invalid_input(format!(
                 "failed to restore plugins.js from {} to {}: {error}",
@@ -297,7 +312,27 @@ impl RollbackManager {
         for file in &manifest.installed_files {
             let path = PathBuf::from(&file.path);
             ensure_within(&game_root, &path)?;
-            if path.exists() {
+            if let Some(previous_path) = &file.previous_path {
+                let previous_path = PathBuf::from(previous_path);
+                ensure_within(&game_root, &previous_path)?;
+                fs::copy(&previous_path, &path).map_err(|error| {
+                    Error::invalid_input(format!(
+                        "failed to restore installed file {} from {}: {error}",
+                        path.display(),
+                        previous_path.display()
+                    ))
+                })?;
+                fs::remove_file(&previous_path).map_err(|error| {
+                    Error::invalid_input(format!(
+                        "failed to remove installed file backup {}: {error}",
+                        previous_path.display()
+                    ))
+                })?;
+                removed_files.push(previous_path.clone());
+                if let Some(parent) = previous_path.parent() {
+                    let _ = fs::remove_dir(parent);
+                }
+            } else if path.exists() {
                 fs::remove_file(&path).map_err(|error| {
                     Error::invalid_input(format!("failed to remove {}: {error}", path.display()))
                 })?;
@@ -391,12 +426,6 @@ impl PluginsFile {
     }
 }
 
-fn existing_backup_path(manifest_path: &Path) -> Option<PathBuf> {
-    let manifest = read_json::<InstallManifest>(manifest_path).ok()?;
-    let path = PathBuf::from(manifest.plugins_backup_path);
-    path.exists().then_some(path)
-}
-
 fn export_files(export_dir: &Path) -> Result<Vec<PathBuf>> {
     let manifest: crate::RuntimeExportManifest = read_json(&export_dir.join("manifest.json"))?;
     let mut files = vec![
@@ -449,8 +478,35 @@ fn copy_recorded(
     target: &Path,
     game_root: &Path,
     installed_files: &mut Vec<InstalledFileRecord>,
+    backup_dir: &Path,
 ) -> Result<()> {
     ensure_within(game_root, target)?;
+    let mut previous_path = None;
+    let mut previous_sha256 = None;
+    if target.exists() {
+        fs::create_dir_all(backup_dir).map_err(|error| {
+            Error::invalid_input(format!(
+                "failed to create installed file backup directory {}: {error}",
+                backup_dir.display()
+            ))
+        })?;
+        ensure_within(game_root, backup_dir)?;
+        let name = target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("installed-file");
+        let backup_path = backup_dir.join(format!("{:04}-{name}", installed_files.len()));
+        ensure_within(game_root, &backup_path)?;
+        fs::copy(target, &backup_path).map_err(|error| {
+            Error::invalid_input(format!(
+                "failed to backup installed file {} to {}: {error}",
+                target.display(),
+                backup_path.display()
+            ))
+        })?;
+        previous_sha256 = Some(sha256_file(&backup_path)?);
+        previous_path = Some(normalize_path(&backup_path));
+    }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::invalid_input(format!(
@@ -469,6 +525,8 @@ fn copy_recorded(
     installed_files.push(InstalledFileRecord {
         path: normalize_path(target),
         sha256: sha256_file(target)?,
+        previous_path,
+        previous_sha256,
     });
     Ok(())
 }
@@ -481,6 +539,26 @@ fn verify_installed_files(game_root: &Path, files: &[InstalledFileRecord]) -> Re
             continue;
         }
         verify_file_hash(&path, &file.sha256)?;
+    }
+    Ok(())
+}
+
+fn verify_previous_file_backups(game_root: &Path, files: &[InstalledFileRecord]) -> Result<()> {
+    for file in files {
+        match (&file.previous_path, &file.previous_sha256) {
+            (Some(path), Some(expected)) => {
+                let path = PathBuf::from(path);
+                ensure_within(game_root, &path)?;
+                verify_file_hash(&path, expected)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(Error::invalid_input(format!(
+                    "installed file backup metadata is incomplete for {}",
+                    file.path
+                )));
+            }
+        }
     }
     Ok(())
 }

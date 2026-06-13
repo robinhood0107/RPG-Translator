@@ -3,9 +3,16 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 
-use rpg_translator_core::{NewTranslation, OverlayConfig, TranslationDb};
+use rpg_translator_core::{
+    Engine, NewOccurrence, NewProject, NewQaFinding, NewSourceText, NewTranslation, OverlayConfig,
+    TextCodec, TranslationDb,
+};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
@@ -57,13 +64,28 @@ fn spawn_openai_fixture_server() -> SocketAddr {
     let address = listener.local_addr().expect("fixture provider address");
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            respond_to_openai_request(stream);
+            respond_to_openai_request(stream, false);
         }
     });
     address
 }
 
-fn respond_to_openai_request(mut stream: TcpStream) {
+fn spawn_openai_retry_fixture_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry fixture provider");
+    let address = listener
+        .local_addr()
+        .expect("retry fixture provider address");
+    let requests = Arc::new(AtomicUsize::new(0));
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let request_number = requests.fetch_add(1, Ordering::SeqCst);
+            respond_to_openai_request(stream, request_number == 0);
+        }
+    });
+    address
+}
+
+fn respond_to_openai_request(mut stream: TcpStream, omit_last_row: bool) {
     let body = read_http_body(&mut stream);
     let request: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
     let content = request
@@ -71,10 +93,16 @@ fn respond_to_openai_request(mut stream: TcpStream) {
         .or_else(|| request.get("input"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let jsonl = content
+    let mut ids = content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|row| row.get("id").and_then(Value::as_i64))
+        .collect::<Vec<_>>();
+    if omit_last_row && ids.len() > 1 {
+        ids.pop();
+    }
+    let jsonl = ids
+        .into_iter()
         .map(|id| json!({ "id": id, "translation": format!("ko:{id}") }).to_string())
         .collect::<Vec<_>>()
         .join("\n");
@@ -518,6 +546,306 @@ fn cli_translate_local_pretranslates_scanned_rows_for_export() {
 }
 
 #[test]
+fn cli_translate_local_retries_missing_provider_rows_before_final_failure() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db = temp.path().join("workbench.sqlite");
+    make_game(&game, "var $plugins = [];");
+    let provider_address = spawn_openai_retry_fixture_server();
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let project_id = parse_project_id(&String::from_utf8_lossy(&scan.stdout));
+
+    let translate = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "translate-local",
+            "--db",
+            db.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--source-language",
+            "en",
+            "--target-language",
+            "ko",
+            "--base-url",
+            &format!("http://{provider_address}"),
+            "--model",
+            "fixture-model",
+            "--batch-size",
+            "1",
+            "--retry-attempts",
+            "1",
+            "--review-state",
+            "accepted",
+        ])
+        .output()
+        .expect("run translate command");
+    assert!(
+        translate.status.success(),
+        "translate failed stdout={} stderr={}",
+        String::from_utf8_lossy(&translate.stdout),
+        String::from_utf8_lossy(&translate.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&translate.stdout);
+    assert!(stdout.contains("failed=0"), "unexpected stdout: {stdout}");
+
+    let db = TranslationDb::open_with_schema_guard(&db).expect("open translated db");
+    let rows = db
+        .review_queue_rows(project_id, "ko", None)
+        .expect("read review rows");
+    let translated_rows = rows
+        .iter()
+        .filter(|row| row.translated_text.is_some())
+        .collect::<Vec<_>>();
+    assert!(!translated_rows.is_empty());
+    assert!(
+        translated_rows
+            .iter()
+            .all(|row| row.review_state == "accepted")
+    );
+}
+
+#[test]
+fn cli_audit_quality_reports_translation_defects_without_mutating_db() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db_path = temp.path().join("workbench.sqlite");
+    make_game(&game, "var $plugins = [];");
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db_path.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let project_id = parse_project_id(&String::from_utf8_lossy(&scan.stdout));
+
+    {
+        let mut db = TranslationDb::open_with_schema_guard(&db_path).expect("open scanned db");
+        let rows = db
+            .review_queue_rows(project_id, "ko", None)
+            .expect("read review rows");
+        let bad_row = rows
+            .iter()
+            .find(|row| row.normalized_text.contains("Emma looks"))
+            .expect("message block row");
+        db.upsert_translation(&NewTranslation {
+            source_text_id: bad_row.source_text_id,
+            target_language: "ko".to_string(),
+            translated_text: "Emma looks de 창백해\\nway s-stop".to_string(),
+            provider: "fixture".to_string(),
+            model: Some("cli-test".to_string()),
+            provider_run_id: None,
+            review_state: "pending".to_string(),
+            qa_state: "passed".to_string(),
+        })
+        .expect("insert bad translation");
+        let technical_row = rows
+            .iter()
+            .find(|row| row.normalized_text == "HP")
+            .expect("technical row");
+        db.upsert_translation(&NewTranslation {
+            source_text_id: technical_row.source_text_id,
+            target_language: "ko".to_string(),
+            translated_text: "HP".to_string(),
+            provider: "fixture".to_string(),
+            model: Some("cli-test".to_string()),
+            provider_run_id: None,
+            review_state: "pending".to_string(),
+            qa_state: "passed".to_string(),
+        })
+        .expect("insert technical translation");
+    }
+
+    let before_findings = TranslationDb::open_with_schema_guard(&db_path)
+        .expect("open db")
+        .qa_finding_count()
+        .expect("count findings");
+    let audit = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "audit-quality",
+            "--db",
+            db_path.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--target-language",
+            "ko",
+            "--limit",
+            "20",
+        ])
+        .output()
+        .expect("run quality audit command");
+    assert!(
+        audit.status.success(),
+        "audit failed stdout={} stderr={}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&audit.stdout);
+    assert!(stdout.contains("quality_audit total_rows=2"));
+    assert!(stdout.contains("retranslation_candidates=1"));
+    assert!(stdout.contains("high_risk_sources=1"));
+    assert!(stdout.contains("quality_retry_sources=1"));
+    assert!(stdout.contains("allowlisted_technical=1"));
+    assert!(stdout.contains("foreign_connector"));
+    assert!(stdout.contains("classification=high_risk"));
+    assert!(stdout.contains("literal_backslash_n"));
+    assert!(stdout.contains("raw_source_token"));
+    assert!(stdout.contains("source=\"Emma looks"));
+    assert!(stdout.contains("translation=\"Emma looks de"));
+    assert!(!stdout.contains("technical token"));
+
+    let after_findings = TranslationDb::open_with_schema_guard(&db_path)
+        .expect("open db")
+        .qa_finding_count()
+        .expect("count findings");
+    assert_eq!(before_findings, after_findings, "audit must be read-only");
+}
+
+#[test]
+fn cli_quality_only_translation_retries_only_audit_candidates() {
+    let temp = tempdir().expect("create temp dir");
+    let game = temp.path().join("game");
+    let db_path = temp.path().join("workbench.sqlite");
+    make_game(&game, "var $plugins = [];");
+
+    let scan = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "scan-game",
+            "--game-root",
+            game.to_str().expect("game path"),
+            "--db",
+            db_path.to_str().expect("db path"),
+            "--source-language",
+            "en",
+        ])
+        .output()
+        .expect("run scan command");
+    assert!(
+        scan.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let project_id = parse_project_id(&String::from_utf8_lossy(&scan.stdout));
+
+    let bad_source_id;
+    let safe_source_id;
+    {
+        let mut db = TranslationDb::open_with_schema_guard(&db_path).expect("open scanned db");
+        let rows = db
+            .review_queue_rows(project_id, "ko", None)
+            .expect("read review rows");
+        let bad_row = rows
+            .iter()
+            .find(|row| row.normalized_text.contains("Emma looks"))
+            .expect("message block row");
+        bad_source_id = bad_row.source_text_id;
+        db.upsert_translation(&NewTranslation {
+            source_text_id: bad_row.source_text_id,
+            target_language: "ko".to_string(),
+            translated_text: "Emma looks de 창백해".to_string(),
+            provider: "fixture".to_string(),
+            model: Some("cli-test".to_string()),
+            provider_run_id: None,
+            review_state: "pending".to_string(),
+            qa_state: "passed".to_string(),
+        })
+        .expect("insert bad translation");
+        let safe_row = rows
+            .iter()
+            .find(|row| row.normalized_text == "HP")
+            .expect("technical row");
+        safe_source_id = safe_row.source_text_id;
+        db.upsert_translation(&NewTranslation {
+            source_text_id: safe_row.source_text_id,
+            target_language: "ko".to_string(),
+            translated_text: "HP".to_string(),
+            provider: "fixture".to_string(),
+            model: Some("cli-test".to_string()),
+            provider_run_id: None,
+            review_state: "pending".to_string(),
+            qa_state: "passed".to_string(),
+        })
+        .expect("insert technical translation");
+    }
+
+    let provider_address = spawn_openai_fixture_server();
+    let translate = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "translate-local",
+            "--quality-only",
+            "--db",
+            db_path.to_str().expect("db path"),
+            "--project-id",
+            &project_id.to_string(),
+            "--source-language",
+            "en",
+            "--target-language",
+            "ko",
+            "--base-url",
+            &format!("http://{provider_address}"),
+            "--model",
+            "fixture-model",
+            "--batch-size",
+            "4",
+            "--retry-attempts",
+            "0",
+        ])
+        .output()
+        .expect("run quality-only translation command");
+    assert!(
+        translate.status.success(),
+        "translate failed stdout={} stderr={}",
+        String::from_utf8_lossy(&translate.stdout),
+        String::from_utf8_lossy(&translate.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&translate.stdout);
+    assert!(stdout.contains("quality_candidates=1"), "stdout={stdout}");
+
+    let db = TranslationDb::open_with_schema_guard(&db_path).expect("open translated db");
+    let rows = db
+        .review_queue_rows(project_id, "ko", None)
+        .expect("read review rows");
+    let bad_row = rows
+        .iter()
+        .find(|row| row.source_text_id == bad_source_id)
+        .expect("bad row");
+    let safe_row = rows
+        .iter()
+        .find(|row| row.source_text_id == safe_source_id)
+        .expect("safe row");
+    assert_eq!(bad_row.translated_text.as_deref(), Some("ko:1"));
+    assert_eq!(safe_row.translated_text.as_deref(), Some("HP"));
+}
+
+#[test]
 fn cli_headless_usable_loop_translates_exports_installs_and_rolls_back() {
     let temp = tempdir().expect("create temp dir");
     let game = temp.path().join("game");
@@ -654,4 +982,143 @@ fn cli_rejects_missing_required_install_args() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--game-root"));
+}
+
+#[test]
+fn cli_repair_syntax_dry_run_and_apply_repairs_safe_validation_rows() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("workbench.sqlite");
+    let (project_id, source_id) = {
+        let mut db = TranslationDb::open_with_schema_guard(&db_path).expect("open db");
+        let project_id = db
+            .upsert_project(&NewProject {
+                game_root: dir.path().join("game").display().to_string(),
+                display_name: "Fixture".to_string(),
+                engine: Engine::Mz,
+            })
+            .expect("project");
+        let analysis = TextCodec::analyze("Line one\nLine two");
+        let source_id = db
+            .upsert_source_text(&NewSourceText {
+                source_language: "en".to_string(),
+                unit_kind: "message_block".to_string(),
+                normalized_hash: String::new(),
+                normalized_text: analysis.normalized_text,
+                visible_text: analysis.visible_text,
+                codec_text: TextCodec::encode_for_provider("Line one\nLine two").provider_text,
+                control_code_signature: analysis.control_code_signature,
+                line_count: 2,
+                newline_count: 1,
+                placeholder_count: 0,
+            })
+            .expect("source");
+        db.insert_occurrence(&NewOccurrence {
+            project_id: Some(project_id),
+            source_text_id: source_id,
+            file_path: "data/CommonEvents.json".to_string(),
+            json_path: "$[1].list[2]".to_string(),
+            entity_type: "event_command".to_string(),
+            event_id: Some(1),
+            page_index: None,
+            command_index: Some(2),
+            command_code: Some(401),
+            parameter_index: Some(0),
+            object_key: None,
+            extraction_rule_id: "event.message.block".to_string(),
+        })
+        .expect("occurrence");
+        let translation_id = db
+            .upsert_translation(&NewTranslation {
+                source_text_id: source_id,
+                target_language: "ko".to_string(),
+                translated_text: "첫 줄\\n둘째 줄".to_string(),
+                provider: "fake".to_string(),
+                model: None,
+                provider_run_id: None,
+                review_state: "pending".to_string(),
+                qa_state: "needs-review".to_string(),
+            })
+            .expect("translation");
+        db.insert_qa_finding(&NewQaFinding {
+            source_text_id: source_id,
+            translation_id: Some(translation_id),
+            target_language: Some("ko".to_string()),
+            provider_run_id: None,
+            finding_type: "translation-validation".to_string(),
+            severity: "error".to_string(),
+            message: "제어코드가 원문과 다릅니다.".to_string(),
+            status: "open".to_string(),
+            details_json: "{}".to_string(),
+        })
+        .expect("finding");
+        (project_id, source_id)
+    };
+
+    let dry_run = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "repair-syntax",
+            "--db",
+            &db_path.display().to_string(),
+            "--project-id",
+            &project_id.to_string(),
+            "--target-language",
+            "ko",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run repair dry-run");
+    assert!(
+        dry_run.status.success(),
+        "dry-run failed: {}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&dry_run.stdout);
+    assert!(stdout.contains("mode=dry-run"));
+    assert!(stdout.contains("safe_candidates=1"));
+
+    let after_dry_run = TranslationDb::open_with_schema_guard(&db_path)
+        .expect("open after dry-run")
+        .get_translation(source_id, "ko")
+        .expect("get translation")
+        .expect("translation");
+    assert_eq!(after_dry_run.translated_text, "첫 줄\\n둘째 줄");
+
+    let apply = Command::new(env!("CARGO_BIN_EXE_rpg-translator"))
+        .args([
+            "repair-syntax",
+            "--db",
+            &db_path.display().to_string(),
+            "--project-id",
+            &project_id.to_string(),
+            "--target-language",
+            "ko",
+            "--apply",
+        ])
+        .output()
+        .expect("run repair apply");
+    assert!(
+        apply.status.success(),
+        "apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&apply.stdout);
+    assert!(stdout.contains("mode=apply"));
+    assert!(stdout.contains("applied=1"));
+    assert!(stdout.contains("backup="));
+
+    let db = TranslationDb::open_with_schema_guard(&db_path).expect("open after apply");
+    let updated = db
+        .get_translation(source_id, "ko")
+        .expect("get repaired translation")
+        .expect("translation");
+    assert_eq!(updated.translated_text, "첫 줄\n둘째 줄");
+    let findings = db
+        .qa_findings_for_source(source_id)
+        .expect("findings after apply");
+    assert!(findings.iter().any(|finding| {
+        finding.finding_type == "translation-validation" && finding.status == "resolved"
+    }));
+    assert!(findings.iter().any(|finding| {
+        finding.finding_type == "syntax-auto-repair" && finding.status == "resolved"
+    }));
 }

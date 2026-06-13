@@ -102,6 +102,16 @@ pub struct SafeShutdownResponse {
     pub stale_runs_interrupted: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceCloseWorkbenchRequest {
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceCloseWorkbenchResponse {
+    pub requested: bool,
+}
+
 #[derive(Default)]
 pub struct TranslationJobState {
     running: AtomicBool,
@@ -255,7 +265,7 @@ async fn translate_with_local_provider_running(
             &request.target_language,
             &request.system_prompt,
         );
-        let requested_batch_size = request.batch_size.unwrap_or(16);
+        let requested_batch_size = request.batch_size.unwrap_or(8);
         let default_token_budget = BatchTranslatorConfig::default().input_token_budget;
         let mut preview_completed_source_text_ids = CheckpointWriter::read(&checkpoint_path)?
             .map(|checkpoint| {
@@ -320,6 +330,7 @@ async fn translate_with_local_provider_running(
                 include_existing_translations,
                 prompt_hash,
                 adaptive_decision_reason: adaptive_tuning.decision_reason,
+                output_review_state: "pending".to_string(),
             },
             Some(&checkpoint_path),
             move |event| {
@@ -430,6 +441,18 @@ pub async fn prepare_safe_shutdown(
 }
 
 #[tauri::command]
+pub async fn force_close_workbench(
+    app: AppHandle,
+    _request: ForceCloseWorkbenchRequest,
+) -> CommandResult<ForceCloseWorkbenchResponse> {
+    let app_to_close = app.clone();
+    tauri::async_runtime::spawn(async move {
+        app_to_close.exit(0);
+    });
+    Ok(ForceCloseWorkbenchResponse { requested: true })
+}
+
+#[tauri::command]
 pub async fn test_local_provider(
     request: ProviderTestRequest,
 ) -> CommandResult<ProviderTestResponse> {
@@ -484,7 +507,7 @@ pub async fn benchmark_provider_translation_speed(
         let source_language = request.source_language.clone();
         let target_language = request.target_language.clone();
         let system_prompt = request.system_prompt.clone();
-        let requested_batch_size = request.batch_size.unwrap_or(16).max(1);
+        let requested_batch_size = request.batch_size.unwrap_or(8).max(1);
         let items = benchmark_provider_items(
             &db,
             request.project_id,

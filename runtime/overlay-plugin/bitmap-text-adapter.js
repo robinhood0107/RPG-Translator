@@ -193,6 +193,19 @@
         reason,
         fragments: group.length,
         methodName: group[0].methodName || 'drawText',
+        owner: surfaceOwner,
+        bbox: {
+          x: bounds.x,
+          y: bounds.y,
+          width: Math.max(bounds.width, group[0].maxWidth || 1),
+          height: group[0].lineHeight,
+        },
+        x: bounds.x,
+        y: bounds.y,
+        width: Math.max(bounds.width, group[0].maxWidth || 1),
+        height: group[0].lineHeight,
+        maxWidth: Math.max(bounds.width, group[0].maxWidth || 1),
+        lineHeight: group[0].lineHeight,
       },
     });
     if (command && command.itemId) state.entries.set(slotKey, {
@@ -225,11 +238,31 @@
     if (typeof original !== 'function') return false;
     bitmap.__rpgTranslatorBitmapReplayDepth = (bitmap.__rpgTranslatorBitmapReplayDepth || 0) + 1;
     try {
+      clearReplayTextRegion(bitmap, text, x, y, width, lineHeight);
       original.call(bitmap, text, x, y, width, lineHeight, align);
       return true;
     } finally {
       bitmap.__rpgTranslatorBitmapReplayDepth = Math.max(0, (bitmap.__rpgTranslatorBitmapReplayDepth || 1) - 1);
     }
+  }
+
+  function clearReplayTextRegion(bitmap, text, x, y, width, lineHeight) {
+    const clear = bitmap && bitmap.constructor && bitmap.constructor.prototype
+      ? bitmap.constructor.prototype.clearRect && bitmap.constructor.prototype.clearRect.__rpgTranslatorOriginal
+      : null;
+    const clearMethod = typeof clear === 'function'
+      ? clear
+      : bitmap && typeof bitmap.clearRect === 'function'
+        ? bitmap.clearRect
+        : null;
+    if (typeof clearMethod !== 'function') return false;
+    const clearWidth = Math.max(1, Math.ceil(Math.max(
+      finiteOr(width, 0),
+      estimateTextWidth(bitmap, text),
+    )));
+    const clearHeight = Math.max(1, Math.ceil(finiteOr(lineHeight, Number(bitmap && bitmap.fontSize) || 24)));
+    clearMethod.call(bitmap, finiteOr(x, 0), finiteOr(y, 0), clearWidth, clearHeight);
+    return true;
   }
 
   function installMutationHooks(scope, prototype, translator) {
