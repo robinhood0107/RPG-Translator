@@ -526,6 +526,70 @@ test('runtime diagnostics records slow and dropped frame policy summaries', () =
   ]);
 });
 
+test('runtime diagnostics classifies draw issues for desktop import and profiler review', () => {
+  const diagnostics = new RuntimeDiagnostics({
+    settings: {
+      diagnostics_enabled: true,
+      draw_capture_trace: {
+        enabled: true,
+        record_all: true,
+        limit: 16,
+      },
+    },
+  });
+
+  diagnostics.recordDraw('miss', {
+    adapter: 'window-text',
+    rawText: 'Quest',
+    reason: 'cache-miss',
+  });
+  diagnostics.recordDraw('layout-overflow', {
+    adapter: 'window-text',
+    rawText: 'Long translated text',
+    reason: 'layout-overflow',
+  });
+  diagnostics.recordDraw('reject', {
+    adapter: 'bitmap-text',
+    rawText: 'Stale',
+    reason: 'stale-render',
+  });
+  diagnostics.recordDraw('skip', {
+    adapter: 'sprite-text',
+    rawText: 'Owned',
+    reason: 'ownership-conflict',
+  });
+  diagnostics.recordDraw('replay', {
+    adapter: 'pixi-text',
+    rawText: 'Replay',
+    reason: 'background-replay-failed',
+  });
+  diagnostics.recordDraw('unsupported', {
+    adapter: 'bitmap-text',
+    rawText: 'data:image/png;base64,AAAA',
+    category: 'unsupported-image-text',
+    reason: 'unsupported-image-text',
+    force: true,
+  });
+
+  const snapshot = diagnostics.snapshot({ detailView: true });
+  assert.deepEqual(snapshot.drawTrace.events.map((event) => event.category), [
+    'runtime-cache-miss',
+    'layout-overflow',
+    'stale-render',
+    'ownership-conflict',
+    'replay-failure',
+    'unsupported-image-text',
+  ]);
+  assert.deepEqual(snapshot.drawTrace.summary.byCategory, {
+    'layout-overflow': 1,
+    'ownership-conflict': 1,
+    'replay-failure': 1,
+    'runtime-cache-miss': 1,
+    'stale-render': 1,
+    'unsupported-image-text': 1,
+  });
+});
+
 test('phase 4-5 completion matrix records surface adapters and runtime evidence', () => {
   const runtimeDiagnostics = new RuntimeDiagnostics({
     settings: {

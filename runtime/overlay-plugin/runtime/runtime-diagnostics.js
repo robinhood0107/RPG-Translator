@@ -39,6 +39,7 @@
         stage: String(stage || source.stage || 'draw'),
         adapter: firstString(source.adapter, source.sourceAdapter, ''),
         methodName: firstString(source.methodName, source.method, ''),
+        category: classifyDrawEvent(stage, source),
         reason: firstString(source.reason, ''),
         rawText: limitText(rawText),
         visibleText: limitText(visibleText),
@@ -365,6 +366,7 @@
       total: events.length,
       byStage: {},
       byAdapter: {},
+      byCategory: {},
       byMethod: {},
       byReason: {},
       byWindowType: {},
@@ -374,6 +376,7 @@
     for (const event of events) {
       count(summary.byStage, event.stage);
       count(summary.byAdapter, event.adapter);
+      count(summary.byCategory, event.category);
       count(summary.byMethod, event.methodName || event.method);
       count(summary.byReason, event.reason);
       count(summary.byWindowType, event.windowType);
@@ -420,6 +423,38 @@
       }
     }
     return '';
+  }
+
+  function classifyDrawEvent(stage, source) {
+    const category = firstString(source && source.category, source && source.kind);
+    const reason = firstString(source && source.reason, stage);
+    const normalizedCategory = normalizeIssueLabel(category);
+    const normalizedReason = normalizeIssueLabel(reason);
+    if (normalizedCategory === 'unsupported-image-text' || normalizedReason === 'unsupported-image-text') return 'unsupported-image-text';
+    if (['layout-overflow', 'layout_overflow', 'overflow'].includes(normalizedReason)) return 'layout-overflow';
+    if (normalizedReason === 'stale-render' || normalizedReason === 'render-stale' || normalizedReason.endsWith('-stale')) return 'stale-render';
+    if ([
+      'ownership-conflict',
+      'ownership_conflict',
+      'surface-owned',
+      'message-glyph-source',
+      'duplicate-owner',
+    ].includes(normalizedReason)) return 'ownership-conflict';
+    if ([
+      'replay-failure',
+      'replay_failed',
+      'replay-failed',
+      'snapshot-restore-failed',
+      'background-replay-failed',
+    ].includes(normalizedReason)) return 'replay-failure';
+    if (normalizedCategory === 'runtime-cache-miss' || normalizedReason === 'cache-miss' || normalizedReason === 'runtime-cache-miss') {
+      return 'runtime-cache-miss';
+    }
+    return normalizedCategory || 'runtime-render';
+  }
+
+  function normalizeIssueLabel(value) {
+    return String(value || '').trim().toLowerCase();
   }
 
   function limitText(value) {
