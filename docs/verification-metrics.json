@@ -129,6 +129,12 @@
     "verification_commands_completed": 3,
     "specific_sample_name_hints_removed": 7,
     "sample_bound_test_contracts_updated": 1,
-    "sample_bound_assertions_updated": 2
+    "sample_bound_assertions_updated": 2,
+    "temporary_game_captures_removed": 30,
+    "audited_commit_count_at_check": 9,
+    "audited_blob_count_at_check": 216,
+    "forbidden_reference_matches": 0,
+    "pushed_validation_branches": 1,
+    "main_dev_merges": 0
   }
 }
