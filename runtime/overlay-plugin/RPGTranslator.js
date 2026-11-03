@@ -18,6 +18,8 @@
     'adapters/bitmap-text/bitmap-text-adapter.js',
     'adapters/sprite-text/sprite-text-adapter.js',
     'adapters/pixi-text/pixi-text-adapter.js',
+    'adapters/canvas-text-adapter.js',
+    'adapters/dom-text-adapter.js',
     'runtime/startup-toast.js',
     'runtime/boot.js',
   ];
@@ -53,6 +55,7 @@
 
     static autoInstall(scope = root) {
       if (isCommonJs() || scope.RPGTranslatorDisableAutoInstall) return;
+      RuntimeEntry.holdSceneBoot(scope);
       RuntimeEntry.install(scope).catch((error) => {
         scope.RPGTranslatorOverlay = Object.assign(scope.RPGTranslatorOverlay || {}, {
           bootError: error.message,
@@ -61,6 +64,18 @@
           scope.console.error(`[RPGTranslator] ${error.message}`);
         }
       });
+    }
+
+    static holdSceneBoot(scope) {
+      const prototype = scope.Scene_Boot && scope.Scene_Boot.prototype;
+      if (!prototype || prototype.__rpgTranslatorBootGate) return;
+      const original = prototype.isReady;
+      prototype.isReady = function (...args) {
+        const overlay = scope.RPGTranslatorOverlay || {};
+        if (!overlay.installed && !overlay.bootError) return false;
+        return typeof original === 'function' ? original.apply(this, args) : true;
+      };
+      prototype.__rpgTranslatorBootGate = true;
     }
   }
 

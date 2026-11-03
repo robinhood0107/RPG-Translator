@@ -15,7 +15,7 @@
       if (prototype.__rpgTranslatorWindowTextInstalled === INSTALL_TOKEN) return true;
       wrapTextMethod(prototype, 'drawText', scope, translator);
       wrapTextMethod(prototype, 'drawTextEx', scope, translator);
-      wrapWindowLifecycle(prototype, translator);
+      wrapWindowLifecycle(prototype, translator, scope);
       wrapPendingFlushMethod(prototype, 'open', translator);
       wrapPendingFlushMethod(prototype, 'update', translator);
       wrapWindowConstructor(scope, translator);
@@ -80,6 +80,7 @@
       screenState: isWindowVisible(surface) ? 'visible' : 'hidden',
       metadata: {
         windowId: state.windowId,
+        windowType: surface.constructor && surface.constructor.name || '',
         methodName,
         owner: surfaceOwner,
         sceneName: currentSceneName(scope),
@@ -104,16 +105,31 @@
       slotKey,
       sourceText,
       methodName,
+      original,
       args: Array.isArray(rest) ? rest.slice() : [],
       revision: state.revision,
       textOwner,
       drawOrder,
       bounds,
+      textStyle: ReplayState.captureTextStyle(surface.contents),
       status: 'observed',
     };
     if (itemId) state.slots.set(slotKey, entry);
 
-    const nativeResult = original.call(surface, text, ...rest);
+    const previousSlot = state.nativeSlotKey;
+    state.nativeSlotKey = slotKey;
+    let nativeResult;
+    try { nativeResult = original.call(surface, text, ...rest); }
+    finally { state.nativeSlotKey = previousSlot; }
+
+    if (command && command.status !== 'hit' && translator && typeof translator.onTranslationReady === 'function') {
+      translator.onTranslationReady(command, (ready) => {
+        if (state.slots.get(slotKey) !== entry) return false;
+        const pending = Object.assign(entry, { command: ready, translatedText: ready.translatedText });
+        if (!isWindowVisible(surface)) { queuePendingDraw(state, slotKey, pending); return false; }
+        return translator.acceptRender(ready, surface, sourceText) && renderWindowEntry(translator, surface, state, pending);
+      });
+    }
 
     const translated = command
       ? (command.status === 'hit' ? command.translatedText : null)
@@ -125,16 +141,7 @@
 
     if (command && command.status === 'hit' && translator && typeof translator.acceptRender === 'function') {
       if (!isWindowVisible(surface)) {
-        queuePendingDraw(state, slotKey, {
-          command,
-          sourceText,
-          translatedText: command.translatedText,
-          methodName,
-          args: Array.isArray(rest) ? rest.slice() : [],
-          itemId,
-          drawOrder,
-          bounds,
-        });
+        queuePendingDraw(state, slotKey, Object.assign(entry, { translatedText: command.translatedText }));
         return nativeResult;
       }
       dropPendingDraw(state, slotKey);
@@ -157,7 +164,7 @@
         const result = OriginalCtor.apply(this, args);
         instance = result && (typeof result === 'object' || typeof result === 'function') ? result : this;
       }
-      registerWindowInstance(instance, translator);
+      registerWindowInstance(instance, translator, scope);
       return instance;
     }
     WrappedWindowBase.prototype = OriginalCtor.prototype;
@@ -175,26 +182,27 @@
     return true;
   }
 
-  function registerWindowInstance(windowInstance, translator) {
-    if (!windowInstance) return false;
+  function registerWindowInstance(windowInstance, translator, scope) {
+    if (!windowInstance || isDedicatedMessageWindow(scope, windowInstance)) return false;
     ensureState(windowInstance);
     wrapContentsMutation(windowInstance, translator);
     return true;
   }
 
-  function wrapWindowLifecycle(prototype, translator) {
-    wrapLifecycleMethod(prototype, 'refresh', translator, 'window-refresh');
-    wrapLifecycleMethod(prototype, 'createContents', translator, 'window-contents-recreated');
-    wrapLifecycleMethod(prototype, 'destroy', translator, 'window-destroyed');
-    wrapLifecycleMethod(prototype, 'close', translator, 'window-closed');
+  function wrapWindowLifecycle(prototype, translator, scope) {
+    wrapLifecycleMethod(prototype, 'refresh', translator, 'window-refresh', scope);
+    wrapLifecycleMethod(prototype, 'createContents', translator, 'window-contents-recreated', scope);
+    wrapLifecycleMethod(prototype, 'destroy', translator, 'window-destroyed', scope);
+    wrapLifecycleMethod(prototype, 'close', translator, 'window-closed', scope);
   }
 
-  function wrapLifecycleMethod(prototype, methodName, translator, reason) {
+  function wrapLifecycleMethod(prototype, methodName, translator, reason, scope) {
     const original = prototype[methodName];
     if (typeof original !== 'function') return false;
     if (original.__rpgTranslatorWindowLifecycle === LIFECYCLE_TOKEN) return true;
     prototype[methodName] = function translatedWindowLifecycle(...args) {
-      retireWindowSurface(translator, this, reason);
+      // 대사창의 내용 재생성은 메시지 어댑터가 관리하므로 대기 중인 대사를 폐기하지 않습니다.
+      if (!isDedicatedMessageWindow(scope, this)) retireWindowSurface(translator, this, reason);
       return original.apply(this, args);
     };
     prototype[methodName].__rpgTranslatorOriginal = original;
@@ -226,7 +234,7 @@
       if (original.__rpgTranslatorWindowReplay === CONTENTS_REPLAY_TOKEN) continue;
       contents[methodName] = function translatedContentsRenderOp(...args) {
         const result = original.apply(this, args);
-        if (!isTranslatedDrawActive(windowInstance)) {
+        if (!isTranslatedDrawActive(windowInstance) && !(windowInstance.__rpgTranslatorWindowTextCaptureDepth > 0)) {
           recordWindowRenderOp(windowInstance, methodName, args, original);
         }
         return result;
@@ -239,11 +247,28 @@
       if (typeof original !== 'function') continue;
       if (original.__rpgTranslatorWindowLifecycle === LIFECYCLE_TOKEN) continue;
       contents[methodName] = function translatedContentsMutation(...args) {
-        if (!isTranslatedDrawActive(windowInstance)) retireWindowSurface(translator, windowInstance, `contents-${methodName}`);
-        return original.apply(this, args);
+        if (!isTranslatedDrawActive(windowInstance)) {
+          if (methodName === 'clearRect') retireWindowRegion(translator, windowInstance, args);
+          else retireWindowSurface(translator, windowInstance, `contents-${methodName}`);
+        }
+        const result = original.apply(this, args);
+        if (methodName === 'clearRect' && !isTranslatedDrawActive(windowInstance)
+          && !(windowInstance.__rpgTranslatorWindowTextCaptureDepth > 0)) recordWindowRenderOp(windowInstance, methodName, args, original);
+        return result;
       };
       contents[methodName].__rpgTranslatorOriginal = original;
       contents[methodName].__rpgTranslatorWindowLifecycle = LIFECYCLE_TOKEN;
+    }
+  }
+
+  function retireWindowRegion(translator, windowInstance, args) {
+    const state = getState(windowInstance);
+    if (!state) return;
+    const rect = ReplayState.normalizeRect({ x: numberAt(args, 0, 0), y: numberAt(args, 1, 0),
+      width: numberAt(args, 2, 0), height: numberAt(args, 3, 0) });
+    if (!rect) return;
+    for (const [key, entry] of state.slots) {
+      if (key !== state.nativeSlotKey && ReplayState.rectsOverlap(rect, entry.bounds)) retireReplacedSlot(translator, state, key);
     }
   }
 
@@ -279,6 +304,10 @@
         }
       }
       state.slots.clear();
+      if (/contents-|window-refresh/.test(reason || '')) {
+        state.renderOps = [];
+        state.drawOrderCounter = 0;
+      }
       if (state.pendingDraws) state.pendingDraws.clear();
     }
     if (state && translator && typeof translator.releaseSurface === 'function') {
@@ -366,34 +395,39 @@
 
   function renderWindowEntry(translator, windowInstance, state, entry) {
     if (!entry || !entry.translatedText) return false;
-    const translatedBounds = textBounds(windowInstance, entry.methodName, entry.args || [], entry.translatedText);
-    const originalBounds = entry.bounds || textBounds(windowInstance, entry.methodName, entry.args || [], entry.sourceText);
-    const dirtyRect = ReplayState.unionRect(originalBounds, translatedBounds);
-    const replay = ReplayState.partitionOverlappingOps(state && state.renderOps, dirtyRect, entry.drawOrder);
-    const replayBefore = replay.before;
-    const replayAfter = replay.after;
-    recordWindowOverflow(translator, windowInstance, entry.methodName, entry.translatedText, entry.args || []);
-    withTranslatedDraw(windowInstance, () => {
-      const cleared = clearWindowTextRegion(windowInstance, entry.methodName, entry.args || [], dirtyRect);
-      const contents = windowInstance && windowInstance.contents;
-      const replayed = contents ? ReplayState.replayOps(contents, replayBefore, '__rpgTranslatorWindowReplayDepth') : 0;
-      recordReplayTrace(translator, 'background.restore', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared);
-      const draw = windowInstance && windowInstance[entry.methodName];
-      const original = draw && draw.__rpgTranslatorOriginal;
-      if (typeof original !== 'function') return false;
-      const result = withFittedWindowText(
-        windowInstance,
-        entry.methodName,
-        entry.translatedText,
-        entry.args || [],
-        () => original.call(windowInstance, entry.translatedText, ...(entry.args || [])),
-      );
-      const replayedAfter = contents ? ReplayState.replayOps(contents, replayAfter, '__rpgTranslatorWindowReplayDepth') : 0;
-      recordReplayTrace(translator, 'render.accepted', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared, replayedAfter);
-      return result;
+    const draw = windowInstance && windowInstance[entry.methodName];
+    // 플러그인의 하위 창 래퍼가 바뀌어도 관찰 당시의 네이티브 그리기 함수를 사용합니다.
+    const original = entry.original || (draw && draw.__rpgTranslatorOriginal);
+    if (typeof original !== 'function') return false;
+    // 영역 계산도 관찰 당시 글꼴을 사용해야 나중에 바뀐 글꼴 때문에 옆 문구를 지우지 않습니다.
+    return ReplayState.withTextStyle(windowInstance.contents, entry.textStyle, () => {
+      const translatedBounds = textBounds(windowInstance, entry.methodName, entry.args || [], entry.translatedText);
+      const originalBounds = entry.bounds || textBounds(windowInstance, entry.methodName, entry.args || [], entry.sourceText);
+      const dirtyRect = ReplayState.unionRect(originalBounds, translatedBounds);
+      const replay = ReplayState.partitionOverlappingOps(state && state.renderOps, dirtyRect, entry.drawOrder);
+      const replayBefore = replay.before;
+      const replayAfter = replay.after;
+      recordWindowOverflow(translator, windowInstance, entry.methodName, entry.translatedText, entry.args || []);
+      withTranslatedDraw(windowInstance, () => {
+        const cleared = clearWindowTextRegion(windowInstance, entry.methodName, entry.args || [], dirtyRect);
+        const contents = windowInstance && windowInstance.contents;
+        const replayed = contents ? ReplayState.replayOps(contents, replayBefore, '__rpgTranslatorWindowReplayDepth', dirtyRect) : 0;
+        recordReplayTrace(translator, 'background.restore', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared);
+        const result = ReplayState.withTextStyle(contents, entry.textStyle, () => withFittedWindowText(
+          windowInstance,
+          entry.methodName,
+          entry.translatedText,
+          entry.args || [],
+          () => original.call(windowInstance, entry.translatedText, ...(entry.args || [])),
+        ));
+        const replayedAfter = contents ? ReplayState.replayOps(contents, replayAfter, '__rpgTranslatorWindowReplayDepth', dirtyRect) : 0;
+        recordReplayTrace(translator, 'render.accepted', entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared, replayedAfter);
+        return result;
+      });
+      entry.status = 'rendered';
+      entry.bounds = dirtyRect;
+      return true;
     });
-    entry.status = 'rendered';
-    return true;
   }
 
   function recordReplayTrace(translator, stage, entry, dirtyRect, originalBounds, translatedBounds, replayed, cleared, replayedAfter) {
@@ -430,7 +464,8 @@
   }
 
   function isTranslatedDrawActive(windowInstance) {
-    return Number(windowInstance && windowInstance.__rpgTranslatorWindowTextDrawDepth) > 0;
+    return Number(windowInstance && windowInstance.__rpgTranslatorWindowTextDrawDepth) > 0
+      || Number(windowInstance && windowInstance.contents && windowInstance.contents.__rpgTranslatorBitmapReplayDepth) > 0;
   }
 
   function recordWindowOverflow(translator, windowInstance, methodName, text, args) {
@@ -462,11 +497,25 @@
     const nextFontSize = Math.max(8, Math.floor(fit.originalFontSize * fit.scale));
     if (!Number.isFinite(nextFontSize) || nextFontSize >= fit.originalFontSize) return callback();
     const previousFontSize = contents.fontSize;
+    const originalReset = windowInstance.resetFontSettings;
+    const ownedReset = Object.prototype.hasOwnProperty.call(windowInstance, 'resetFontSettings');
+    // MZ의 drawTextEx는 내부에서 글꼴을 초기화하므로 초기화 직후에도 같은 배율을 적용합니다.
+    if (methodName === 'drawTextEx' && typeof originalReset === 'function') {
+      windowInstance.resetFontSettings = function fittedFontReset(...resetArgs) {
+        const result = originalReset.apply(this, resetArgs);
+        if (this.contents) this.contents.fontSize = Math.max(8, Math.floor(Number(this.contents.fontSize) * fit.scale));
+        return result;
+      };
+    }
     contents.fontSize = nextFontSize;
     try {
       return callback();
     } finally {
       contents.fontSize = previousFontSize;
+      if (methodName === 'drawTextEx' && typeof originalReset === 'function') {
+        if (ownedReset) windowInstance.resetFontSettings = originalReset;
+        else delete windowInstance.resetFontSettings;
+      }
     }
   }
 
@@ -496,6 +545,7 @@
       methodName,
       args: Array.isArray(args) ? args.slice() : [],
       original,
+      drawStyle: ReplayState.captureTextStyle(windowInstance.contents),
       bounds,
       drawOrder: ReplayState.nextDrawOrder(state),
     });
@@ -504,7 +554,7 @@
   }
 
   function renderOpBounds(contents, methodName, args) {
-    if (methodName === 'fillRect' || methodName === 'gradientFillRect' || methodName === 'strokeRect') {
+    if (methodName === 'clearRect' || methodName === 'fillRect' || methodName === 'gradientFillRect' || methodName === 'strokeRect') {
       return { x: numberAt(args, 0, 0), y: numberAt(args, 1, 0), width: numberAt(args, 2, 0), height: numberAt(args, 3, 0) };
     }
     if (methodName === 'drawCircle') {
@@ -520,9 +570,15 @@
   }
 
   function textBounds(windowInstance, methodName, args, text) {
-    const x = numberAt(args, 0, 0);
+    let x = numberAt(args, 0, 0);
     const y = numberAt(args, 1, 0);
-    const width = Math.max(1, resolveWindowTextWidth(windowInstance, methodName, args) || measureWindowTextWidth(windowInstance, windowInstance && windowInstance.contents, text));
+    const layoutWidth = resolveWindowTextWidth(windowInstance, methodName, args);
+    const measured = measureWindowTextWidth(windowInstance, windowInstance && windowInstance.contents, text);
+    // 그리기 한도 전체를 지우면 같은 행의 수치도 사라지므로 글자가 차지하는 폭만 복구합니다.
+    const width = Math.max(1, layoutWidth > 0 ? Math.min(layoutWidth, measured) : measured);
+    const align = methodName === 'drawText' ? args[3] : 'left';
+    if (layoutWidth > width && align === 'right') x += layoutWidth - width;
+    else if (layoutWidth > width && align === 'center') x += (layoutWidth - width) / 2;
     const height = Math.max(1, resolveLineHeight(windowInstance, args));
     return { x, y, width, height };
   }

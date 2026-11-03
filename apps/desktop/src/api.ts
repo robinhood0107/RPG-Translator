@@ -13,7 +13,15 @@ import type {
   TranslateResponse,
 } from "./types";
 
+export type RuntimeStatus = { running: boolean; error?: string | null };
+
 type CommandMap = {
+  start_runtime_translation: {
+    request: CommandMap["translate_with_local_provider"]["request"];
+    response: RuntimeStatus;
+  };
+  stop_runtime_translation: { request: Record<string, never>; response: RuntimeStatus };
+  runtime_translation_status: { request: Record<string, never>; response: RuntimeStatus };
   hydrate_workbench: { request: { db_path?: string; project_file_path?: string }; response: HydrateWorkbenchResponse };
   save_workbench_settings: {
     request: {

@@ -289,6 +289,11 @@ impl BatchValidator {
                 validate_line_local_placeholders(id, &job.provider_text, translation)?;
             }
             validate_protected_angle_tags(id, &job.provider_text, translation)?;
+            if !TextCodec::runtime_number_tokens_match(&job.provider_text, translation) {
+                return Err(Error::invalid_input(format!(
+                    "runtime numeric placeholder mismatch for id {id}"
+                )));
+            }
             let restored =
                 TextCodec::restore_provider_translation(translation, &job.provider_state)?;
             validated.push(ValidatedTranslation {
@@ -2358,6 +2363,11 @@ fn validation_retry_instruction(message: &str) -> String {
     if message.contains("protected tag mismatch") {
         return repair_note(
             "The previous output changed protected angle-bracket metadata. Copy every complete <...> tag byte-for-byte, such as <Disable Switch: 8>, while translating only visible text outside protected tags. Return strict JSONL with integer id and translation fields.",
+        );
+    }
+    if message.contains("runtime numeric placeholder") {
+        return repair_note(
+            "Preserve every named {{RPGT_NUM_N}} numeric placeholder exactly once. Do not rename, delete, or duplicate them. You may reorder these named numeric placeholders to match target grammar. Translate the surrounding visible words.",
         );
     }
     if message.contains("placeholder mismatch") {

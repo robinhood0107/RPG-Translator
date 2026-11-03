@@ -158,3 +158,23 @@ textarea:focus-visible {
     display: block;
   }
 }
+
+.runtime-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding: 12px;
+}
+
+.runtime-controls p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runtime-controls button {
+  flex-shrink: 0;
+  padding: 0 10px;
+}

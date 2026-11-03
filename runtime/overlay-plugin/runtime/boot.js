@@ -1,4 +1,4 @@
-// 정적 번들의 계약을 검사한 뒤 어댑터를 설치합니다. 게임 실행 중 번역 제공자를 호출하지 않습니다.
+// 번들 계약을 검사하고 어댑터와 선택적 파일 요청함을 연결합니다. 모델 호출은 Rust 작업자가 담당합니다.
 (function attach(root) {
   const RUNTIME_MANIFEST_SCHEMA_VERSION = 1;
   const RUNTIME_CONFIG_SCHEMA_VERSION = 1;
@@ -22,15 +22,19 @@
     'adapters/bitmap-text/bitmap-text-adapter.js',
     'adapters/sprite-text/sprite-text-adapter.js',
     'adapters/pixi-text/pixi-text-adapter.js',
+    'adapters/canvas-text-adapter.js',
+    'adapters/dom-text-adapter.js',
     'runtime/startup-toast.js',
     'runtime/boot.js',
   ];
   const REQUIRED_RUNTIME_FILES = [PLUGIN_ENTRY_FILE].concat(RUNTIME_SCRIPT_LOAD_ORDER);
 
   const { CacheLoader } = loadDependency(root, './cache-loader');
-  const { LookupIndex } = loadDependency(root, './lookup-index');
+  const { LookupIndex, RuntimeMailboxClient } = loadDependency(root, './lookup-index');
   const { BitmapTextAdapter } = loadDependency(root, '../adapters/bitmap-text/bitmap-text-adapter');
   const { MessageAdapter } = loadDependency(root, '../adapters/game-message/message-adapter');
+  const { CanvasTextAdapter } = loadDependency(root, '../adapters/canvas-text-adapter');
+  const { DomTextAdapter } = loadDependency(root, '../adapters/dom-text-adapter');
   const { PixiTextAdapter } = loadDependency(root, '../adapters/pixi-text/pixi-text-adapter');
   const { RenderGuard } = loadDependency(root, './render-guard');
   const { RuntimeDiagnostics } = loadDependency(root, './runtime-diagnostics');
@@ -53,7 +57,17 @@
       const missLogger = RuntimeMissLogger
         ? RuntimeMissLogger.fromConfig(bundle.config || {}, options.missLogger || {})
         : null;
-      const index = new LookupIndex(Object.assign({}, bundle, { missLogger }));
+      let mailbox = options.mailbox || null;
+      let runtimeConnectionError = null;
+      if (!mailbox && RuntimeMailboxClient) {
+        try { mailbox = RuntimeMailboxClient.fromConfig(bundle.config, options.baseUrl); }
+        catch (error) { runtimeConnectionError = error.message; }
+      }
+      const technicalTokens = () => {
+        const basic=scope.$dataSystem && scope.$dataSystem.terms && scope.$dataSystem.terms.basic;
+        return Array.isArray(basic) ? [1,3,5,7,9].map(index=>basic[index]) : [];
+      };
+      const index = new LookupIndex(Object.assign({}, bundle, { missLogger, mailbox, runtimeConnectionError, technicalTokens }));
       const runtimeDiagnostics = RuntimeDiagnostics
         ? new RuntimeDiagnostics({
           settings: bundle.config || {},
@@ -99,6 +113,7 @@
         engine: options.engine || 'unknown',
         sourceLanguage: bundle.manifest.source_language,
         targetLanguage: bundle.manifest.target_language,
+        config: bundle.config || {},
         index,
         orchestrator,
         foresightScanner,
@@ -111,6 +126,8 @@
       installAdapter(runtimeDiagnostics, 'bitmap-text', () => BitmapTextAdapter.install(scope, orchestrator));
       installAdapter(runtimeDiagnostics, 'sprite-text', () => SpriteTextAdapter.install(scope, orchestrator));
       installAdapter(runtimeDiagnostics, 'pixi-text', () => PixiTextAdapter.install(scope, orchestrator));
+      if (scope.CanvasRenderingContext2D && CanvasTextAdapter) installAdapter(runtimeDiagnostics, 'canvas-text', () => CanvasTextAdapter.install(scope, orchestrator));
+      if (scope.MutationObserver && DomTextAdapter) installAdapter(runtimeDiagnostics, 'dom-text', () => DomTextAdapter.install(scope, orchestrator));
       if (bundle.config && bundle.config.startup_toast_enabled !== false) {
         new StartupToast({ document: scope.document, setTimeout: scope.setTimeout }).show(bundle.config);
       }

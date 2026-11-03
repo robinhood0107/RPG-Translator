@@ -737,7 +737,7 @@ pub struct BatchFailure {
     pub message: String,
 }
 
-struct ReqwestTransport {
+pub(super) struct ReqwestTransport {
     client: reqwest::Client,
     pause_requested: Option<Arc<AtomicBool>>,
 }
@@ -752,7 +752,7 @@ impl Default for ReqwestTransport {
 }
 
 impl ReqwestTransport {
-    fn with_pause(pause_requested: Arc<AtomicBool>) -> Self {
+    pub(super) fn with_pause(pause_requested: Arc<AtomicBool>) -> Self {
         Self {
             client: reqwest::Client::new(),
             pause_requested: Some(pause_requested),

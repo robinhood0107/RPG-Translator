@@ -66,21 +66,41 @@
       };
     }
 
-    static replayOps(target, ops, depthKey) {
+    static replayOps(target, ops, depthKey, clipRect) {
       if (!target || !Array.isArray(ops) || !ops.length) return 0;
       const key = depthKey || '__rpgTranslatorReplayDepth';
       target[key] = (target[key] || 0) + 1;
+      const rect = ReplayState.normalizeRect(clipRect);
+      const context = target.context || target._context;
+      const clipped = rect && context && ['save', 'restore', 'beginPath', 'rect', 'clip'].every((name) => typeof context[name] === 'function');
+      if (clipped) { context.save(); context.beginPath(); context.rect(rect.x, rect.y, rect.width, rect.height); context.clip(); }
       let count = 0;
       try {
         ops.forEach((op) => {
           if (!op || typeof op.original !== 'function') return;
-          op.original.apply(target, Array.isArray(op.args) ? op.args : []);
+          ReplayState.withTextStyle(target, op.drawStyle, () => op.original.apply(target, Array.isArray(op.args) ? op.args : []));
           count += 1;
         });
       } finally {
+        if (clipped) context.restore();
         target[key] = Math.max(0, (target[key] || 1) - 1);
       }
       return count;
+    }
+
+    static captureTextStyle(target) {
+      const style = {};
+      for (const key of ['fontFace', 'fontSize', 'fontBold', 'fontItalic', 'textColor', 'outlineColor', 'outlineWidth', 'paintOpacity']) {
+        if (target && key in target) style[key] = target[key];
+      }
+      return style;
+    }
+
+    static withTextStyle(target, style, callback) {
+      if (!target || !style) return callback();
+      const previous = ReplayState.captureTextStyle(target);
+      Object.assign(target, style);
+      try { return callback(); } finally { Object.assign(target, previous); }
     }
 
     static filterOutsideRect(items, rect) {

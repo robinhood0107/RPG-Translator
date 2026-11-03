@@ -1,5 +1,7 @@
 // 스프라이트의 텍스트 단위·부모·가시성 변화를 추적합니다. 분리·재부착·파괴 시 구독과 렌더 상태를 갱신합니다.
 (function attach(root) {
+  const BitmapTextAdapter = root.RPGTranslatorOverlay && root.RPGTranslatorOverlay.BitmapTextAdapter
+    || (typeof module !== 'undefined' && module.exports ? require('../bitmap-text/bitmap-text-adapter').BitmapTextAdapter : null);
   const STATE_KEY = '__rpgTranslatorSpriteTextState';
   const PARENT_RUN_KEY = '__rpgTranslatorSpriteTextParentRunState';
   const INSTALL_TOKEN = 'rpg-translator-sprite-text-v2';
@@ -95,6 +97,10 @@
         ownershipStatus: payload.ownershipStatus || event.status || '',
       },
     });
+    if (command && command.status !== 'hit' && BitmapTextAdapter
+      && BitmapTextAdapter.trackSurfaceTranslation(surface, payload, command, translator, slotKey)) {
+      return { action: 'draw-original', reason: 'runtime-pending' };
+    }
     if (!command || command.status !== 'hit') return null;
     if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, surface, text)) {
       return null;

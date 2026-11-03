@@ -36,7 +36,7 @@ import {
 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { callCommand, isDesktopRuntime } from "./api";
+import { callCommand, isDesktopRuntime, type RuntimeStatus } from "./api";
 import { DesktopChrome } from "./ui/DesktopChrome";
 import { useTheme } from "./ui/useTheme";
 import type {
@@ -384,6 +384,8 @@ export default function App() {
   const [exportReport, setExportReport] = useState<ExportBundleResponse | null>(null);
   const [installReport, setInstallReport] = useState<InstallOverlayResponse | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>({ running: false });
+  const runtimeContextRef = useRef("");
   const [showHoverHelp, setShowHoverHelp] = useState(true);
   const [uiFontSize, setUiFontSize] = useState<UiFontSize>("medium");
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null);
@@ -574,10 +576,11 @@ export default function App() {
             drafts: Object.values(reviewDraftSaves),
             visible: true,
           });
+          const runtimeStopWork = runtimeStatus.running ? callCommand("stop_runtime_translation", {}) : Promise.resolve();
           const shutdownWork = callCommand("prepare_safe_shutdown", {
             db_path: activeDbPath || null,
           });
-          await boundedCloseWork([flushWork, shutdownWork], closeStartedAt);
+          await boundedCloseWork([flushWork, shutdownWork, runtimeStopWork], closeStartedAt);
           await closeWindowWithFallback(appWindow, closeStartedAt);
         });
       })
@@ -595,7 +598,7 @@ export default function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [activeDbPath, desktopRuntime, reviewDraftSaves, t]);
+  }, [activeDbPath, desktopRuntime, reviewDraftSaves, runtimeStatus.running, t]);
 
   useEffect(() => {
     setReviewPage(1);
@@ -669,6 +672,7 @@ export default function App() {
   const filteredRows = useMemo(() => reviewRows, [reviewRows]);
   const canUseDesktopCommands = desktopRuntime;
   const translationInFlight =
+    runtimeStatus.running || pendingLabel === t.runtimeStarting ||
     pendingLabel === t.translatingBatch ||
     translateProgress?.phase === "running" ||
     translateProgress?.phase === "pause_requested";
@@ -681,6 +685,21 @@ export default function App() {
     targetLanguage !== "" &&
     systemPrompt.trim() !== "" &&
     !translationInFlight;
+  const runtimeContext = JSON.stringify([activeDbPath, selectedProjectId, sourceLanguage, targetLanguage, providerBaseUrl, providerModel, systemPrompt]);
+  useEffect(() => {
+    if (!runtimeStatus.running) return;
+    const timer = window.setInterval(() => {
+      void callCommand("runtime_translation_status", {}).then(setRuntimeStatus).catch((caught) => setError(userFacingCommandError(caught, t)));
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [runtimeStatus.running, t]);
+
+  useEffect(() => {
+    if (runtimeStatus.running && runtimeContextRef.current !== runtimeContext) {
+      void callCommand("stop_runtime_translation", {}).then(setRuntimeStatus).catch((caught) => setError(userFacingCommandError(caught, t)));
+    }
+  }, [runtimeContext, runtimeStatus.running, t]);
+
   const canPauseTranslation =
     canUseDesktopCommands && translateProgress?.phase === "running";
   const canTestProvider = canTranslate;
@@ -1414,6 +1433,21 @@ export default function App() {
       });
     });
 
+  const startRuntime = () => runTransition(t.runtimeStarting, async () => {
+    runtimeContextRef.current = runtimeContext;
+    const status = await callCommand("start_runtime_translation", {
+      db_path: activeDbPath, project_id: selectedProjectId, source_language: sourceLanguage,
+      target_language: targetLanguage, base_url: providerBaseUrl, model: providerModel,
+      system_prompt: systemPrompt, max_output_tokens: 1536,
+    });
+    setRuntimeStatus(status);
+    await refreshHydration();
+  });
+
+  const stopRuntime = () => runTransition(t.runtimeStopping, async () => {
+    setRuntimeStatus(await callCommand("stop_runtime_translation", {}));
+  });
+
   const translate = () =>
     runTransition(t.translatingBatch, async () => {
       if (!hasActiveDatabase) {
@@ -2052,6 +2086,10 @@ export default function App() {
                 report={translateReport}
                 progress={translateProgress}
                 onTranslate={translate}
+                runtimeStatus={runtimeStatus}
+                onStartRuntime={startRuntime}
+                onStopRuntime={stopRuntime}
+                runtimeDisabled={!canTranslate || Boolean(pendingLabel)}
                 onPause={pauseTranslation}
                 onTestProvider={testProvider}
                 onBenchmarkProvider={benchmarkProviderSpeed}
@@ -3563,6 +3601,10 @@ function ScanPanel({
 }
 
 function TranslatePanel({
+  runtimeStatus,
+  onStartRuntime,
+  onStopRuntime,
+  runtimeDisabled,
   report,
   progress,
   onTranslate,
@@ -3591,6 +3633,10 @@ function TranslatePanel({
   showHoverHelp,
   t,
 }: {
+  runtimeStatus: RuntimeStatus;
+  onStartRuntime: () => void;
+  onStopRuntime: () => void;
+  runtimeDisabled: boolean;
   report: TranslateResponse | null;
   progress: TranslateProgressSnapshot | null;
   onTranslate: () => void;
@@ -3632,6 +3678,17 @@ function TranslatePanel({
   const metricSplitBatches = report?.split_batches ?? progress?.splitBatches ?? 0;
   return (
     <div className="task-panel">
+      <section className="runtime-controls" aria-label={t.runtimeTranslation}>
+        <div>
+          <strong>{t.runtimeTranslation}</strong>
+          <p>{runtimeStatus.running ? t.runtimeRunning : t.runtimeDescription}</p>
+          {runtimeStatus.error ? <p role="alert">{runtimeStatus.error}</p> : null}
+        </div>
+        <button type="button" onClick={runtimeStatus.running ? onStopRuntime : onStartRuntime}
+          disabled={!runtimeStatus.running && runtimeDisabled}>
+          {runtimeStatus.running ? t.runtimeStop : t.runtimeStart}
+        </button>
+      </section>
       <div className="panel-heading">
         <h3>{t.translate}</h3>
         <div className="inline-actions">

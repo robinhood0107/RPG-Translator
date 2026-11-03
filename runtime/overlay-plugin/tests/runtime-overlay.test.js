@@ -6,7 +6,7 @@ const test = require('node:test');
 
 const { Boot } = require('../runtime/boot');
 const { BitmapTextAdapter } = require('../adapters/bitmap-text/bitmap-text-adapter');
-const { CacheKeyBuilder, LookupIndex } = require('../runtime/lookup-index');
+const { CacheKeyBuilder, LookupIndex, RuntimeMailboxClient } = require('../runtime/lookup-index');
 const { CacheLoader } = require('../runtime/cache-loader');
 const { MessageAdapter } = require('../adapters/game-message/message-adapter');
 const { TextOrchestrator } = require('../runtime/text-orchestrator/orchestrator');
@@ -22,6 +22,7 @@ const { TextCodec } = require('../runtime/text-codec');
 const { MessageWrapper } = require('../runtime/wrapping');
 const { WindowTextAdapter } = require('../adapters/window-text/window-text-adapter');
 const { ForesightScanner } = require('../runtime/foresight-scanner');
+const { DomTextAdapter } = require('../adapters/dom-text-adapter');
 
 test('text codec follows shared Rust/runtime vectors', () => {
   const vectorsPath = path.join(__dirname, '..', 'test', 'fixtures', 'text-codec-vectors.json');
@@ -3933,7 +3934,7 @@ test('window text adapter restores background and replays later draws around tra
   assert.deepEqual(calls, [
     ['fillRect', 0, 0, 80, 24, '#112233'],
     ['drawText', 'Quest', 0, 0, 80, 'left'],
-    ['clearRect', 0, 0, 80, 24],
+    ['clearRect', 0, 0, 60, 24],
     ['fillRect', 0, 0, 80, 24, '#112233'],
     ['drawText', '퀘스트', 0, 0, 80, 'left'],
     ['drawText', 'Later', 40, 0, 80, 'left'],
@@ -8457,6 +8458,8 @@ test('RPG Maker plugin entry loads support modules in deterministic order and bo
     `${baseUrl}adapters/bitmap-text/bitmap-text-adapter.js`,
     `${baseUrl}adapters/sprite-text/sprite-text-adapter.js`,
     `${baseUrl}adapters/pixi-text/pixi-text-adapter.js`,
+    `${baseUrl}adapters/canvas-text-adapter.js`,
+    `${baseUrl}adapters/dom-text-adapter.js`,
     `${baseUrl}runtime/startup-toast.js`,
     `${baseUrl}runtime/boot.js`,
     ['boot', baseUrl, 'mz'],
@@ -8523,8 +8526,671 @@ test('선택지 번역은 하위 비트맵에서 압축하지 않고 기존 글�
   assert.equal(window.drawTextEx('No', 12, 48, 80), 24);
   assert.deepEqual(calls, [
     ['draw', 'No', 12, 48, 24],
-    ['clear', 12, 48, 80, 36],
+    ['clear', 12, 48, 78, 36],
     ['draw', '아니요', 12, 48, 78],
   ]);
   assert.equal(window.__rpgTranslatorWindowTextCaptureDepth, 0);
+});
+
+test('런타임 요청함은 같은 원문 요청을 합치고 검증한 응답만 반환한다', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rpg-mailbox-'));
+  const client = new RuntimeMailboxClient(directory);
+  t.after(() => {
+    for (const entry of client.pending.values()) client.finish(entry, null, 'test-ended');
+    if (client.timer) clearInterval(client.timer);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const key = `ck:v1:${'a'.repeat(64)}`;
+  const request = { schema_version: 1, cache_key: key, text: 'CONFIG', target_language: 'ko', adapter: 'window-text' };
+  const first = client.request(request);
+  assert.equal(client.request(request), first);
+  const file = `${'a'.repeat(64)}.json`;
+  for (let i = 0; i < 50 && !fs.existsSync(path.join(directory, 'requests', file)); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'requests', file), 'utf8')).text, 'CONFIG');
+  fs.writeFileSync(path.join(directory, 'responses', file), JSON.stringify({
+    schema_version: 1, cache_key: key, text: 'CONFIG', translation: '설정', error: null,
+  }));
+  assert.equal(await first, '설정');
+  assert.equal(client.pending.size, 0);
+  const second = client.request(request);
+  for (let i = 0; i < 50 && !client.pending.get(key)?.queued; i += 1) await new Promise(resolve => setTimeout(resolve,10));
+  assert.equal(fs.existsSync(path.join(directory,'responses',file)),false);
+  fs.writeFileSync(path.join(directory,'responses',file),JSON.stringify({schema_version:1,cache_key:key,text:'CONFIG',translation:'환경 설정',error:null}));
+  assert.equal(await second,'환경 설정');
+});
+
+test('지연 번역은 새 원문으로 교체된 항목에 적용하지 않는다', async () => {
+  let complete;
+  let requests = 0;
+  const index = {
+    translate: () => null,
+    requestTranslation: () => {
+      requests += 1;
+      return new Promise((resolve) => { complete = resolve; });
+    },
+  };
+  const orchestrator = new TextOrchestrator(index, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' });
+  const surface = {};
+  const first = orchestrator.observeRecord({ text: 'First', surface, adapter: 'window-text', slotKey: 'label' });
+  const refreshed = orchestrator.observeRecord({ text: 'First', surface, adapter: 'window-text', slotKey: 'label' });
+  assert.equal(first.completion, refreshed.completion);
+  assert.equal(requests, 1);
+  const finishFirst = complete;
+  orchestrator.observeRecord({ text: 'Second', surface, adapter: 'window-text', slotKey: 'label' });
+  finishFirst('첫째');
+  assert.equal(await first.completion, null);
+});
+
+test('캐시에 없던 현재 문장은 지연 번역 후 정상 그리기 명령으로 전환된다', async () => {
+  const orchestrator = new TextOrchestrator({
+    translate: () => null,
+    requestTranslation: async () => '설정',
+  }, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' });
+  const surface = {};
+  const command = orchestrator.observeRecord({ text: 'CONFIG', surface, adapter: 'window-text', slotKey: 'label' });
+  assert.equal(command.status, 'miss');
+  const ready = await command.completion;
+  assert.equal(ready.translatedText, '설정');
+  assert.equal(orchestrator.acceptRender(ready, surface, 'CONFIG'), true);
+});
+
+test('캐시에 없는 창 문구도 번역 도착 후 원문을 지우고 표시한다', async () => {
+  let finish;
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Window_Base: function WindowBase() {
+      this.contents = { width: 120, fontSize: 24, clearRect: (...args) => calls.push(['clear', ...args]) };
+    },
+  };
+  root.Window_Base.prototype.textWidth = text => text.length * 12;
+  root.Window_Base.prototype.lineHeight = () => 30;
+  root.Window_Base.prototype.drawTextEx = text => { calls.push(['draw', text]); return text.length; };
+  const translator = new TextOrchestrator({ translate: () => null,
+    requestTranslation: () => new Promise(resolve => { finish = resolve; }),
+  }, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko', renderGuard: new RenderGuard() });
+  WindowTextAdapter.install(root, translator);
+  const window = new root.Window_Base();
+  window.drawTextEx('CONFIG', 0, 0, 100);
+  assert.deepEqual(calls, [['draw', 'CONFIG']]);
+  finish('설정');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [['draw', 'CONFIG'], ['clear', 0, 0, 72, 30], ['draw', '설정']]);
+});
+
+test('대사창은 캐시에 없는 대사도 지연 번역으로 갱신한다', async () => {
+  let finish;
+  const calls = [];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    $gameMessage: { _texts: ['A new sentence.'] },
+    Window_Message: function WindowMessage() { this.visible = true; this.contents = { clear() {} }; },
+  };
+  root.Window_Message.prototype.startMessage = function () {};
+  root.Window_Message.prototype.isOpen = () => true;
+  root.Window_Message.prototype.drawTextEx = text => calls.push(text);
+  const translator = new TextOrchestrator({ translate: () => null,
+    requestTranslation: () => new Promise(resolve => { finish = resolve; }),
+  }, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' });
+  MessageAdapter.install(root, translator);
+  const window = new root.Window_Message();
+  window.startMessage();
+  finish('새로운 문장입니다.');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(root.$gameMessage._texts, ['새로운 문장입니다.']);
+  assert.ok(calls.includes('새로운 문장입니다.'));
+});
+
+test('PIXI 텍스트는 새 번역이 도착하면 네이티브 setter로 갱신한다', async () => {
+  let finish;
+  class Text {
+    constructor(text) { this.visible = true; this.renderable = true; this.parent = {}; this.text = text; }
+    get text() { return this.value; }
+    set text(value) { this.value = value; }
+  }
+  const root = { PIXI: { Text }, RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' } };
+  const translator = new TextOrchestrator({ translate: () => null,
+    requestTranslation: () => new Promise(resolve => { finish = resolve; }),
+  }, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' });
+  PixiTextAdapter.install(root, translator);
+  const text = new Text('NEW QUEST');
+  assert.equal(text.text, 'NEW QUEST');
+  finish('새 퀘스트');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(text.text, '새 퀘스트');
+});
+
+test('NW.js의 앱 리소스 URL도 실제 게임 폴더의 요청함에 연결한다', () => {
+  const previous = globalThis.nw;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rpg-nw-root-'));
+  try {
+    globalThis.nw = { App: { startPath: directory } };
+    const mailbox = RuntimeMailboxClient.fromConfig({ runtime_translation_enabled: true },
+      'chrome-extension://game-id/js/plugins/rpg-translator/');
+    assert.equal(mailbox.directory, path.join(directory, 'rpg-translator', 'runtime'));
+    const nested = RuntimeMailboxClient.fromConfig({ runtime_translation_enabled: true },
+      'chrome-extension://game-id/www/js/plugins/rpg-translator/');
+    assert.equal(nested.directory, path.join(directory, 'www', 'rpg-translator', 'runtime'));
+  } finally {
+    if (previous === undefined) delete globalThis.nw; else globalThis.nw = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('스프라이트가 넘긴 비트맵 문구도 지연 번역하며 다른 행·색상·배경을 보존한다', async () => {
+  const pending = new Map();
+  const calls = [];
+  const clips = [];
+  const context = { save() {}, restore() {}, beginPath() {}, rect(...args) { clips.push(args); }, clip() {} };
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    Bitmap: function Bitmap() { this.width = 200; this.height = 100; this.fontSize = 24; this.context = context; },
+    Sprite: function Sprite() {},
+    SceneManager: { updateScene() {} },
+  };
+  root.Bitmap.prototype.measureTextWidth = text => text.length * 8;
+  root.Bitmap.prototype.drawText = function(text) { calls.push(['draw', text, this.textColor]); };
+  root.Bitmap.prototype.clearRect = function(...args) { calls.push(['clear', ...args]); };
+  root.Bitmap.prototype.fillRect = function(...args) { calls.push(['fill', ...args]); };
+  root.Sprite.prototype.update = function() {};
+  const translator = new TextOrchestrator({ translate: () => null,
+    requestTranslation: ({ text }) => new Promise(resolve => pending.set(text, resolve)),
+  }, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko', renderGuard: new RenderGuard() });
+  BitmapTextAdapter.install(root, translator);
+  SpriteTextAdapter.install(root, translator);
+  const bitmap = new root.Bitmap();
+  bitmap.fillRect(0, 0, 200, 24, 'background');
+  bitmap.textColor = 'red';
+  bitmap.drawText('First', 0, 0, 60, 24, 'left');
+  bitmap.fillRect(0, 40, 200, 24, 'background');
+  bitmap.textColor = 'blue';
+  bitmap.drawText('Second', 0, 40, 60, 24, 'left');
+  pending.get('First')('첫째');
+  pending.get('Second')('둘째');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls.some(row => row[0] === 'draw' && row[1] === '첫째' && row[2] === 'red'));
+  assert.ok(calls.some(row => row[0] === 'draw' && row[1] === '둘째' && row[2] === 'blue'));
+  assert.equal(bitmap.textColor, 'blue');
+  assert.ok(clips.some(rect => rect[0] === 0 && rect[1] === 0 && rect[2] === 60 && rect[3] === 24));
+});
+
+test('HTML 문구와 안내 속성을 번역해도 선택 값과 플레이어 입력은 유지한다', () => {
+  const element = (tag, attrs = {}) => ({
+    nodeType: 1, tagName: tag, isConnected: true, attrs, value: '',
+    closest(selector) { return /textarea,input,/.test(selector) && /INPUT|TEXTAREA/.test(tag) ? this : null; },
+    hasAttribute(name) { return Object.hasOwn(this.attrs, name); },
+    getAttribute(name) { return this.attrs[name] ?? null; },
+    setAttribute(name, value) { this.attrs[name] = value; },
+  });
+  const option = element('OPTION');
+  const optionText = { nodeType: 3, nodeValue: 'English', isConnected: true, parentElement: option };
+  Object.defineProperty(option, 'textContent', { get: () => optionText.nodeValue });
+  const editor = element('TEXTAREA');
+  const playerText = { nodeType: 3, nodeValue: 'Emma', isConnected: true, parentElement: editor };
+  const input = element('INPUT', { placeholder: 'Choose a name' });
+  input.value = 'Emma';
+  const body = element('BODY');
+  body.querySelectorAll = () => [input];
+  const texts = [optionText, playerText];
+  const root = {
+    RPGTranslatorOverlay: { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' },
+    document: { body, createTreeWalker() { let index = 0; return { nextNode: () => texts[index++] || null }; } },
+    MutationObserver: class { observe() {} },
+  };
+  const translator = new TextOrchestrator({ translate: ({ text }) => ({ English: '영어', Emma: '엠마', 'Choose a name': '이름을 입력하세요' })[text] || null },
+    { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko' });
+  DomTextAdapter.install(root, translator);
+  assert.equal(optionText.nodeValue, '영어');
+  assert.equal(option.value, 'English');
+  assert.equal(playerText.nodeValue, 'Emma');
+  assert.equal(input.value, 'Emma');
+  assert.equal(input.attrs.placeholder, '이름을 입력하세요');
+});
+
+test('네이티브 drawTextEx가 글꼴을 초기화해도 번역 폭 맞춤을 유지한다', () => {
+  const calls = [];
+  const root = { Window_Base: function WindowBase() { this.contents = { width: 100, fontSize: 24, clearRect() {} }; } };
+  root.Window_Base.prototype.resetFontSettings = function() { this.contents.fontSize = 24; };
+  root.Window_Base.prototype.textWidth = function(text) { return text.length * this.contents.fontSize; };
+  root.Window_Base.prototype.drawTextEx = function(text) {
+    this.resetFontSettings(); calls.push({text, size:this.contents.fontSize}); return text.length;
+  };
+  WindowTextAdapter.install(root, { translate: ({text}) => text === 'Name' ? '매우긴이름입니다' : null });
+  const window = new root.Window_Base();
+  window.drawTextEx('Name', 0, 0, 60);
+  assert.ok(calls[1].size < 24);
+  assert.equal(window.contents.fontSize, 24);
+  assert.equal(Object.hasOwn(window,'resetFontSettings'), false);
+});
+
+test('번역 후크 준비 전에 UI가 만들어지지 않고 초기화 실패 시 게임은 계속 시작된다', () => {
+  const root = { Scene_Boot: function SceneBoot() {}, RPGTranslatorOverlay: {} };
+  root.Scene_Boot.prototype.isReady = () => true;
+  RuntimeEntry.holdSceneBoot(root);
+  RuntimeEntry.holdSceneBoot(root);
+  const scene = new root.Scene_Boot();
+  assert.equal(scene.isReady(), false);
+  root.RPGTranslatorOverlay.installed = true;
+  assert.equal(scene.isReady(), true);
+  root.RPGTranslatorOverlay.installed = false;
+  root.RPGTranslatorOverlay.bootError = 'load failed';
+  assert.equal(scene.isReady(), true);
+});
+
+test('창의 다른 행을 지워도 남아 있는 문구의 지연 번역은 적용된다', async () => {
+  const complete = new Map();
+  const drawn = [];
+  const root = { Window_Base: function WindowBase() {
+    this.contents = { width: 200, fontSize: 20, clearRect() {} };
+  } };
+  root.Window_Base.prototype.lineHeight = () => 24;
+  root.Window_Base.prototype.drawTextEx = function(text,x,y) {
+    this.contents.clearRect(x,y,100,24);drawn.push(text);return text.length;
+  };
+  const translator = new TextOrchestrator({translate:()=>null,
+    requestTranslation:({text})=>new Promise(resolve=>complete.set(text,resolve)),
+  },{engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  WindowTextAdapter.install(root,translator);
+  const window = new root.Window_Base();
+  window.drawTextEx('First',0,0,100);
+  window.drawTextEx('Second',0,40,100);
+  complete.get('First')('첫째');complete.get('Second')('둘째');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(drawn.includes('첫째'));
+  assert.ok(drawn.includes('둘째'));
+});
+
+test('대사 시작 때 네이티브 내용 지우기가 대사 어댑터의 지연 요청을 폐기하지 않는다', async () => {
+  let complete;
+  const drawn = [];
+  const root = { Window_Base: function WindowBase() {
+    this.contents = { width: 400, clear() {}, clearRect() {} };
+  }, $gameMessage: { _texts: ['Hello'], allText() { return this._texts.join('\n'); } } };
+  root.Window_Base.prototype.drawTextEx = function(text) { drawn.push(text); };
+  root.Window_Base.prototype.update = function() {};
+  root.Window_Base.prototype.createContents = function() { this.contents.clear(); };
+  root.Window_Message = function WindowMessage() { const base = new root.Window_Base(); this.contents = base.contents; };
+  root.Window_Message.prototype = Object.create(root.Window_Base.prototype);
+  root.Window_Message.prototype.startMessage = function() { this.createContents(); };
+  const translator = new TextOrchestrator({ translate: () => null,
+    requestTranslation: () => new Promise(resolve => { complete = resolve; }),
+  }, { engine: 'mz', sourceLanguage: 'en', targetLanguage: 'ko', renderGuard: new RenderGuard() });
+  MessageAdapter.install(root, translator);
+  WindowTextAdapter.install(root, translator);
+  const window = new root.Window_Message();
+  window.startMessage();
+  complete('안녕하세요');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(root.$gameMessage._texts, ['안녕하세요']);
+  assert.ok(drawn.includes('안녕하세요'));
+});
+
+test('넓은 문구 영역의 지연 번역이 같은 행의 설정 값까지 지우지 않는다', async () => {
+  let complete;
+  const clears = [];
+  const root = { Window_Base: function WindowBase() {
+    this.contents = { width: 1000, fontSize: 20, clearRect: (x,y,width,height) => clears.push({x,y,width,height}) };
+  } };
+  root.Window_Base.prototype.textWidth = text => text.length * 12;
+  root.Window_Base.prototype.lineHeight = () => 24;
+  root.Window_Base.prototype.drawTextEx = function() {};
+  const translator = new TextOrchestrator({translate:()=>null,
+    requestTranslation:()=>new Promise(resolve=>{complete=resolve;}),
+  },{engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  WindowTextAdapter.install(root,translator);
+  const window = new root.Window_Base();
+  window.drawTextEx('Always Dash',0,0,1000);
+  complete('항상 대시');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(clears.length > 0);
+  assert.ok(clears.every(rect => rect.x + rect.width < 900));
+});
+
+test('플러그인이 창의 drawText를 감싸도 지연 응답은 관찰 시의 네이티브 함수로 그린다', async () => {
+  let complete;
+  const calls=[];
+  const root={Window_Base:function WindowBase(){this.contents={width:200,fontSize:24,clearRect(){calls.push('clear');}};}};
+  root.Window_Base.prototype.drawText=function(text){calls.push(text);};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>new Promise(resolve=>{complete=resolve;})},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  WindowTextAdapter.install(root,translator);
+  const window=new root.Window_Base();
+  const baseDraw=window.drawText;
+  window.drawText=function(...args){return baseDraw.apply(this,args);};
+  window.drawText('ON',0,0,100,'center');
+  complete('켜짐');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(calls,['ON','clear','켜짐']);
+});
+
+function canvasFixture() {
+  const calls=[];
+  class Context {
+    constructor(){this.canvas={width:400,height:200};this.font='24px sans-serif';this.textAlign='left';this.textBaseline='alphabetic';this.lineWidth=1;this.stack=[];}
+    measureText(text){return {width:text.length*12};}
+    getImageData(x,y,width,height){return {x,y,width,height};}
+    putImageData(){calls.push('restore-background');}
+    save(){this.stack.push({font:this.font});}
+    restore(){Object.assign(this,this.stack.pop());}
+    fillText(text){calls.push(['fill',text]);}
+    strokeText(text){calls.push(['stroke',text]);}
+    clearRect(){calls.push('clear');}
+  }
+  const scope={CanvasRenderingContext2D:Context,RPGTranslatorOverlay:{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'}};
+  return {calls,scope,context:new Context()};
+}
+
+test('직접 Canvas의 윤곽과 본문은 한 번 번역하며 원래 배경과 글꼴을 보존한다',async()=>{
+  const {CanvasTextAdapter}=require('../adapters/canvas-text-adapter');
+  const {calls,scope,context}=canvasFixture();
+  let complete,requests=0;
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>{requests+=1;return new Promise(resolve=>{complete=resolve;});}},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  CanvasTextAdapter.install(scope,translator);
+  for(let i=0;i<20;i++){context.strokeText('Hello',10,30);context.fillText('Hello',10,30);}
+  complete('안녕하세요');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(requests,1);
+  assert.deepEqual(calls.slice(-3),['restore-background',['stroke','안녕하세요'],['fill','안녕하세요']]);
+  assert.equal(context.font,'24px sans-serif');
+  context.fillText('Hello',10,30);
+  assert.deepEqual(calls.at(-1),['fill','안녕하세요']);
+});
+
+test('직접 Canvas의 배경이 바뀌면 지연 번역으로 이전 화면을 복구하지 않는다',async()=>{
+  const {CanvasTextAdapter}=require('../adapters/canvas-text-adapter');
+  const {calls,scope,context}=canvasFixture();
+  let complete;
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>new Promise(resolve=>{complete=resolve;})},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  CanvasTextAdapter.install(scope,translator);
+  context.fillText('Hello',10,30);context.clearRect(0,0,400,200);complete('안녕하세요');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(calls,[['fill','Hello'],'clear']);
+});
+
+test('이미 비트맵 어댑터가 처리하는 Canvas 그리기는 중복 관찰하지 않는다',()=>{
+  const {CanvasTextAdapter}=require('../adapters/canvas-text-adapter');
+  const {calls,scope,context}=canvasFixture();
+  scope.Bitmap=function Bitmap(){this.context=context;};
+  scope.Bitmap.prototype.drawText=function(text){this.context.fillText(text,10,30);};
+  scope.Bitmap.prototype.drawText.__rpgTranslatorOriginal='retained';
+  let observed=0;
+  CanvasTextAdapter.install(scope,{observeRecord(){observed+=1;}});
+  new scope.Bitmap().drawText('Hello');
+  assert.equal(observed,0);
+  assert.deepEqual(calls,[['fill','Hello']]);
+  assert.equal(scope.Bitmap.prototype.drawText.__rpgTranslatorOriginal,'retained');
+});
+
+test('작업자가 정상 동작하는 동안 긴 대기열 때문에 미번역 요청을 버리지 않는다',async(t)=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'rpg-mailbox-queue-'));
+  const client=new RuntimeMailboxClient(directory);
+  t.after(()=>{for(const entry of client.pending.values())client.finish(entry,null,'test-ended');if(client.timer)clearInterval(client.timer);fs.rmSync(directory,{recursive:true,force:true});});
+  const key=`ck:v1:${'b'.repeat(64)}`;
+  const request={schema_version:1,cache_key:key,text:'CONFIG',target_language:'ko',adapter:'window-text'};
+  const result=client.request(request);
+  for(let i=0;i<50&&!client.pending.get(key)?.queued;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  client.pending.get(key).startedAt=Date.now()-121000;
+  fs.writeFileSync(path.join(directory,'status.json'),JSON.stringify({schema_version:1,running:true,updated_at:Date.now()}));
+  await client.poll();
+  assert.equal(client.pending.size,1);
+  fs.writeFileSync(path.join(directory,'responses',`${'b'.repeat(64)}.json`),JSON.stringify({...request,translation:'설정',error:null}));
+  await client.poll();assert.equal(await result,'설정');
+  const second=client.request({...request,cache_key:`ck:v1:${'c'.repeat(64)}`});
+  for(let i=0;i<50&&!client.pending.get(`ck:v1:${'c'.repeat(64)}`)?.queued;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  client.pending.get(`ck:v1:${'c'.repeat(64)}`).startedAt=Date.now()-121000;
+  fs.writeFileSync(path.join(directory,'status.json'),JSON.stringify({schema_version:1,running:false}));
+  await client.poll();assert.equal(await second,null);assert.match(client.lastError,/timed out/);
+});
+
+test('창 배경을 재생하는 내부 지우기가 비트맵의 다른 문구 요청을 폐기하지 않는다',async()=>{
+  const complete=new Map(),drawn=[];
+  const root={Bitmap:function Bitmap(){this.width=300;this.height=150;this.fontSize=24;},Sprite:function Sprite(){}};
+  root.Bitmap.prototype.drawText=function(text){drawn.push(text);};
+  root.Bitmap.prototype.clearRect=function(){};
+  root.Bitmap.prototype.measureTextWidth=text=>text.length*12;
+  root.Sprite.prototype.update=function(){};
+  root.Window_Base=function WindowBase(){this.contents=new root.Bitmap();};
+  root.Window_Base.prototype.lineHeight=()=>30;
+  root.Window_Base.prototype.drawText=function(text,x,y,width,align){this.contents.drawText(text,x,y,width,30,align);};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:({text})=>new Promise(resolve=>complete.set(text,resolve))},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  WindowTextAdapter.install(root,translator);BitmapTextAdapter.install(root,translator);SpriteTextAdapter.install(root,translator);
+  const window=new root.Window_Base();
+  window.drawText('Initial',0,100,100);
+  window.contents.clearRect(0,0,300,150);
+  window.drawText('ON',200,0,100,'right');
+  window.contents.drawText('Agility',0,50,100,30,'left');
+  complete.get('ON')('켜짐');await new Promise(resolve=>setImmediate(resolve));
+  complete.get('Agility')('민첩성');await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(drawn.includes('켜짐'));
+  assert.ok(drawn.includes('민첩성'));
+});
+
+test('비트맵의 왼쪽 라벨을 번역해도 같은 영역에 오른쪽 정렬한 숫자를 지우지 않는다',async()=>{
+  const complete=new Map(),clears=[];
+  const root={Bitmap:function Bitmap(){this.width=300;this.height=100;this.fontSize=20;},Sprite:function Sprite(){}};
+  root.Bitmap.prototype.drawText=function(){};
+  root.Bitmap.prototype.clearRect=function(x,y,width,height){clears.push({x,y,width,height});};
+  root.Bitmap.prototype.measureTextWidth=text=>text.length*12;
+  root.Sprite.prototype.update=function(){};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:({text})=>new Promise(resolve=>complete.set(text,resolve))},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  BitmapTextAdapter.install(root,translator);SpriteTextAdapter.install(root,translator);
+  const bitmap=new root.Bitmap();
+  bitmap.drawText('Agility',0,0,223,24,'left');bitmap.drawText('20',0,0,223,24,'right');
+  complete.get('Agility')('민첩성');await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(clears.length>0);assert.ok(clears.every(r=>r.x+r.width<199));
+});
+
+test('다른 문구가 글꼴을 바꿔도 지연 번역의 지우기 폭은 관찰 당시 글꼴로 계산한다',async()=>{
+  const complete=new Map(),clears=[];
+  const root={Window_Base:function WindowBase(){this.contents={width:300,fontSize:12,clearRect:(x,y,width)=>clears.push({x,y,width})};}};
+  root.Window_Base.prototype.textWidth=function(text){return text.length*this.contents.fontSize/2;};
+  root.Window_Base.prototype.lineHeight=()=>36;
+  root.Window_Base.prototype.drawText=function(){};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:({text})=>new Promise(resolve=>complete.set(text,resolve))},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  WindowTextAdapter.install(root,translator);
+  const window=new root.Window_Base();window.drawText('Label',0,0,300);window.drawText('99',40,0,30);
+  window.contents.fontSize=60;complete.get('Label')('단어');await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(clears.length>0);assert.ok(clears.every(r=>r.x+r.width<40));
+  assert.equal(window.contents.fontSize,60);
+});
+
+test('HTML 입력 버튼의 표시 값은 번역하고 텍스트 입력과 클릭 동작은 유지한다',()=>{
+  const {DomTextAdapter}=require('../adapters/dom-text-adapter');let clicks=0;
+  const input=(type,value)=>({nodeType:1,tagName:'INPUT',isConnected:true,attrs:{type,value},closest:()=>null,
+    hasAttribute(name){return Object.hasOwn(this.attrs,name);},getAttribute(name){return this.attrs[name]??null;},setAttribute(name,value){this.attrs[name]=value;},onclick(){clicks+=1;}});
+  const button=input('button','Continue'),submit=input('submit','Save'),editor=input('text','Emma');
+  const body={nodeType:1,tagName:'BODY',hasAttribute:()=>false,querySelectorAll:()=>[button,submit,editor]};
+  const scope={document:{body,createTreeWalker:()=>({nextNode:()=>null})},MutationObserver:class{observe(){}}};
+  const translator=new TextOrchestrator({translate:({text})=>({'Continue':'계속','Save':'저장','Emma':'엠마'})[text]||null},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  const handler=button.onclick;DomTextAdapter.install(scope,translator);
+  assert.equal(button.attrs.value,'계속');assert.equal(submit.attrs.value,'저장');assert.equal(editor.attrs.value,'Emma');
+  assert.equal(button.onclick,handler);button.onclick();assert.equal(clicks,1);
+});
+
+test('숫자로 덮어쓴 Canvas에는 이전 문구의 지연 번역을 적용하지 않는다',async()=>{
+  const {CanvasTextAdapter}=require('../adapters/canvas-text-adapter');const{calls,scope,context}=canvasFixture();let complete;
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>new Promise(resolve=>{complete=resolve;})},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  CanvasTextAdapter.install(scope,translator);context.fillText('Loading',10,30);context.fillText('123',10,30);complete('로딩');
+  await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(calls,[['fill','Loading'],['fill','123']]);
+});
+
+test('Canvas 클립을 복원한 뒤 도착한 번역은 다음 네이티브 그리기에서 적용한다',async()=>{
+  const {CanvasTextAdapter}=require('../adapters/canvas-text-adapter');const{calls,scope,context}=canvasFixture();let complete;
+  scope.CanvasRenderingContext2D.prototype.clip=function(){};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>new Promise(resolve=>{complete=resolve;})},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  CanvasTextAdapter.install(scope,translator);context.save();context.clip();context.fillText('Loading',10,30);context.restore();complete('로딩');
+  await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(calls,[['fill','Loading']]);
+  context.save();context.clip();context.fillText('Loading',10,30);context.restore();assert.deepEqual(calls.at(-1),['fill','로딩']);
+});
+
+test('거부된 파일 요청은 정상 heartbeat가 있어도 끝내고 재시도에는 백오프를 적용한다',async(t)=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'rpg-mailbox-rejected-'));const client=new RuntimeMailboxClient(directory);
+  t.after(()=>{for(const entry of client.pending.values())client.finish(entry,null,'test-ended');if(client.timer)clearInterval(client.timer);fs.rmSync(directory,{recursive:true,force:true});});
+  const key=`ck:v1:${'d'.repeat(64)}`,request={schema_version:1,cache_key:key,text:'CONFIG',target_language:'ko',adapter:'window-text'};
+  const result=client.request(request);
+  for(let i=0;i<50&&!client.pending.get(key)?.queued;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  fs.renameSync(path.join(directory,'requests',`${'d'.repeat(64)}.json`),path.join(directory,'requests',`${'d'.repeat(64)}.rejected`));
+  fs.writeFileSync(path.join(directory,'status.json'),JSON.stringify({schema_version:1,running:true,updated_at:Date.now()}));
+  await client.poll();assert.equal(await result,null);assert.match(client.lastError,/rejected/);
+  assert.equal(await client.request(request),null);assert.equal(client.pending.size,0);
+  client.failures.get(key).retryAt=Date.now()-1;
+  const retry=client.request(request);
+  for(let i=0;i<50&&!client.pending.get(key)?.queued;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(fs.existsSync(path.join(directory,'requests',`${'d'.repeat(64)}.rejected`)),false);
+  fs.writeFileSync(path.join(directory,'responses',`${'d'.repeat(64)}.json`),JSON.stringify({...request,translation:'설정',error:null}));
+  await client.poll();assert.equal(await retry,'설정');assert.equal(client.failures.size,0);
+});
+
+test('반복 그리기의 폐기 이력은 제한하고 종료한 화면의 객체 참조를 해제한다',()=>{
+  const translator=new TextOrchestrator({translate:()=>null},{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'});
+  const ids=[];
+  for(let i=0;i<700;i++){
+    const command=translator.observeRecord({text:'Label',surface:{},adapter:'canvas-text',slotKey:`slot-${i}`});
+    ids.push(command.itemId);translator.archiveItem(command.itemId);
+  }
+  assert.ok(translator.archivedItems.size<=512);assert.equal(translator.archivedItems.has(ids[0]),false);
+  assert.ok([...translator.archivedItems.values()].every(item=>item.surface===null));
+});
+
+test('Canvas에 숫자 인수를 직접 그려도 이전 문구의 지연 번역을 폐기한다',async()=>{
+  const {CanvasTextAdapter}=require('../adapters/canvas-text-adapter');const{calls,scope,context}=canvasFixture();let complete;
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>new Promise(resolve=>{complete=resolve;})},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  CanvasTextAdapter.install(scope,translator);context.fillText('Loading',10,30);context.fillText(123,10,30);complete('로딩');
+  await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(calls,[['fill','Loading'],['fill',123]]);
+});
+
+test('번역 대기 중 버튼이 텍스트 입력으로 바뀌면 입력 값을 덮어쓰지 않는다',async()=>{
+  const {DomTextAdapter}=require('../adapters/dom-text-adapter');let complete;
+  const button={nodeType:1,tagName:'INPUT',isConnected:true,attrs:{type:'button',value:'Load'},closest:()=>null,
+    hasAttribute(name){return Object.hasOwn(this.attrs,name);},getAttribute(name){return this.attrs[name]??null;},setAttribute(name,value){this.attrs[name]=value;}};
+  const body={nodeType:1,tagName:'BODY',hasAttribute:()=>false,querySelectorAll:()=>[button]};
+  const scope={document:{body,createTreeWalker:()=>({nextNode:()=>null})},MutationObserver:class{observe(){}}};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:()=>new Promise(resolve=>{complete=resolve;})},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  DomTextAdapter.install(scope,translator);button.attrs.type='text';complete('불러오기');
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(button.attrs.value,'Load');
+});
+
+test('거부 파일의 일시적 접근 오류는 처리되지 않은 Promise 오류로 빠져나가지 않는다',async(t)=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'rpg-mailbox-access-'));
+  const native=fs.promises;let deny=false;
+  const fake={mkdir:(...args)=>native.mkdir(...args),unlink:(...args)=>native.unlink(...args),readFile:(...args)=>native.readFile(...args),
+    writeFile:(...args)=>native.writeFile(...args),rename:(...args)=>native.rename(...args),access(file){if(deny&&file.endsWith('.rejected'))return Promise.reject(Object.assign(new Error('sharing denied'),{code:'EPERM'}));return native.access(file);}};
+  const client=new RuntimeMailboxClient(directory,{fs:fake});
+  t.after(()=>{for(const entry of client.pending.values())client.finish(entry,null,'test-ended');if(client.timer)clearInterval(client.timer);fs.rmSync(directory,{recursive:true,force:true});});
+  const key=`ck:v1:${'e'.repeat(64)}`;const result=client.request({schema_version:1,cache_key:key,text:'CONFIG',target_language:'ko',adapter:'window-text'});
+  for(let i=0;i<50&&!client.pending.get(key)?.queued;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  deny=true;await assert.doesNotReject(client.poll());assert.equal(await result,null);assert.match(client.lastError,/sharing denied/);
+});
+
+test('선택적인 실시간 연결 초기화가 실패해도 정적 캐시 어댑터는 설치한다',async()=>{
+  const scope={};
+  const overlay=await Boot.install(scope,{baseUrl:'http://localhost/game/',engine:'mz',bundle:{
+    manifest:{schema_version:1,key_schema_version:'v1',source_language:'en',target_language:'ko'},
+    config:{schema_version:1,runtime_translation_enabled:true,startup_toast_enabled:false},records:[],
+  }});
+  assert.equal(overlay.installed,true);assert.equal(overlay.index.mailbox,null);
+  assert.match(overlay.index.diagnostics().translation_error,/local game resource URL/);
+});
+
+test('HTML 창 제목과 선택지 label을 번역해도 선택 식별자는 유지한다',()=>{
+  const {DomTextAdapter}=require('../adapters/dom-text-adapter');
+  const element=(tag,attrs={})=>({nodeType:1,tagName:tag,isConnected:true,attrs,closest:()=>null,
+    hasAttribute(name){return Object.hasOwn(this.attrs,name);},getAttribute(name){return this.attrs[name]??null;},setAttribute(name,value){this.attrs[name]=value;}});
+  const title=element('TITLE'),option=element('OPTION',{label:'Easy',value:'easy'});
+  const titleText={nodeType:3,nodeValue:'Test Game',isConnected:true,parentElement:title};
+  const body=element('BODY');body.querySelectorAll=()=>[option];
+  const scope={document:{body,querySelector:()=>title,createTreeWalker(node){let read=false;return{nextNode:()=>node===title&&!read?(read=true,titleText):null};}},MutationObserver:class{observe(){}}};
+  const translator=new TextOrchestrator({translate:({text})=>({'Test Game':'테스트 게임','Easy':'쉬움'})[text]||null},
+    {engine:'mz',sourceLanguage:'en',targetLanguage:'ko',renderGuard:new RenderGuard()});
+  DomTextAdapter.install(scope,translator);assert.equal(titleText.nodeValue,'테스트 게임');assert.equal(option.attrs.label,'쉬움');assert.equal(option.attrs.value,'easy');
+});
+
+test('숫자만 바뀌는 HUD는 요청 하나를 공유하고 현재 값을 번역문에 복원한다',async(t)=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'rpg-numeric-hud-'));const client=new RuntimeMailboxClient(directory);
+  t.after(()=>{for(const entry of client.pending.values())client.finish(entry,null,'test-ended');if(client.timer)clearInterval(client.timer);fs.rmSync(directory,{recursive:true,force:true});});
+  const index=new LookupIndex({manifest:{source_language:'en',target_language:'ko'},records:[],mailbox:client});
+  const request=text=>({text,engine:'mz',sourceLanguage:'en',targetLanguage:'ko',adapter:'window-text',kind:'drawText'});
+  const pending=Array.from({length:20},(_,i)=>index.requestTranslation(request(`Gold: ${i} Gems: ${i+100}`)));
+  for(let i=0;i<50&&!client.pending.values().next().value?.queued;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  const files=fs.readdirSync(path.join(directory,'requests')).filter(name=>name.endsWith('.json'));assert.equal(files.length,1);
+  const data=JSON.parse(fs.readFileSync(path.join(directory,'requests',files[0]),'utf8'));
+  assert.equal(data.text,'Gold: {{RPGT_NUM_0}} Gems: {{RPGT_NUM_1}}');
+  fs.writeFileSync(path.join(directory,'responses',files[0]),JSON.stringify({...data,translation:'보석: {{RPGT_NUM_1}}, 골드: {{RPGT_NUM_0}}',error:null}));
+  assert.deepEqual(await Promise.all(pending),Array.from({length:20},(_,i)=>`보석: ${i+100}, 골드: ${i}`));
+  assert.equal(index.byKey.size,1);assert.equal(index.translate(request('Gold: 123 Gems: 456')),'보석: 456, 골드: 123');
+  const translator=new TextOrchestrator(index,{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'});
+  for(let i=0;i<100;i++)translator.observeRecord({...request(`Gold: ${i} Gems: ${i+1}`),surface:{},slotKey:`counter-${i}`});
+  assert.equal(translator.sourceTranslations.size,0);
+});
+
+test('HUD 수치 치환은 제어문자 ID를 보존하고 대사의 숫자는 원문대로 전달한다',async()=>{
+  const requests=[];
+  const index=new LookupIndex({manifest:{source_language:'en',target_language:'ko'},records:[],mailbox:{pending:new Map(),request(request){requests.push(request);return Promise.resolve(request.adapter==='message'?'동전이 2개 있다':'\\C[1]일차: {{RPGT_NUM_0}}');}}});
+  const base={engine:'mz',sourceLanguage:'en',targetLanguage:'ko'};
+  assert.equal(await index.requestTranslation({...base,adapter:'window-text',text:'\\C[1]Day: 7'}),'\\C[1]일차: 7');
+  assert.equal(requests[0].text,'\\C[1]Day: {{RPGT_NUM_0}}');
+  await index.requestTranslation({...base,adapter:'message',kind:'message_block',text:'I have 2 coins'});
+  assert.equal(requests[1].text,'I have 2 coins');
+});
+
+test('숨겨진 창의 캐시 적중도 각 행의 글꼴·색·비활성 투명도를 보존한다',()=>{
+  const draws=[];const root={Window_Base:function WindowBase(){this.visible=false;this.contents={width:300,fontSize:12,textColor:'red',paintOpacity:160,clearRect(){}};}};
+  root.Window_Base.prototype.drawText=function(text){draws.push([text,this.contents.fontSize,this.contents.textColor,this.contents.paintOpacity]);};
+  root.Window_Base.prototype.open=function(){this.visible=true;};
+  root.Window_Base.prototype.lineHeight=()=>36;
+  const translator=new TextOrchestrator({translate:({text})=>({First:'첫째',Second:'둘째'})[text]||null},{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'});
+  WindowTextAdapter.install(root,translator);const window=new root.Window_Base();window.drawText('First',0,0,100);
+  Object.assign(window.contents,{fontSize:28,textColor:'blue',paintOpacity:255});window.drawText('Second',0,40,100);window.open();
+  assert.deepEqual(draws.filter(row=>/[가-힣]/.test(row[0])),[['첫째',12,'red',160],['둘째',28,'blue',255]]);
+});
+
+test('HTML 하위 트리를 제거하면 자식 속성의 관찰 항목도 폐기한다',()=>{
+  const {DomTextAdapter}=require('../adapters/dom-text-adapter');let changed;
+  const child={nodeType:1,tagName:'DIV',isConnected:true,closest:()=>null,hasAttribute:name=>name==='title',getAttribute:()=> 'Help',setAttribute(){}};
+  const body={nodeType:1,tagName:'BODY',hasAttribute:()=>false,querySelectorAll:()=>[child]};
+  const container={nodeType:1,querySelectorAll:()=>[child]};
+  const scope={document:{body,createTreeWalker:()=>({nextNode:()=>null})},MutationObserver:class{constructor(callback){changed=callback;}observe(){}}};
+  const translator=new TextOrchestrator({translate:()=>null},{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'});
+  DomTextAdapter.install(scope,translator);assert.equal(translator.activeItems.size,1);
+  child.isConnected=false;changed([{type:'childList',removedNodes:[container],addedNodes:[]}]);assert.equal(translator.activeItems.size,0);
+});
+
+test('직접 Canvas의 캐시 적중은 매 프레임 배경 픽셀을 읽지 않는다',()=>{
+  const{CanvasTextAdapter}=require('../adapters/canvas-text-adapter');const{scope,context}=canvasFixture();let reads=0;
+  context.getImageData=()=>{reads+=1;return {};};
+  const translator=new TextOrchestrator({translate:()=> '안녕하세요'},{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'});
+  CanvasTextAdapter.install(scope,translator);for(let i=0;i<20;i++)context.fillText('Hello',10,30);assert.equal(reads,0);
+});
+
+test('부분 지우기는 번역 후 늘어난 실제 글자 영역도 무효화한다',async()=>{
+  const complete=new Map();const root={Bitmap:function Bitmap(){this.width=200;this.height=80;this.fontSize=20;},Sprite:function Sprite(){}};
+  root.Bitmap.prototype.drawText=function(){};root.Bitmap.prototype.clearRect=function(){};root.Bitmap.prototype.measureTextWidth=text=>text.length*12;root.Sprite.prototype.update=function(){};
+  const translator=new TextOrchestrator({translate:()=>null,requestTranslation:({text})=>new Promise(resolve=>complete.set(text,resolve))},{engine:'mz',sourceLanguage:'en',targetLanguage:'ko'});
+  BitmapTextAdapter.install(root,translator);SpriteTextAdapter.install(root,translator);const bitmap=new root.Bitmap();bitmap.drawText('Go',0,0,100,24);
+  complete.get('Go')('이동합니다');await new Promise(resolve=>setImmediate(resolve));assert.equal(translator.activeItems.size,1);
+  bitmap.clearRect(35,0,10,24);assert.equal(translator.activeItems.size,0);
+});
+
+test('엔진에 선언된 짧은 능력치 기호는 게임별 문자열 분기 없이 그대로 표시한다',async()=>{
+  let calls=0;const index=new LookupIndex({manifest:{source_language:'en',target_language:'ko'},records:[],technicalTokens:()=>['HP','XY','ON'],mailbox:{pending:new Map(),request(){calls+=1;return Promise.resolve('켜짐');}}});
+  const request=text=>({text,engine:'mz',sourceLanguage:'en',targetLanguage:'ko',adapter:'window-text'});
+  assert.equal(index.translate(request('XY100')),'XY100');assert.equal(await index.requestTranslation(request('XY101')),'XY101');assert.equal(calls,0);
+  await index.requestTranslation(request('ON'));assert.equal(calls,1);
+});
+
+test('목표 언어로 표시된 수치 문구는 내부 자리표시자 때문에 다시 번역하지 않는다',async()=>{
+  let calls=0;const index=new LookupIndex({manifest:{source_language:'en',target_language:'ko'},records:[],mailbox:{pending:new Map(),request(){calls+=1;return Promise.resolve(null);}}});
+  await index.requestTranslation({engine:'mz',sourceLanguage:'en',targetLanguage:'ko',adapter:'window-text',text:'\\C[1]합계: 5'});assert.equal(calls,0);
 });

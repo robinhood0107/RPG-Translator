@@ -297,8 +297,13 @@ fn quality_retry_instruction_forces_korean_purity_and_name_localization() {
     let instruction = build_quality_retry_instruction("ko");
 
     assert!(instruction.contains("Korean"));
-    assert!(instruction.contains("Emma -> 엠마"));
-    assert!(instruction.contains("Laura -> 로라"));
+    assert!(instruction.contains("transliterate recurring character names consistently"));
+    let name_rule = instruction
+        .lines()
+        .find(|line| line.starts_with("For Korean,"))
+        .expect("name rule");
+    assert!(!name_rule.contains(" -> "));
+    assert!(instruction.contains("unless they are protected technical tokens"));
     assert!(instruction.contains("literal \\\\n"));
     assert!(instruction.contains("Do not leave foreign connector words"));
     assert!(instruction.contains("Preserve JSONL ids"));

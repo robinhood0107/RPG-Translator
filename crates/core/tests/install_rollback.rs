@@ -107,7 +107,7 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             .is_file()
     );
     assert!(report.install_manifest_path.is_file());
-    assert_eq!(report.installed_files.len(), 22);
+    assert_eq!(report.installed_files.len(), 24);
 
     let plugins = fs::read_to_string(game.join("js/plugins.js")).expect("read plugins");
     assert_eq!(plugins.matches("\"name\": \"RPGTranslator\"").count(), 1);
@@ -140,6 +140,8 @@ fn installer_installs_direct_layout_and_rollback_restores_original_plugins() -> 
             "adapters/bitmap-text/bitmap-text-adapter.js",
             "adapters/sprite-text/sprite-text-adapter.js",
             "adapters/pixi-text/pixi-text-adapter.js",
+            "adapters/canvas-text-adapter.js",
+            "adapters/dom-text-adapter.js",
             "runtime/startup-toast.js",
             "runtime/boot.js"
         ])
@@ -292,7 +294,7 @@ fn phase_6_7_completion_matrix_locks_export_install_and_rollback_evidence() -> R
             .len(),
         3
     );
-    assert_eq!(installed.len(), 22);
+    assert_eq!(installed.len(), 24);
     assert!(
         installed[0]["path"]
             .as_str()
@@ -306,19 +308,19 @@ fn phase_6_7_completion_matrix_locks_export_install_and_rollback_evidence() -> R
             .ends_with("runtime/text-codec.js")
     );
     assert!(
-        installed[19]["path"]
+        installed[21]["path"]
             .as_str()
             .expect("manifest path")
             .ends_with("manifest.json")
     );
     assert!(
-        installed[20]["path"]
+        installed[22]["path"]
             .as_str()
             .expect("overlay config path")
             .ends_with("overlay-config.json")
     );
     assert!(
-        installed[21]["path"]
+        installed[23]["path"]
             .as_str()
             .expect("cache jsonl path")
             .ends_with("cache.jsonl")

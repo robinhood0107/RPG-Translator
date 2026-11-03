@@ -25,6 +25,10 @@
       this.cacheMisses = 0;
       this.recentMisses = [];
       this.missLogger = bundle.missLogger || null;
+      this.mailbox = bundle.mailbox || null;
+      this.runtimeConnectionError = bundle.runtimeConnectionError || null;
+      this.technicalTokens = typeof bundle.technicalTokens === 'function' ? bundle.technicalTokens : () => bundle.technicalTokens || [];
+      this.technicalPassThroughs = 0;
       this.maxNegativeMisses = Number.isFinite(bundle.maxNegativeMisses)
         ? Math.max(0, Math.floor(bundle.maxNegativeMisses))
         : 1024;
@@ -44,34 +48,84 @@
       }
     }
 
-    translate(request) {
-      const analysis = TextCodec.analyze(request.text);
-      const cacheKey = CacheKeyBuilder.build({
+    keyFor(request, analysis) {
+      return CacheKeyBuilder.build({
         engine: request.engine || 'unknown',
         sourceLanguage: request.sourceLanguage || this.manifest.source_language || '',
         targetLanguage: request.targetLanguage || this.manifest.target_language || '',
-        normalizedText: analysis.normalizedText,
-        controlCodeSignature: analysis.controlCodeSignature,
+        normalizedText: analysis.normalizedText, controlCodeSignature: analysis.controlCodeSignature,
         contextHash: request.contextHash || null,
       });
+    }
+
+    isDeclaredTechnicalText(request) {
+      if (request.adapter === 'message' || /message|scroll/.test(request.kind || '')) return false;
+      const visible=TextCodec.analyze(request.text).visibleText;
+      if (!/^[A-Za-z\d\s:/%.+()[\]\-]+$/.test(visible)) return false;
+      const ordinary=new Set(['ON','OFF','YES','NO','GO','UP','OK','LOG']);
+      const tokens=new Set(this.technicalTokens().filter(value=>typeof value==='string' && (/^[A-Z]{2,3}$/.test(value)||value==='Lv') && !ordinary.has(value)));
+      const words=visible.match(/[A-Za-z]+/g)||[];
+      return words.length>0 && words.every(word=>tokens.has(word));
+    }
+
+    isDynamicCounter(request) {
+      return runtimeNumericText(request).numbers.length > 0;
+    }
+
+    translate(request) {
+      const original = TextCodec.analyze(request.text);
+      const direct = this.byKey.get(this.keyFor(request,original));
+      if (direct) {this.cacheHits += 1;return direct.translation;}
+      if (this.isDeclaredTechnicalText(request)) {this.technicalPassThroughs+=1;return original.normalizedText;}
+      const numeric = runtimeNumericText(request);
+      const analysis = TextCodec.analyze(numeric.text);
+      const cacheKey = this.keyFor(request,analysis);
       const record = this.byKey.get(cacheKey);
-      if (record) {
-        this.cacheHits += 1;
-        return record.translation;
-      }
+      if (record) {this.cacheHits += 1;return restoreRuntimeNumbers(record.translation,numeric.numbers);}
       this.cacheMisses += 1;
-      if (this.rememberMiss(cacheKey)) {
-        this.recordMiss(request, analysis, cacheKey);
-      }
+      if (this.rememberMiss(cacheKey)) this.recordMiss(Object.assign({},request,{text:numeric.text}),analysis,cacheKey);
       return null;
     }
 
     diagnostics() {
-      return {
+      const result = {
         cache_hits: this.cacheHits,
         cache_misses: this.cacheMisses,
         recent_misses: this.recentMisses.slice(),
       };
+      if (this.technicalPassThroughs) result.technical_passthroughs=this.technicalPassThroughs;
+      if (this.runtimeConnectionError) result.translation_error = this.runtimeConnectionError;
+      if (this.mailbox) {
+        result.pending_translations = this.mailbox.pending.size;
+        result.translation_error = this.mailbox.lastError;
+      }
+      return result;
+    }
+
+    requestTranslation(request) {
+      if (!this.mailbox) return Promise.resolve(null);
+      const original=TextCodec.analyze(request.text);
+      const direct = this.byKey.get(this.keyFor(request,original));
+      if (direct) return Promise.resolve(direct.translation);
+      if (this.isDeclaredTechnicalText(request)) return Promise.resolve(original.normalizedText);
+      if ((request.targetLanguage || this.manifest.target_language)==='ko' && /[가-힣]/u.test(original.visibleText)
+        && !/[A-Za-z\u3040-\u30ff\u3400-\u9fff]/u.test(original.visibleText)) return Promise.resolve(null);
+      const numeric = runtimeNumericText(request);
+      const analysis = TextCodec.analyze(numeric.text);
+      const cacheKey = this.keyFor(request,analysis);
+      const cached = this.byKey.get(cacheKey);
+      if (cached) return Promise.resolve(restoreRuntimeNumbers(cached.translation,numeric.numbers));
+      return this.mailbox.request({
+        schema_version:1,cache_key:cacheKey,text:analysis.normalizedText,
+        engine:request.engine || 'unknown',
+        source_language:request.sourceLanguage || this.manifest.source_language || '',
+        target_language:request.targetLanguage || this.manifest.target_language || '',
+        context_hash:request.contextHash || null,adapter:request.adapter || 'unknown',
+        kind:request.kind || 'text',window_type:request.windowType || null,priority:Number.isFinite(request.priority) ? request.priority : (request.adapter === 'message' ? 1000 : 750),
+      }).then(translation=>{
+        if (translation) this.byKey.set(cacheKey,{cache_key:cacheKey,translation});
+        return translation ? restoreRuntimeNumbers(translation,numeric.numbers) : null;
+      });
     }
 
     recordMiss(request, analysis, cacheKey) {
@@ -110,6 +164,172 @@
         this.negativeMissKeys.delete(oldest);
       }
       return true;
+    }
+  }
+
+  function runtimeNumericText(request) {
+    const text = String(request.text ?? '');
+    const analysis = TextCodec.analyze(text);
+    const unchanged = {text:analysis.normalizedText,numbers:[]};
+    if (request.adapter === 'message' || /message|scroll/.test(request.kind || '') || text.length > 512
+      || text.includes('{{RPGT_NUM_') || text.includes('¤')
+      || (analysis.visibleText.match(/[\p{L}]/gu) || []).length < 1
+      || /^\[?[A-Z]\d+(?:-[A-Z]\d+)*\]?$/.test(analysis.visibleText.trim())) return unchanged;
+    const encoded = TextCodec.encodeForProvider(text);
+    const numbers = [];
+    // 수치만 바뀌는 HUD는 같은 요청을 공유합니다. 제어문자 안의 ID는 코덱으로 보호합니다.
+    const template = encoded.providerText.replace(/\d+(?:\.\d+)?/gu,value=>{
+      const id=numbers.length;numbers.push(value);return `{{RPGT_NUM_${id}}}`;
+    });
+    if (!numbers.length) return unchanged;
+    return {text:TextCodec.restoreProviderTranslation(template,encoded),numbers};
+  }
+
+  function restoreRuntimeNumbers(translation,numbers) {
+    if (!numbers.length) return translation;
+    if (typeof translation !== 'string') return null;
+    const seen = new Set();let valid=true;
+    const text = translation.replace(/\{\{RPGT_NUM_(\d+)\}\}/g,(_,value)=>{
+      const index=Number(value);
+      if (index >= numbers.length || seen.has(index)) {valid=false;return '';}
+      seen.add(index);return numbers[index];
+    });
+    return valid && seen.size===numbers.length && !text.includes('{{RPGT_NUM_') ? text : null;
+  }
+
+  class RuntimeMailboxClient {
+    constructor(directory, options = {}) {
+      this.directory = directory;
+      this.fs = options.fs || require('fs').promises;
+      this.path = options.path || require('path');
+      if (!this.fs || typeof this.fs.mkdir !== 'function') throw new Error('runtime asynchronous file I/O is unavailable');
+      this.pending = new Map();
+      this.failures = new Map();
+      this.lastError = null;
+      this.timer = null;
+      this.polling = false;
+      this.sequence = 0;
+      this.instanceId = require('crypto').randomBytes(8).toString('hex');
+      this.ready = null;
+    }
+
+    static fromConfig(config, baseUrl) {
+      if (!config || config.runtime_translation_enabled !== true || typeof require !== 'function') return null;
+      try {
+        const path = require('path');
+        const url = new URL(baseUrl);
+        const base = url.protocol === 'file:'
+          ? require('url').fileURLToPath(url)
+          : url.protocol === 'chrome-extension:'
+            ? path.resolve((root.nw && root.nw.App && root.nw.App.startPath) || process.cwd(), decodeURIComponent(url.pathname).replace(/^\/+/, ''))
+            : null;
+        if (!base) throw new Error('runtime mailbox requires a local game resource URL');
+        return new RuntimeMailboxClient(path.resolve(base, '../../../rpg-translator/runtime'));
+      } catch (error) {
+        throw new Error(`runtime mailbox initialization failed: ${error.message}`);
+      }
+    }
+
+    request(request) {
+      const text = String(request.text || '');
+      if (!/[\p{L}]/u.test(TextCodec.analyze(text).visibleText)) return Promise.resolve(null);
+      if (request.target_language === 'ko' && /[가-힣]/u.test(text) && !/[A-Za-z\u3040-\u30ff\u3400-\u9fff]/u.test(text)) return Promise.resolve(null);
+      if (/^[A-Za-z]$/.test(text) && /bitmap|sprite/.test(request.adapter)) return Promise.resolve(null);
+      if (!/^ck:v1:[a-f0-9]{64}$/.test(request.cache_key) || text.length > 16384) return Promise.resolve(null);
+      const key = request.cache_key;
+      const failure = this.failures.get(key);
+      if (failure && Date.now() < failure.retryAt) return Promise.resolve(null);
+      if (this.pending.has(key)) return this.pending.get(key).promise;
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      const entry = { request, promise, resolve, startedAt: Date.now(), queued: false };
+      this.pending.set(key, entry);
+      this.prepare().then(async () => {
+        // 재시작 후에는 검수·수정한 DB를 다시 확인하도록 이전 응답을 그대로 재사용하지 않습니다.
+        const response = this.path.join(this.directory, 'responses', `${key.slice(6)}.json`);
+        await this.fs.unlink(response).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        await this.fs.unlink(this.path.join(this.directory,'requests',`${key.slice(6)}.rejected`)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        const name = `${key.slice(6)}.json`;
+        const target = this.path.join(this.directory, 'requests', name);
+        const temporary = `${target}.${this.instanceId}.${this.sequence++}.tmp`;
+        return this.fs.writeFile(temporary, JSON.stringify(request), 'utf8').then(() => this.fs.rename(temporary, target)).catch(async (error) => {
+          if (!['EEXIST', 'EPERM'].includes(error.code)) throw error;
+          await this.fs.access(target);
+          await this.fs.unlink(temporary).catch(() => {});
+        }).then(() => {
+          entry.queued = true;
+          if (!this.timer) this.timer = setInterval(() => this.poll(), 200);
+        });
+      }).catch((error) => this.finish(entry, null, error.message));
+      return promise;
+    }
+
+    prepare() {
+      if (!this.ready) this.ready = Promise.all(['requests', 'responses'].map((name) => this.fs.mkdir(this.path.join(this.directory, name), { recursive: true })));
+      return this.ready;
+    }
+
+    async readReply(entry) {
+      const file = this.path.join(this.directory, 'responses', `${entry.request.cache_key.slice(6)}.json`);
+      let reply;
+      try { reply = JSON.parse(await this.fs.readFile(file, 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+      if (reply.schema_version !== 1 || reply.cache_key !== entry.request.cache_key || reply.text !== entry.request.text) {
+        this.finish(entry, null, 'runtime response does not match the request');
+      } else if (reply.error) {
+        await this.fs.unlink(file).catch(() => {});
+        this.finish(entry, null, String(reply.error));
+      } else if (typeof reply.translation === 'string' && reply.translation.trim() === entry.request.text.trim() && reply.unchanged_allowed !== true) {
+        await this.fs.unlink(file).catch(() => {});
+        if (entry.queued) this.finish(entry, null, 'runtime response left translatable text unchanged');
+        return false;
+      } else if (typeof reply.translation === 'string' && reply.translation.trim()) {
+        this.finish(entry, reply.translation, null);
+      } else {
+        this.finish(entry, null, 'runtime response has no translation');
+      }
+      return true;
+    }
+
+    async poll() {
+      if (this.polling) return;
+      this.polling = true;
+      try {
+        let workerAlive = false;
+        try {
+          const status = JSON.parse(await this.fs.readFile(this.path.join(this.directory, 'status.json'), 'utf8'));
+          workerAlive = status.schema_version === 1 && status.running === true && Math.abs(Date.now() - Number(status.updated_at)) < 90000;
+        } catch (_) { /* 응답 파일 교체 중이거나 작업자가 없으면 기존 연결 대기 시간을 적용합니다. */ }
+        for (const entry of this.pending.values()) {
+          if (!entry.queued) continue;
+          // 정상 작업자가 앞선 문장을 처리하는 시간은 연결 끊김으로 오판하지 않습니다.
+          if (workerAlive) entry.startedAt = Date.now();
+          if (Date.now() - entry.startedAt > 120000) this.finish(entry, null, 'runtime translation timed out');
+          else {
+            const rejected = this.path.join(this.directory, 'requests', `${entry.request.cache_key.slice(6)}.rejected`);
+            let invalid = false;
+            try { await this.fs.access(rejected); invalid = true; } catch (error) {
+              if (error.code !== 'ENOENT') { this.finish(entry,null,error.message); continue; }
+            }
+            if (invalid) this.finish(entry, null, 'runtime request was rejected');
+            else await this.readReply(entry).catch((error) => this.finish(entry, null, error.message));
+          }
+        }
+      } finally {
+        this.polling = false;
+        if (!this.pending.size && this.timer) { clearInterval(this.timer); this.timer = null; }
+      }
+    }
+
+    finish(entry, translation, error) {
+      if (!this.pending.delete(entry.request.cache_key)) return;
+      this.lastError = error || null;
+      if (error) {
+        const attempts = (this.failures.get(entry.request.cache_key)?.attempts || 0) + 1;
+        this.failures.set(entry.request.cache_key, { attempts, retryAt: Date.now() + Math.min(60000, 5000 * 2 ** Math.min(attempts - 1, 4)) });
+        if (this.failures.size > 1024) this.failures.delete(this.failures.keys().next().value);
+      } else this.failures.delete(entry.request.cache_key);
+      entry.resolve(translation);
     }
   }
 
@@ -257,7 +477,7 @@
     return overlay;
   }
 
-  publish(root, { CacheKeyBuilder, LookupIndex });
+  publish(root, { CacheKeyBuilder, LookupIndex, RuntimeMailboxClient });
 })(globalThis);
 
 function publish(root, api) {

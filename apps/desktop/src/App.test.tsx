@@ -3110,3 +3110,30 @@ function reviewRow(overrides: Partial<Record<string, unknown>> = {}) {
     ...overrides,
   };
 }
+
+
+test("실시간 번역 시작과 중지는 선택한 프로젝트와 서버 설정을 전달한다", async () => {
+  (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  localStorage.setItem("rpg-translator-project-file", testProjectFilePath);
+  invokeMock.mockImplementation((name: string) => {
+    if (name === "hydrate_workbench") return Promise.resolve(hydratedWorkbench({ active_tab: "translate" }));
+    if (name === "review_queue") return Promise.resolve({ rows: [], total_count: 0, next_offset: null });
+    if (name === "start_runtime_translation") return Promise.resolve({ running: true, error: null });
+    if (name === "stop_runtime_translation") return Promise.resolve({ running: false, error: null });
+    if (name === "runtime_translation_status") return Promise.resolve({ running: true, error: null });
+    throw new Error(`unexpected command ${name}`);
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Translate" }));
+  fireEvent.change(screen.getByLabelText("Provider endpoint"), { target: { value: "http://127.0.0.1:18080" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Install and start live translation" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Install and start live translation" }));
+  await screen.findByRole("button", { name: "Stop live translation" });
+  for (const button of screen.getAllByRole("button", { name: "Translate" })) expect(button).toBeDisabled();
+  expect(invokeMock).toHaveBeenCalledWith("start_runtime_translation", {
+    request: expect.objectContaining({ db_path: testDbPath, project_id: 7, source_language: "en", target_language: "ko", base_url: "http://127.0.0.1:18080" }),
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Stop live translation" }));
+  await screen.findByRole("button", { name: "Install and start live translation" });
+  expect(invokeMock).toHaveBeenCalledWith("stop_runtime_translation", { request: {} });
+});

@@ -340,6 +340,16 @@
     if (translator && typeof translator.observeRecord === 'function') {
       const command = translator.observeRecord(request);
       const itemId = command && command.itemId ? command.itemId : '';
+      if (command && command.status !== 'hit' && typeof translator.onTranslationReady === 'function') {
+        translator.onTranslationReady(command, (ready) => {
+          const current = ensureState(surface);
+          if (current.itemId !== ready.itemId || !translator.acceptRender(ready, surface, text)) return false;
+          if (scope.$gameMessage && Array.isArray(scope.$gameMessage._texts)) {
+            scope.$gameMessage._texts = translatedLines(ready.translatedText, text, surface);
+          }
+          return redrawMessageFallback(scope, surface, ready.translatedText, text);
+        });
+      }
       if (command && command.status === 'hit' && translator && typeof translator.acceptRender === 'function') {
         if (!translator.acceptRender(command, surface, text)) {
           return { text, itemId, slotKey, surfaceOwner, textOwner, textClaim: textClaim.token };

@@ -1346,6 +1346,7 @@ impl TranslationDb {
                 updated_at = CURRENT_TIMESTAMP
             WHERE project_id = ?1
               AND active = 1
+              AND extraction_rule_id <> 'runtime.visible-text'
             ",
             params![project_id],
         )?;
@@ -4393,6 +4394,12 @@ fn review_translation_validation_messages_tx(
     )?;
     let translated = TextCodec::analyze(translated_text);
     let mut messages = Vec::new();
+    if !TextCodec::runtime_number_tokens_match(&source_normalized, translated_text) {
+        messages.push(
+            "수치 자리표시자가 원문과 다릅니다. 각 {{RPGT_NUM_N}}을 빠짐없이 유지하세요."
+                .to_string(),
+        );
+    }
     if translated.control_code_signature != source_signature {
         messages.push(format!(
             "제어코드가 원문과 다릅니다. 원문 문법 포함 `{source_normalized}`, 번역 `{}`. 원문 제어코드 `{source_signature}`, 번역 제어코드 `{}`",
@@ -4606,6 +4613,7 @@ fn active_project_source_text_ids_tx(
         FROM occurrences
         WHERE project_id = ?1
           AND active = 1
+          AND extraction_rule_id <> 'runtime.visible-text'
         ",
     )?;
     let rows = statement.query_map(params![project_id], |row| row.get::<_, i64>(0))?;
@@ -4642,6 +4650,7 @@ fn active_project_occurrence_identity_ids_tx(
         FROM occurrences
         WHERE project_id = ?1
           AND active = 1
+          AND extraction_rule_id <> 'runtime.visible-text'
           AND occurrence_identity <> ''
         ",
     )?;

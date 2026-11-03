@@ -12,6 +12,7 @@ pub fn run() {
     commands::scan::write_scan_console_startup_status();
     commands::translate::write_translate_console_startup_status();
     tauri::Builder::default()
+        .manage(Arc::new(commands::runtime::RuntimeWorkerState::default()))
         .manage(Arc::new(commands::translate::TranslationJobState::default()))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -33,6 +34,9 @@ pub fn run() {
             commands::translate::force_close_workbench,
             commands::translate::test_local_provider,
             commands::translate::benchmark_provider_translation_speed,
+            commands::runtime::start_runtime_translation,
+            commands::runtime::stop_runtime_translation,
+            commands::runtime::runtime_translation_status,
             commands::review::review_queue,
             commands::review::update_review_state,
             commands::review::update_review_row,

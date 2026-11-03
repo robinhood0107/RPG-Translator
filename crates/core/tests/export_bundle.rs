@@ -179,6 +179,8 @@ fn export_builder_writes_static_runtime_bundle_for_reviewed_translations() -> Re
             "adapters/bitmap-text/bitmap-text-adapter.js".to_string(),
             "adapters/sprite-text/sprite-text-adapter.js".to_string(),
             "adapters/pixi-text/pixi-text-adapter.js".to_string(),
+            "adapters/canvas-text-adapter.js".to_string(),
+            "adapters/dom-text-adapter.js".to_string(),
             "runtime/startup-toast.js".to_string(),
             "runtime/boot.js".to_string(),
         ]

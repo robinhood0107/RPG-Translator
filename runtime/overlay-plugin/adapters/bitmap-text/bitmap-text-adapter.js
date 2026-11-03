@@ -10,6 +10,37 @@
   let nextBitmapId = 1;
 
   class BitmapTextAdapter {
+    static trackSurfaceTranslation(bitmap, payload, command, translator, slotKey) {
+      if (!command || !command.completion || !translator || typeof translator.onTranslationReady !== 'function') return false;
+      const state = ensureState(bitmap);
+      const key = `surface:${slotKey}`;
+      const entry = { itemId: command.itemId, revision: state.revision,
+        bounds: bitmapTextBounds(bitmap,payload.text,payload.x,payload.y,payload.maxWidth,payload.lineHeight,payload.align) };
+      state.entries.set(key, entry);
+      const style = payload.drawState && payload.drawState.textStyle || ReplayState.captureTextStyle(bitmap);
+      const drawOrder = payload.drawState && payload.drawState.drawOrder || state.nextDrawOrder;
+      translator.onTranslationReady(command, (ready) => {
+        if (state.entries.get(key) !== entry || entry.revision !== state.revision) return false;
+        if (!translator.acceptRender(ready, bitmap, payload.text)) return false;
+        return ReplayState.withTextStyle(bitmap, style, () => {
+          const measured = estimateTextWidth(bitmap, ready.translatedText);
+          let available = Math.max(payload.maxWidth || 1, (Number(bitmap.width) || 0) - payload.x);
+          for (const [otherKey, other] of state.entries) {
+            if (otherKey === key || !other.bounds || other.bounds.x <= payload.x) continue;
+            if (Math.abs(other.bounds.y - payload.y) < Math.max(1, payload.lineHeight)) available = Math.min(available, other.bounds.x - payload.x);
+          }
+          const width = Math.min(available, Math.max(payload.maxWidth || 1, measured));
+          const targetBounds=bitmapTextBounds(bitmap,ready.translatedText,payload.x,payload.y,width,payload.lineHeight,payload.align);
+          const dirtyBounds=ReplayState.unionRect(entry.bounds,targetBounds);
+          const rendered=replayDrawText(bitmap, ready.translatedText, payload.x, payload.y, width,
+            payload.lineHeight, payload.align, payload.methodName || 'drawText', state, drawOrder,dirtyBounds);
+          if(rendered)entry.bounds=dirtyBounds;
+          return rendered;
+        });
+      });
+      return true;
+    }
+
     static install(scope, translator) {
       if (!scope || !scope.Bitmap || !scope.Bitmap.prototype) return false;
       const prototype = scope.Bitmap.prototype;
@@ -33,7 +64,7 @@
     if (originalDrawText.__rpgTranslatorBitmapText === INSTALL_TOKEN) return true;
     prototype[methodName] = function translatedBitmapText(text, ...rest) {
       const windowOwner = this.__rpgTranslatorWindowOwner;
-      if (windowOwner && windowOwner.__rpgTranslatorWindowTextCaptureDepth > 0) {
+      if (windowOwner && (windowOwner.__rpgTranslatorWindowTextCaptureDepth > 0 || windowOwner.__rpgTranslatorWindowTextDrawDepth > 0)) {
         return originalDrawText.call(this, text, ...rest);
       }
       if (isSmallTextDrawActive(scope, this) || isSmallTextScratchBitmap(scope, this)) {
@@ -91,6 +122,8 @@
       measuredWidth: fragment.width,
       drawState: {
         font: fragment.font,
+        drawOrder: fragment.drawOrder,
+        textStyle: ReplayState.captureTextStyle(bitmap),
       },
       candidateAdapters: ['sprite-text'],
     });
@@ -226,6 +259,16 @@
       textOwner,
       drawOrder,
     });
+    if (command && command.status !== 'hit' && typeof translator.onTranslationReady === 'function') {
+      translator.onTranslationReady(command, (ready) => {
+        const current = state.entries.get(slotKey);
+        if (!current || current.itemId !== ready.itemId || current.revision !== state.revision) return false;
+        if (!translator.acceptRender(ready, bitmap, text)) return false;
+        return replayDrawText(bitmap, ready.translatedText, bounds.x, bounds.y,
+          Math.max(bounds.width, group[0].maxWidth || 1), group[0].lineHeight,
+          group[0].align, group[0].methodName || 'drawText', state, drawOrder);
+      });
+    }
     if (!command || command.status !== 'hit') return false;
     if (typeof translator.acceptRender === 'function' && !translator.acceptRender(command, bitmap, text)) return false;
     replayDrawText(
@@ -243,21 +286,37 @@
     return true;
   }
 
-  function replayDrawText(bitmap, text, x, y, width, lineHeight, align, methodName, state, drawOrder) {
+  function bitmapTextBounds(bitmap,text,x,y,width,lineHeight,align) {
+    const measured=Math.min(Number(width)||1,estimateTextWidth(bitmap,text));
+    let left=Number(x)||0;
+    if(align==='right')left+=(Number(width)||1)-measured;
+    else if(align==='center')left+=((Number(width)||1)-measured)/2;
+    return {x:left,y:Number(y)||0,width:Math.max(1,measured),height:Number(lineHeight)||24};
+  }
+
+  function replayDrawText(bitmap, text, x, y, width, lineHeight, align, methodName, state, drawOrder, dirtyBounds) {
     const drawMethod = methodName || 'drawText';
     const original = bitmap && bitmap.constructor && bitmap.constructor.prototype
       ? bitmap.constructor.prototype[drawMethod] && bitmap.constructor.prototype[drawMethod].__rpgTranslatorOriginal
       : null;
     if (typeof original !== 'function') return false;
+    const previousFontSize = bitmap.fontSize;
+    const measured = estimateTextWidth(bitmap, text);
+    if (Number.isFinite(previousFontSize) && measured > width && width > 0) {
+      bitmap.fontSize = Math.max(8, Math.floor(previousFontSize * width / measured));
+    }
     bitmap.__rpgTranslatorBitmapReplayDepth = (bitmap.__rpgTranslatorBitmapReplayDepth || 0) + 1;
     try {
-      const bounds = { x, y, width, height: lineHeight };
+      const bounds = dirtyBounds || { x, y, width, height: lineHeight };
       const replayBefore = ReplayState.sortedOverlappingOps(state && state.renderOps, bounds, Number(drawOrder) || Number.MAX_SAFE_INTEGER);
-      clearReplayTextRegion(bitmap, text, x, y, width, lineHeight);
-      ReplayState.replayOps(bitmap, replayBefore, '__rpgTranslatorBitmapReplayDepth');
+      clearReplayTextRegion(bitmap, text, bounds.x, bounds.y, bounds.width, bounds.height);
+      ReplayState.replayOps(bitmap, replayBefore, '__rpgTranslatorBitmapReplayDepth', bounds);
       original.call(bitmap, text, x, y, width, lineHeight, align);
+      const replayAfter = ReplayState.sortedOverlappingOpsAfter(state && state.renderOps, bounds, Number(drawOrder) || 0);
+      ReplayState.replayOps(bitmap, replayAfter, '__rpgTranslatorBitmapReplayDepth', bounds);
       return true;
     } finally {
+      bitmap.fontSize = previousFontSize;
       bitmap.__rpgTranslatorBitmapReplayDepth = Math.max(0, (bitmap.__rpgTranslatorBitmapReplayDepth || 1) - 1);
     }
   }
@@ -272,10 +331,7 @@
         ? bitmap.clearRect
         : null;
     if (typeof clearMethod !== 'function') return false;
-    const clearWidth = Math.max(1, Math.ceil(Math.max(
-      finiteOr(width, 0),
-      estimateTextWidth(bitmap, text),
-    )));
+    const clearWidth = Math.max(1, Math.ceil(finiteOr(width, 0)));
     const clearHeight = Math.max(1, Math.ceil(finiteOr(lineHeight, Number(bitmap && bitmap.fontSize) || 24)));
     clearMethod.call(bitmap, finiteOr(x, 0), finiteOr(y, 0), clearWidth, clearHeight);
     return true;
@@ -287,9 +343,12 @@
       if (typeof original !== 'function') continue;
       if (original.__rpgTranslatorBitmapMutation === MUTATION_TOKEN) continue;
       prototype[methodName] = function translatedBitmapMutation(...args) {
-        const bypass = shouldBypassBitmapMutation(scope, this);
+        const bypass = shouldBypassBitmapMutation(scope, this) || this.__rpgTranslatorNativeMutationDepth > 0;
         if (!bypass) flushBitmap(scope, this, `before-${methodName}`);
-        const result = original.apply(this, args);
+        let result;
+        this.__rpgTranslatorNativeMutationDepth = (this.__rpgTranslatorNativeMutationDepth || 0) + 1;
+        try { result = original.apply(this, args); }
+        finally { this.__rpgTranslatorNativeMutationDepth -= 1; }
         if (!bypass) {
           retireBitmapSurface(translator, this, methodName, args);
           recordBitmapRenderOp(this, methodName, args, original);
@@ -310,6 +369,7 @@
       methodName,
       args: Array.isArray(args) ? args.slice() : [],
       original,
+      drawStyle: ReplayState.captureTextStyle(bitmap),
       bounds,
       drawOrder: ReplayState.nextDrawOrder(state),
     });
@@ -318,13 +378,15 @@
   }
 
   function isReplayableRenderOp(methodName) {
-    return ['fillRect', 'gradientFillRect', 'strokeRect', 'drawCircle', 'blt', 'bltImage', 'fillAll'].includes(methodName);
+    return ['clearRect', 'fillRect', 'gradientFillRect', 'strokeRect', 'drawCircle', 'blt', 'bltImage', 'fillAll'].includes(methodName);
   }
 
   function shouldBypassBitmapMutation(scope, bitmap) {
     return !!(
       !bitmap
       || (bitmap.__rpgTranslatorBitmapReplayDepth || 0) > 0
+      || (bitmap.__rpgTranslatorWindowReplayDepth || 0) > 0
+      || (bitmap.__rpgTranslatorWindowOwner && bitmap.__rpgTranslatorWindowOwner.__rpgTranslatorWindowTextDrawDepth > 0)
       || (bitmap.__rpgTranslatorSpriteTextReplayDepth || 0) > 0
       || isSmallTextScratchBitmap(scope, bitmap)
       || isSmallTextDrawActive(scope, bitmap)
@@ -347,15 +409,16 @@
       state.fragments = rect
         ? state.fragments.filter((fragment) => !rectsOverlap(rect, fragmentRect(fragment)))
         : [];
-      state.renderOps = rect
-        ? ReplayState.filterOutsideRect(state.renderOps, rect)
-        : [];
-      state.revision += 1;
+      if (!rect || ['clear', 'resize', 'destroy', 'fillAll'].includes(methodName)) {
+        state.renderOps = [];
+        state.revision += 1;
+      }
       if (state.entries.size === 0 && translator && typeof translator.releaseSurface === 'function') {
         translator.releaseSurface(bitmap, `bitmap-text:${state.id}`);
       }
     }
-    if (bitmap && translator && typeof translator.markSurfaceChanged === 'function') translator.markSurfaceChanged(bitmap);
+    if (bitmap && ['clear', 'resize', 'destroy', 'fillAll'].includes(methodName)
+      && translator && typeof translator.markSurfaceChanged === 'function') translator.markSurfaceChanged(bitmap);
   }
 
   function installFrameHooks(scope) {

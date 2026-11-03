@@ -176,7 +176,7 @@ Preserve RPG Maker control codes, placeholders, page breaks, real line breaks, a
 Copy every complete angle-bracket metadata tag byte-for-byte, such as <Disable Switch: 8> or <Enable Switch: 12>.\n\
 Do not emit literal \\\\n text when an actual line break is intended.\n\
 Do not leave foreign connector words, particles, or filler words such as de, des, der, le, la, or les.\n\
-For Korean, transliterate recurring character names unless they are protected technical tokens: Emma -> 엠마, Laura -> 로라, Aurora -> 오로라, Olivia -> 올리비아, Eva -> 에바, Victoria -> 빅토리아, Lexi -> 렉시.\n\
+For Korean, transliterate recurring character names consistently unless they are protected technical tokens; do not copy raw foreign names into translated sentences.\n\
 Translate visible gameplay/story terms into {target_language_name}; preserve bracketed keyboard keys such as [Space] and [Escape]."
     )
 }
@@ -203,6 +203,7 @@ Hard requirements:\n\
 - Preserve IDs, placeholders, RPG Maker control codes, ¤, real line breaks, page breaks, bracketed key tokens, variable tokens, and complete <...> metadata tags byte-for-byte.\n\
 - Translate only the human-visible story/dialogue/game text into {target_language_name}.\n\
 - Localize names and short dialogue into {target_language_name} unless the entire item is a technical token.\n\
+- Preserve each named numeric placeholder {{{{RPGT_NUM_N}}}} exactly once, without renaming it; these named numeric placeholders may be reordered for target grammar.\n\
 - Do not leave third-language connector words unless they are part of a protected technical token."
     )
 }

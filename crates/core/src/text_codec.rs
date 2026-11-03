@@ -1,10 +1,11 @@
-//! 게임 제어문자를 보호한 공급자 입력과 복원 정보를 만듭니다. 자리표시자 개수와 순서가 원문과 맞아야 합니다.
+//! 게임 제어문자는 전역 순서를 지키고, 이름이 있는 수치 자리표시자는 ID와 개수를 검증합니다.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, TextAnalysis};
 
 const CONTROL_CODE_PLACEHOLDER: char = '\u{00a4}';
+pub(crate) const RUNTIME_NUMBER_PREFIX: &str = "{{RPGT_NUM_";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderTextState {
@@ -31,6 +32,22 @@ impl TextCodec {
             control_codes,
             control_code_signature,
         }
+    }
+
+    #[must_use]
+    // 수치 ID는 번역 어순에 맞춰 이동할 수 있지만 빠지거나 중복되면 실제 값이 잘못 표시됩니다.
+    pub fn runtime_number_tokens_match(source: &str, translation: &str) -> bool {
+        fn tokens(mut text: &str) -> std::collections::BTreeMap<&str, usize> {
+            let mut found = std::collections::BTreeMap::new();
+            while let Some(start) = text.find(RUNTIME_NUMBER_PREFIX) {
+                let tail = &text[start..];
+                let end = tail.find("}}").map_or(tail.len(), |end| end + 2);
+                *found.entry(&tail[..end]).or_insert(0) += 1;
+                text = &tail[end..];
+            }
+            found
+        }
+        tokens(source) == tokens(translation)
     }
 
     #[must_use]

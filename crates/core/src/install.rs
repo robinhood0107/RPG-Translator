@@ -35,6 +35,8 @@ pub(crate) const RUNTIME_SCRIPT_LOAD_ORDER: &[&str] = &[
     "adapters/bitmap-text/bitmap-text-adapter.js",
     "adapters/sprite-text/sprite-text-adapter.js",
     "adapters/pixi-text/pixi-text-adapter.js",
+    "adapters/canvas-text-adapter.js",
+    "adapters/dom-text-adapter.js",
     "runtime/startup-toast.js",
     "runtime/boot.js",
 ];
@@ -55,6 +57,8 @@ pub(crate) const RUNTIME_SUPPORT_FILES: &[&str] = &[
     "adapters/bitmap-text/bitmap-text-adapter.js",
     "adapters/sprite-text/sprite-text-adapter.js",
     "adapters/pixi-text/pixi-text-adapter.js",
+    "adapters/canvas-text-adapter.js",
+    "adapters/dom-text-adapter.js",
     "runtime/startup-toast.js",
     "runtime/boot.js",
 ];

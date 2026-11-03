@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use rpg_translator_core::{
     BatchTranslator, BatchTranslatorConfig, DEFAULT_SYSTEM_PROMPT, ExportBuilder, ExportPolicy,
     InstallOptions, Installer, LocalOpenAiConfig, LocalOpenAiProvider, LocalProviderTransport,
-    ProviderRequestSpacingConfig, Result, RollbackManager, RollbackOptions, ScanOptions,
-    TranslationDb, WorkbenchService, build_quality_retry_instruction, translation_prompt_hash,
+    ProviderRequestSpacingConfig, Result, RollbackManager, RollbackOptions, RuntimeMailbox,
+    RuntimeSession, ScanOptions, TranslationDb, WorkbenchService, build_quality_retry_instruction,
+    runtime_mailbox_directory, translation_prompt_hash,
 };
 use serde_json::Value;
 
@@ -27,6 +28,7 @@ fn run(args: Vec<String>) -> Result<()> {
     match args[0].as_str() {
         "scan-game" => scan_game(&args[1..]),
         "translate-local" => translate_local(&args[1..]),
+        "serve-runtime" => serve_runtime(&args[1..]),
         "audit-quality" => audit_quality(&args[1..]),
         "repair-syntax" => repair_syntax(&args[1..]),
         "export-bundle" => export_bundle(&args[1..]),
@@ -68,6 +70,86 @@ fn scan_game(args: &[String]) -> Result<()> {
         report.skipped_count
     );
     Ok(())
+}
+
+fn serve_runtime(args: &[String]) -> Result<()> {
+    let parsed = parse_flags(args)?;
+    let db_path = required_path(&parsed, "--db")?;
+    let game_root = required_path(&parsed, "--game-root")?;
+    let project_id = required_i64(&parsed, "--project-id")?;
+    let mut db = TranslationDb::open_with_schema_guard(&db_path)?;
+    let project = db
+        .get_project(project_id)?
+        .ok_or_else(|| rpg_translator_core::Error::invalid_input("runtime project is missing"))?;
+    let canonical = |path: &std::path::Path| {
+        std::fs::canonicalize(path)
+            .map_err(|error| rpg_translator_core::Error::invalid_input(error.to_string()))
+    };
+    if canonical(&game_root)?
+        != canonical(&rpg_translator_core::native_runtime_path(
+            std::path::Path::new(&project.game_root),
+        ))?
+    {
+        return Err(rpg_translator_core::Error::invalid_input(
+            "runtime game root does not match the project",
+        ));
+    }
+    let session = RuntimeSession {
+        project_id,
+        engine: project.engine,
+        source_language: parsed
+            .get("--source-language")
+            .cloned()
+            .unwrap_or_else(|| "en".into()),
+        target_language: parsed
+            .get("--target-language")
+            .cloned()
+            .unwrap_or_else(|| "ko".into()),
+    };
+    let required = |key: &str| {
+        parsed
+            .get(key)
+            .cloned()
+            .ok_or_else(|| rpg_translator_core::Error::invalid_input(format!("{key} is required")))
+    };
+    let mut provider = LocalOpenAiProvider::new(
+        LocalOpenAiConfig {
+            base_url: required("--base-url")?,
+            model: parsed
+                .get("--model")
+                .cloned()
+                .unwrap_or_else(|| "auto".into()),
+            source_language: session.source_language.clone(),
+            target_language: session.target_language.clone(),
+            system_prompt: parsed.get("--system-prompt").cloned().unwrap_or_default(),
+            temperature: optional_f64(&parsed, "--temperature")?,
+            top_p: optional_f64(&parsed, "--top-p")?,
+            max_output_tokens: optional_usize(&parsed, "--max-output-tokens")?.or(Some(1536)),
+        },
+        BlockingHttpTransport::new()?,
+    )?;
+    let mut mailbox = RuntimeMailbox::open(runtime_mailbox_directory(&game_root)?)?;
+    println!("runtime worker ready project_id={project_id}");
+    loop {
+        let processed = match mailbox.process_pending(&mut db, &mut provider, &session) {
+            Ok(count) => count,
+            Err(error) => {
+                if parsed.get("--once").is_some_and(|value| value == "true") {
+                    return Err(error);
+                }
+                eprintln!("{error}");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
+            }
+        };
+        if processed > 0 {
+            println!("runtime requests processed={processed}");
+        }
+        if parsed.get("--once").is_some_and(|value| value == "true") {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn translate_local(args: &[String]) -> Result<()> {
@@ -281,13 +363,23 @@ fn export_bundle(args: &[String]) -> Result<()> {
     })?;
     let export_dir = required_path(&parsed, "--export-dir")?;
     let mut db = TranslationDb::open_with_schema_guard(&db_path)?;
-    let report = ExportBuilder::export_project(
-        &mut db,
-        project_id,
-        target_language,
-        &export_dir,
-        ExportPolicy::accepted_and_reviewed(),
-    )?;
+    let report = if let Some(source_language) = parsed.get("--source-language") {
+        ExportBuilder::export_runtime_project(
+            &mut db,
+            project_id,
+            source_language,
+            target_language,
+            &export_dir,
+        )?
+    } else {
+        ExportBuilder::export_project(
+            &mut db,
+            project_id,
+            target_language,
+            &export_dir,
+            ExportPolicy::accepted_and_reviewed(),
+        )?
+    };
     println!(
         "exported export_id={} included={} skipped={} manifest_hash={} output={}",
         report.export_id,

@@ -70,6 +70,8 @@ pub struct RuntimeCacheRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayConfig {
     pub schema_version: u32,
+    #[serde(default)]
+    pub runtime_translation_enabled: bool,
     pub diagnostics_enabled: bool,
     #[serde(default)]
     pub draw_capture_trace: DrawCaptureTraceConfig,
@@ -95,6 +97,7 @@ impl OverlayConfig {
     pub fn runtime_default() -> Self {
         Self {
             schema_version: EXPORT_SCHEMA_VERSION,
+            runtime_translation_enabled: false,
             diagnostics_enabled: false,
             draw_capture_trace: DrawCaptureTraceConfig::default(),
             performance_profiler: PerformanceProfilerConfig::default(),
@@ -370,13 +373,55 @@ impl ExportBuilder {
         output_dir: impl AsRef<Path>,
         policy: ExportPolicy,
     ) -> Result<ExportReport> {
-        let output_dir = output_dir.as_ref();
+        Self::export_project_inner(
+            db,
+            project_id,
+            target_language,
+            output_dir.as_ref(),
+            policy,
+            None,
+        )
+    }
+
+    pub fn export_runtime_project(
+        db: &mut TranslationDb,
+        project_id: i64,
+        source_language: &str,
+        target_language: &str,
+        output_dir: impl AsRef<Path>,
+    ) -> Result<ExportReport> {
+        if source_language.trim().is_empty() || target_language.trim().is_empty() {
+            return Err(Error::invalid_input(
+                "runtime source and target languages are required",
+            ));
+        }
+        Self::export_project_inner(
+            db,
+            project_id,
+            target_language,
+            output_dir.as_ref(),
+            ExportPolicy::accepted_and_reviewed(),
+            Some(source_language),
+        )
+    }
+
+    fn export_project_inner(
+        db: &mut TranslationDb,
+        project_id: i64,
+        target_language: &str,
+        output_dir: &Path,
+        policy: ExportPolicy,
+        runtime_source_language: Option<&str>,
+    ) -> Result<ExportReport> {
         let project = db
             .get_project(project_id)?
             .ok_or_else(|| Error::invalid_input(format!("project {project_id} not found")))?;
         let review_states = policy.review_state_refs();
-        let rows = db.exportable_translations(project_id, target_language, &review_states)?;
-        if rows.is_empty() {
+        let mut rows = db.exportable_translations(project_id, target_language, &review_states)?;
+        if let Some(source) = runtime_source_language {
+            rows.retain(|row| row.source_language == source);
+        }
+        if rows.is_empty() && runtime_source_language.is_none() {
             return Err(Error::invalid_input(format!(
                 "no exportable translations for target language {target_language}"
             )));
@@ -384,7 +429,10 @@ impl ExportBuilder {
         let total_count = db
             .workbench_dashboard_summary(project_id, target_language)?
             .source_text_count as usize;
-        let source_language = single_source_language(&rows)?;
+        let source_language = match runtime_source_language {
+            Some(source) => source.to_string(),
+            None => single_source_language(&rows)?,
+        };
 
         fs::create_dir_all(output_dir).map_err(|error| {
             Error::invalid_input(format!(
@@ -407,7 +455,8 @@ impl ExportBuilder {
             cache_files: vec![CACHE_FILE.to_string()],
             record_count: records.len(),
         };
-        let config = OverlayConfig::runtime_default();
+        let mut config = OverlayConfig::runtime_default();
+        config.runtime_translation_enabled = runtime_source_language.is_some();
 
         write_json_pretty(&output_dir.join(MANIFEST_FILE), &manifest)?;
         write_json_pretty(&output_dir.join(OVERLAY_CONFIG_FILE), &config)?;

@@ -54,6 +54,7 @@
       },
       set(value) {
         const state = ensureState(this, adapterName);
+        state.nativeSetter = originalSetter;
         if (state.applyingNativeText) {
           originalSetter.call(this, value);
           return;
@@ -127,6 +128,20 @@
       ? translator.observeRecord(request)
       : null;
     if (command && command.itemId) state.itemId = command.itemId;
+    if (command && command.status !== 'hit' && typeof translator.onTranslationReady === 'function') {
+      const revision = state.revision;
+      translator.onTranslationReady(command, (ready) => {
+        if (state.itemId !== ready.itemId || state.revision !== revision) return false;
+        if (!translator.acceptRender(ready, surface, text)) return false;
+        state.applyingNativeText = true;
+        try {
+          applyTranslatedTextScale(surface, scope);
+          state.nativeSetter.call(surface, ready.translatedText);
+          state.renderedText = ready.translatedText;
+        } finally { state.applyingNativeText = false; }
+        return true;
+      });
+    }
 
     const translated = command
       ? (command.status === 'hit' ? command.translatedText : null)

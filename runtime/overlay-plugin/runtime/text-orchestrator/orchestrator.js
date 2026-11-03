@@ -95,7 +95,7 @@
           : true,
         screenState: String(record.screenState || (record.visible === false ? 'hidden' : 'visible')),
         backgrounded: record.backgrounded === true,
-        metadata: {},
+        metadata: sanitizeDetails(record.metadata) || {},
       };
       this.activeItems.set(item.id, item);
       this.slotIndex.set(slotId, item.id);
@@ -122,6 +122,7 @@
       item.contextHash = record.contextHash || null;
       item.generation = this.guard ? this.guard.generationFor(item.surface) : item.generation;
       item.renderStrategy = record.renderStrategy || record.strategy || item.renderStrategy || '';
+      if (record.metadata) item.metadata = sanitizeDetails(record.metadata) || {};
       item.state = 'active';
       item.status = 'detected';
       if (Object.prototype.hasOwnProperty.call(record, 'priority')) item.priority = normalizePriority(record.priority);
@@ -160,7 +161,9 @@
           force: true,
         });
         this.emit('cacheMiss', Object.assign({ reason: 'cache-miss', status: 'miss' }, item));
-        return this.queueRenderCommand(item, text, 'miss');
+        const command = this.queueRenderCommand(item, text, 'miss');
+        command.completion = this.requestObservedTranslation(item);
+        return command;
       }
       this.diagnosticState.cache_hits += 1;
       item.translationState = 'hit';
@@ -175,6 +178,51 @@
       });
       this.emit('cacheHit', Object.assign({ reason: cacheHitReason, status: 'hit', translatedText }, item));
       return this.queueRenderCommand(item, translatedText, 'hit');
+    }
+
+    requestObservedTranslation(item) {
+      if (!this.index || this.index.mailbox === null || typeof this.index.requestTranslation !== 'function') return null;
+      if (item.pendingRequest) return item.pendingRequest;
+      const sourceText = item.sourceText;
+      const generation = item.generation;
+      const pending = this.index.requestTranslation({
+        text: sourceText, engine: this.engine, sourceLanguage: this.sourceLanguage,
+        targetLanguage: this.targetLanguage, contextHash: item.contextHash,
+        adapter: item.adapter, kind: item.kind, priority: item.priority,
+        windowType:item.metadata && item.metadata.windowType,
+      });
+      item.translationState = 'pending';
+      item.pendingRequest = Promise.resolve(pending).then((translation) => {
+        // 번역이 늦게 도착했더라도 교체·폐기된 창이나 바뀐 원문에는 적용하지 않습니다.
+        if (this.activeItems.get(item.id) !== item || item.sourceText !== sourceText || item.generation !== generation) return null;
+        if (!translation || translation === sourceText) { item.translationState = 'miss'; return null; }
+        this.rememberSourceTranslation(item, translation, 'runtime');
+        item.translationState = 'hit';
+        item.sourceHint = 'runtime';
+        item.status = 'completed';
+        item.translationReceived = String(translation);
+        item.translation = String(translation);
+        const command = this.queueRenderCommand(item, translation, 'hit');
+        this.emit('requestCompleted', Object.assign({ status: 'completed', translatedText: translation, reason: 'runtime' }, item));
+        return command;
+      }).catch((error) => {
+        item.translationState = 'failed';
+        this.recordDrawTrace('translation-failed', { rawText: sourceText, reason: String(error && error.message || error), force: true });
+        return null;
+      }).finally(() => { item.pendingRequest = null; });
+      return item.pendingRequest;
+    }
+
+    onTranslationReady(command, callback) {
+      if (!command || !command.completion || typeof callback !== 'function') return false;
+      command.completion.then((ready) => {
+        if (ready && this.activeItems.has(ready.itemId) && callback(ready) === true) {
+          this.recordDraw(ready.itemId, 'runtime', { translationDrawn: ready.translatedText });
+        }
+      }).catch((error) => this.recordDrawTrace('render-failed', {
+        itemId: command.itemId, reason: String(error && error.message || error), force: true,
+      }));
+      return true;
     }
 
     translateText(record = {}) {
@@ -363,7 +411,7 @@
       item.state = 'archived';
       item.active = false;
       item.deactivatedAt = this.now();
-      this.archivedItems.set(item.id, item);
+      this.rememberArchivedItem(item);
       this.releaseSlotIndexesForItem(item.id);
       this.emit(source.eventType || `item.${nextStatus}`, Object.assign({
         reason,
@@ -496,10 +544,17 @@
       item.status = 'archived';
       item.active = false;
       item.deactivatedAt = this.now();
-      this.archivedItems.set(itemId, item);
+      this.rememberArchivedItem(item);
       this.releaseSlotIndexesForItem(itemId);
       this.emit('item.archived', Object.assign({ reason: message }, item));
       return true;
+    }
+
+    rememberArchivedItem(item) {
+      // 매 프레임 바뀌는 Canvas 문구가 폐기된 화면과 진단 이력을 계속 붙잡지 않도록 합니다.
+      item.surface = null;
+      this.archivedItems.set(item.id,item);
+      if (this.archivedItems.size > 512) this.archivedItems.delete(this.archivedItems.keys().next().value);
     }
 
     retireSurface(surface, reason) {
@@ -1225,6 +1280,9 @@
     }
 
     rememberSourceTranslation(item, translation, sourceHint = 'cache') {
+      if (this.index && typeof this.index.isDynamicCounter === 'function'
+        && this.index.isDynamicCounter({text:item.sourceText,adapter:item.adapter,kind:item.kind})) return false;
+
       const key = buildSourceTranslationKey(item);
       const value = String(translation ?? '');
       if (!key || !value.trim()) return false;

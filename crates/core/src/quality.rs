@@ -199,6 +199,22 @@ impl TranslationQualityAuditor {
 #[must_use]
 pub fn is_allowed_technical_token(source: &str) -> bool {
     let source = source.trim();
+    let numeric_prefix = crate::text_codec::RUNTIME_NUMBER_PREFIX;
+    if source.contains(numeric_prefix) {
+        let mut sample = source.to_string();
+        while let Some(start) = sample.find(numeric_prefix) {
+            let tail = &sample[start + numeric_prefix.len()..];
+            let Some(end) = tail.find("}}") else {
+                return false;
+            };
+            if end == 0 || !tail[..end].chars().all(|ch| ch.is_ascii_digit()) {
+                return false;
+            }
+            let end = start + numeric_prefix.len() + end + 2;
+            sample.replace_range(start..end, "0");
+        }
+        return is_allowed_technical_token(&sample);
+    }
     if source.is_empty() || source.len() > 32 {
         return false;
     }
@@ -238,7 +254,45 @@ pub fn is_allowed_technical_token(source: &str) -> bool {
                 | "right"
         );
     }
-    if matches!(source, "Lv" | "HP" | "MP" | "TP" | "EXP") {
+    if matches!(
+        source,
+        "Lv" | "HP"
+            | "MP"
+            | "TP"
+            | "EXP"
+            | "BGM"
+            | "BGS"
+            | "ME"
+            | "SE"
+            | "SFX"
+            | "FPS"
+            | "TPS"
+            | "CPU"
+            | "GPU"
+            | "VRAM"
+            | "RAM"
+            | "USB"
+            | "API"
+            | "ID"
+            | "HTTP"
+            | "HTTPS"
+            | "URL"
+            | "JSON"
+            | "CSV"
+            | "SQL"
+            | "NPC"
+            | "RPG"
+            | "UI"
+            | "HUD"
+            | "Esc"
+            | "Shift"
+            | "Ctrl"
+            | "Alt"
+            | "Tab"
+            | "Enter"
+            | "Space"
+            | "ExNo"
+    ) {
         return true;
     }
     if source.contains('_')
@@ -249,30 +303,36 @@ pub fn is_allowed_technical_token(source: &str) -> bool {
     {
         return true;
     }
-    if source.starts_with('\u{25ba}')
-        && source
-            .chars()
-            .skip(1)
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
-    {
+    let upper = source.to_ascii_uppercase();
+    for stat in [
+        "HP", "MP", "TP", "EXP", "MHP", "MMP", "ATK", "DEF", "MAT", "MDF", "AGI", "LUK",
+    ] {
+        if source == stat {
+            return true;
+        }
+        if let Some(rest) = upper.strip_prefix(stat)
+            && !rest.is_empty()
+            && rest.chars().any(|ch| ch.is_ascii_digit())
+            && rest
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, ' ' | '+' | '-' | '.' | '%' | '/'))
+        {
+            return true;
+        }
+    }
+    if source.split('-').all(|part| {
+        let mut chars = part.chars();
+        chars.next().is_some_and(|ch| ch.is_ascii_uppercase())
+            && !chars.as_str().is_empty()
+            && chars.all(|ch| ch.is_ascii_digit())
+    }) {
         return true;
     }
-    let uppercase_count = source.chars().filter(|ch| ch.is_ascii_uppercase()).count();
-    if uppercase_count < 2 {
-        return false;
+    if let Some(rest) = source.strip_prefix('\u{25ba}') {
+        return is_allowed_technical_token(rest);
     }
-    if source.chars().any(|ch| ch.is_ascii_lowercase()) {
-        return source.len() <= 12
-            && !source.chars().any(char::is_whitespace)
-            && source
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'));
-    }
-    source.chars().all(|ch| {
-        ch.is_ascii_uppercase()
-            || ch.is_ascii_digit()
-            || matches!(ch, ' ' | '_' | '-' | '+' | '.' | '%' | '/')
-    })
+    // 대문자라는 이유만으로 ON·SAVE·NEW QUEST 같은 실제 UI 문구를 미번역 허용하지 않습니다.
+    false
 }
 
 fn push_issue(

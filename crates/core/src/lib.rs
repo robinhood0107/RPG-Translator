@@ -8,6 +8,7 @@ mod install;
 mod project_manifest;
 mod provider;
 mod quality;
+mod runtime_mailbox;
 mod scanner;
 mod syntax_repair;
 mod text_codec;
@@ -60,6 +61,10 @@ pub use provider::{
 pub use quality::{
     TranslationQualityAuditReport, TranslationQualityAuditor, TranslationQualityIssue,
     is_allowed_technical_token,
+};
+pub use runtime_mailbox::{
+    RuntimeMailbox, RuntimeReply, RuntimeRequest, RuntimeSession, native_runtime_path,
+    runtime_mailbox_directory, translate_runtime_request,
 };
 pub use scanner::{ExtractionRuleSet, GameScanner, RpgMakerDetector, ScanOptions};
 pub use syntax_repair::{

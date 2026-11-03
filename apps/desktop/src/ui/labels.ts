@@ -3,6 +3,13 @@ export type Locale = "en" | "ko";
 
 export const text = {
   en: {
+    runtimeTranslation: "Live game translation",
+    runtimeStart: "Install and start live translation",
+    runtimeStop: "Stop live translation",
+    runtimeStarting: "Starting live translation",
+    runtimeStopping: "Stopping live translation",
+    runtimeRunning: "Running. Stop live translation before editing reviews or starting batch translation.",
+    runtimeDescription: "Translate text missing from the cache with the local model. Restart the game after installing or changing languages.",
     accepted: "Accepted",
     acceptFirst: "Accept first",
     approveAll: "Approve filter",
@@ -402,6 +409,13 @@ export const text = {
     webPreview: "Web preview",
   },
   ko: {
+    runtimeTranslation: "실시간 게임 번역",
+    runtimeStart: "실시간 번역 설치·시작",
+    runtimeStop: "실시간 번역 중지",
+    runtimeStarting: "실시간 번역 시작 중",
+    runtimeStopping: "실시간 번역 중지 중",
+    runtimeRunning: "동작 중입니다. 검수 내용을 수정하거나 사전 번역을 실행하려면 먼저 실시간 번역을 중지하세요.",
+    runtimeDescription: "캐시에 없는 문구를 로컬 모델로 번역합니다. 설치하거나 번역 언어를 바꾼 뒤에는 게임을 다시 시작하세요.",
     accepted: "승인됨",
     acceptFirst: "첫 행 승인",
     approveAll: "필터 전체 승인",

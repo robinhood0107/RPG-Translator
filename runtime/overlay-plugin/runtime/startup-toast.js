@@ -13,6 +13,7 @@
       const doc = this.document;
       if (!doc || !doc.body || typeof doc.createElement !== 'function') return;
       const node = doc.createElement('div');
+      if (typeof node.setAttribute === 'function') node.setAttribute('data-rpg-translator-ui', 'true');
       node.textContent = config.startup_toast_text || 'RPG-Translator 작동중';
       Object.assign(node.style, {
         position: 'fixed',
@@ -23,7 +24,7 @@
         background: 'rgba(20, 20, 20, 0.82)',
         color: '#fff',
         font: '12px sans-serif',
-        borderRadius: '4px',
+        borderRadius: '0',
         pointerEvents: 'none',
       });
       doc.body.appendChild(node);
