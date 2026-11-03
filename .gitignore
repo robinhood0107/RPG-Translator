@@ -73,3 +73,7 @@ translation-metrics*.log
 
 # 로컬 검증 게임은 저장소에 넣지 않습니다.
 /City_Of_Secrets/
+
+# 개발용 수치 기록 스크립트의 바이트코드는 버전 관리하지 않습니다.
+__pycache__/
+*.py[cod]
