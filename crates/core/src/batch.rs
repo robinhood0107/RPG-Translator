@@ -985,7 +985,7 @@ impl BatchTranslator {
         db: &mut TranslationDb,
         provider: &mut dyn ProviderClient,
         target_language: &str,
-        config: BatchTranslatorConfig,
+        mut config: BatchTranslatorConfig,
         checkpoint_path: Option<&Path>,
         mut on_progress: F,
         mut should_pause: P,
@@ -994,6 +994,15 @@ impl BatchTranslator {
         F: FnMut(&TranslateProgressEvent),
         P: FnMut() -> bool,
     {
+        // 명시한 프로젝트의 활성 원문과 언어만 계획해 다른 게임과 삭제된 문장이 섞이지 않게 합니다.
+        if config.project_id.is_some() || !config.source_language.is_empty() {
+            let scope =
+                db.translation_scope_source_text_ids(config.project_id, &config.source_language)?;
+            config.source_text_ids = Some(match config.source_text_ids.take() {
+                Some(ids) => ids.into_iter().filter(|id| scope.contains(id)).collect(),
+                None => scope.into_iter().collect(),
+            });
+        }
         let mut checkpoint = match checkpoint_path {
             Some(path) => CheckpointWriter::read(path)?.unwrap_or_else(|| BatchCheckpoint {
                 provider_run_id: 0,
@@ -1033,6 +1042,9 @@ impl BatchTranslator {
             .source_text_ids
             .as_ref()
             .map(|ids| ids.iter().copied().collect::<BTreeSet<_>>());
+        if let Some(filter) = source_text_id_filter.as_ref() {
+            completed_set.retain(|id| filter.contains(id));
+        }
         if config.include_existing_translations
             && let Some(source_text_ids) = config.source_text_ids.as_ref()
         {

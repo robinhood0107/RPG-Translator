@@ -2040,3 +2040,75 @@ fn runtime_overlay_does_not_import_provider_modules() {
     }
     assert!(checked_js_files > 0);
 }
+
+#[test]
+fn translator_scope_excludes_other_projects_languages_and_inactive_occurrences() {
+    let temp = tempdir().expect("temp");
+    let path = temp.path().join("scope.sqlite");
+    let mut db = TranslationDb::open(&path).expect("db");
+    db.migrate().expect("migrate");
+    let mut projects = Vec::new();
+    for name in ["one", "two"] {
+        projects.push(
+            db.upsert_project(&NewProject {
+                game_root: format!("/game/{name}"),
+                display_name: name.into(),
+                engine: Engine::Mz,
+            })
+            .expect("project"),
+        );
+    }
+    let wanted = seed_source(&mut db, "en", "Hello");
+    let other_project = seed_source(&mut db, "en", "Other game");
+    let other_language = seed_source(&mut db, "ja", "こんにちは");
+    let inactive = seed_source(&mut db, "en", "Removed line");
+    for (id, project) in [
+        (wanted, projects[0]),
+        (other_project, projects[1]),
+        (other_language, projects[0]),
+        (inactive, projects[0]),
+    ] {
+        db.insert_project_occurrence(
+            project,
+            &NewOccurrence {
+                project_id: Some(project),
+                source_text_id: id,
+                file_path: "data/Map001.json".into(),
+                json_path: format!("$.text{id}"),
+                entity_type: "event_command".into(),
+                object_key: None,
+                event_id: None,
+                page_index: None,
+                command_index: None,
+                command_code: None,
+                parameter_index: None,
+                extraction_rule_id: "event.message.block".into(),
+            },
+        )
+        .expect("occurrence");
+    }
+    rusqlite::Connection::open(&path)
+        .expect("connection")
+        .execute(
+            "UPDATE occurrences SET active = 0 WHERE source_text_id = ?1",
+            [inactive],
+        )
+        .expect("deactivate");
+    let mut provider = FakeProvider::from_outputs(vec![output(&[(wanted, "안녕하세요")])]);
+    let report = BatchTranslator::run(
+        &mut db,
+        &mut provider,
+        "ko",
+        BatchTranslatorConfig {
+            project_id: Some(projects[0]),
+            source_language: "en".into(),
+            ..test_config()
+        },
+    )
+    .expect("run");
+    assert_eq!(report.completed_source_text_ids, vec![wanted]);
+    assert_eq!(provider.requests().len(), 1);
+    for id in [other_project, other_language, inactive] {
+        assert!(db.get_translation(id, "ko").expect("translation").is_none());
+    }
+}

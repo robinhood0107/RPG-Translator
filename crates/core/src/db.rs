@@ -2341,6 +2341,26 @@ impl TranslationDb {
         Ok(records)
     }
 
+    pub fn translation_scope_source_text_ids(
+        &self,
+        project_id: Option<i64>,
+        source_language: &str,
+    ) -> Result<BTreeSet<i64>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM source_texts
+             WHERE (?2 = '' OR source_language = ?2)
+               AND unit_kind <> 'generic_candidate'
+               AND (?1 IS NULL OR EXISTS (
+                   SELECT 1 FROM occurrences
+                   WHERE occurrences.source_text_id = source_texts.id
+                     AND occurrences.project_id = ?1 AND occurrences.active = 1
+               ))",
+        )?;
+        let rows = statement.query_map(params![project_id, source_language], |row| row.get(0))?;
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn existing_translation_source_text_ids(
         &self,
         target_language: &str,
