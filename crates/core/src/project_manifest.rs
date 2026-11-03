@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn creates_manifest_and_standard_project_artifacts() {
         let temp = tempdir().expect("tempdir");
-        let game_root = temp.path().join("City Of Secrets");
+        let game_root = temp.path().join("Fixture Game");
         make_direct_game(&game_root);
 
         let load =
@@ -389,16 +389,13 @@ mod tests {
         assert!(
             workspace
                 .manifest_path
-                .ends_with("rpg-translator/City_Of_Secrets.rpgmakers")
+                .ends_with("rpg-translator/Fixture_Game.rpgmakers")
         );
-        assert_eq!(
-            workspace.manifest.paths.database,
-            "db/City_Of_Secrets.sqlite"
-        );
+        assert_eq!(workspace.manifest.paths.database, "db/Fixture_Game.sqlite");
         assert!(
             workspace
                 .database_path
-                .ends_with("rpg-translator/db/City_Of_Secrets.sqlite")
+                .ends_with("rpg-translator/db/Fixture_Game.sqlite")
         );
         assert!(workspace.checkpoints_path.is_dir());
         assert!(!workspace.database_missing);
