@@ -1,0 +1,38 @@
+{
+  "name": "rpg-translator-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run web:dev",
+    "build": "npm run web:build",
+    "web:dev": "vite",
+    "web:build": "tsc -p tsconfig.json --noEmit && vite build",
+    "web:preview": "vite preview --host 127.0.0.1",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build && node scripts/prepare-windows-artifacts.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "preview": "npm run web:preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "lucide-react": "1.17.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.0",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "esbuild": "0.28.0",
+    "jsdom": "29.1.1",
+    "typescript": "6.0.3",
+    "vite": "8.0.16",
+    "vitest": "4.1.8"
+  }
+}

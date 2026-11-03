@@ -1,0 +1,21 @@
+[package]
+name = "rpg-translator-cli"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "rpg-translator"
+path = "src/main.rs"
+
+[dependencies]
+reqwest.workspace = true
+rpg-translator-core.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
