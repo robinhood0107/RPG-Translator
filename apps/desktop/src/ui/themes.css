@@ -1,0 +1,48 @@
+/* 패널·포털·상태 색상은 이 토큰만 사용해 두 모드의 대비를 함께 관리합니다. */
+:root {
+  color-scheme: light;
+  --surface: #ffffff;
+  --canvas: #f5f6f8;
+  --chrome: #eceef1;
+  --border: #d2d6dc;
+  --text: #252a31;
+  --muted: #626b78;
+  --disabled: #929aa5;
+  --accent: #2266ad;
+  --selection: #e4edf8;
+  --success: #237448;
+  --success-bg: #edf7f0;
+  --success-border: #a8cdb5;
+  --danger: #a83434;
+  --danger-bg: #fff0ef;
+  --danger-border: #dfa9a4;
+  --warning: #79520d;
+  --warning-bg: #fff5df;
+  --warning-border: #d9bc7a;
+  --info: #345c96;
+  --info-bg: #eaf0fb;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #202226;
+  --canvas: #1b1d21;
+  --chrome: #282b30;
+  --border: #3c4048;
+  --text: #e0e3e9;
+  --muted: #a4acb8;
+  --disabled: #737c8a;
+  --accent: #78b6ff;
+  --selection: #263b54;
+  --success: #93d1aa;
+  --success-bg: #22362b;
+  --success-border: #426b50;
+  --danger: #ffa6a0;
+  --danger-bg: #3b292b;
+  --danger-border: #805052;
+  --warning: #edc983;
+  --warning-bg: #393126;
+  --warning-border: #78633e;
+  --info: #aac9f4;
+  --info-bg: #29344b;
+}
