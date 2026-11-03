@@ -1,3 +1,5 @@
+//! 게임 레이아웃을 감지하고 JSON의 번역 단위를 추출합니다. 연속 대사와 제어문자·위치 정보의 대응을 보존합니다.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};

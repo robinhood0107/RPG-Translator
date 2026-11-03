@@ -1,3 +1,5 @@
+//! 보호된 게임 문법의 복구 후보를 계산합니다. 확실하게 복구할 수 없는 항목은 자동 적용하지 않습니다.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,5 @@
+//! 번역문 품질 문제와 재번역 후보를 분류합니다. 게임 문법 검사와 언어 품질 판단을 별도로 유지합니다.
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};

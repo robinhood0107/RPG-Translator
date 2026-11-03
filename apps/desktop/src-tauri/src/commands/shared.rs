@@ -1,3 +1,5 @@
+//! 명령 오류 변환·경로 정규화·쓰기 잠금을 공유합니다. 블로킹 파일·DB 작업은 UI 스레드 밖에서 실행합니다.
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 

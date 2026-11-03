@@ -1,3 +1,4 @@
+// 완성된 대사 블록을 조회하고 창 생명주기에 맞춰 다시 그립니다. 원문과 번역문의 줄 경계·제어문자를 보존합니다.
 (function attach(root) {
   const { MessageWrapper } = loadDependency(root, '../../runtime/wrapping');
   const STATE_KEY = '__rpgTranslatorMessageAdapterState';

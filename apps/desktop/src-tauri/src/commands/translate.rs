@@ -1,3 +1,5 @@
+//! 번역 작업 소유권·중단 요청·진행 이벤트를 관리합니다. 실행 중인 작업과 종료 후 상태가 어긋나지 않도록 정리합니다.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

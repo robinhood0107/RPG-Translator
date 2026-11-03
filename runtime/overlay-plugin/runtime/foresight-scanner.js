@@ -1,3 +1,4 @@
+// 명령 카탈로그에 따라 이후 대사·선택지의 캐시 상태를 예측합니다. 분기와 공통 이벤트 순회를 제한합니다.
 (function attach(root) {
   const DEFAULT_MAX_BLOCKS = 24;
   const DEFAULT_MAX_COMMANDS = 512;

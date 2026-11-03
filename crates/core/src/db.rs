@@ -1,3 +1,5 @@
+//! 스키마 변경과 프로젝트별 스캔·번역·검수 상태를 저장합니다. 기존 DB 변경 전 백업과 외래 키 무결성을 확인합니다.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},

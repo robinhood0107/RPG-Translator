@@ -1,3 +1,4 @@
+// 오버레이 시작 알림을 한 번 표시한 뒤 제거합니다. 텍스트 번역과 캐시 상태에는 관여하지 않습니다.
 (function attach(root) {
   class StartupToast {
     constructor(options = {}) {

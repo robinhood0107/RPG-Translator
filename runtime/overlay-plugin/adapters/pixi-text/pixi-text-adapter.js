@@ -1,3 +1,4 @@
+// PIXI 텍스트의 내용·스타일·가시성 변경을 연결합니다. 번역 재적용과 네이티브 갱신이 서로 재귀하지 않도록 합니다.
 (function attach(root) {
   const STATE_KEY = '__rpgTranslatorPixiState';
   const SETTER_TOKEN = 'rpg-translator-pixi-setter-v2';

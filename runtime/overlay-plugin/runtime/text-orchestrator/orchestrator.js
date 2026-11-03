@@ -1,3 +1,4 @@
+// 텍스트 관찰·소유권·그리기 명령의 생명주기를 조정합니다. 표면 세대가 바뀐 오래된 명령은 적용하지 않습니다.
 (function attach(root) {
   const { RenderGuard } = loadDependency(root, '../render-guard');
   const DEFAULT_EVENT_LIMIT = 128;

@@ -1,3 +1,4 @@
+// 그리기·후크 시간과 오류 분류를 제한된 버퍼에 모읍니다. 진단이 게임 실행 경로를 바꾸지 않도록 합니다.
 (function attach(root) {
   const DEFAULT_TRACE_LIMIT = 320;
   const MAX_TRACE_LIMIT = 2000;

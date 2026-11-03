@@ -1,3 +1,5 @@
+//! 코어 작업을 명령행에 연결합니다. 파일 변경은 스캔·번역·내보내기·설치·복구 서비스에 위임합니다.
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 

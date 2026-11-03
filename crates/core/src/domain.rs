@@ -1,3 +1,5 @@
+//! 코어 서비스와 저장 계층이 공유하는 데이터 계약입니다. 진행 이벤트와 원문 단위의 의미를 이곳에서 정의합니다.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

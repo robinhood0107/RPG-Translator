@@ -1,3 +1,5 @@
+//! 검수 목록·초안·승인·문법 복구 명령을 연결합니다. 저장 충돌과 기계 검사 결과를 호출자에게 전달합니다.
+
 use serde::{Deserialize, Serialize};
 
 use rpg_translator_core::{ReviewQueueRow, ReviewUpdateRequest, TranslationRecord};

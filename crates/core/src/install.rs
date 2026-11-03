@@ -1,3 +1,5 @@
+//! 게임 사본에 오버레이를 설치하고 변경 목록과 백업 해시를 기록합니다. 복구 전 파일 변조와 경로 이탈을 검사합니다.
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 

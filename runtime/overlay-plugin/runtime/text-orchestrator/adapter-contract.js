@@ -1,3 +1,4 @@
+// 어댑터 호출과 구독을 조정기의 계약에 연결합니다. 종료된 항목과 오래된 렌더 세대의 콜백을 차단합니다.
 (function attach(root) {
   const REQUEST_ACTIVE_STATUSES = Object.freeze({
     pending: true,

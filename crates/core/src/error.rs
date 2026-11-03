@@ -1,3 +1,5 @@
+//! 코어 작업의 오류를 공통 결과 형식으로 전달합니다. UI에 필요한 원인을 잃지 않도록 문맥을 보존합니다.
+
 use std::fmt;
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,3 +1,5 @@
+//! 게임 제어문자를 보호한 공급자 입력과 복원 정보를 만듭니다. 자리표시자 개수와 순서가 원문과 맞아야 합니다.
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, TextAnalysis};

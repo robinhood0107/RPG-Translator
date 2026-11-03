@@ -1,3 +1,5 @@
+//! 저장된 설정·초안·작업 상태를 복원합니다. 중단된 실행 기록을 정리한 뒤 화면 초기 데이터를 반환합니다.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

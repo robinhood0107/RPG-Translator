@@ -1,3 +1,4 @@
+// 그리기 표면의 세대와 원문을 대조합니다. 교체·폐기된 표면에 지연된 번역을 그리지 않도록 합니다.
 (function attach(root) {
   class RenderGuard {
     constructor() {

@@ -1,3 +1,4 @@
+// 정적 번들의 계약을 검사한 뒤 어댑터를 설치합니다. 게임 실행 중 번역 제공자를 호출하지 않습니다.
 (function attach(root) {
   const RUNTIME_MANIFEST_SCHEMA_VERSION = 1;
   const RUNTIME_CONFIG_SCHEMA_VERSION = 1;

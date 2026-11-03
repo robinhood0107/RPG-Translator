@@ -1,3 +1,4 @@
+// 버전이 있는 키와 별칭으로 캐시를 조회합니다. 캐시 미스는 원문을 유지하고 제한된 진단 목록에 기록합니다.
 (function attach(root) {
   const { TextCodec } = loadDependency(root, './text-codec');
 

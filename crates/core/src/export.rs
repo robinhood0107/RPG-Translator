@@ -1,3 +1,5 @@
+//! 승인된 번역으로 정적 캐시 번들을 만듭니다. 경로·해시·로딩 순서 검증은 설치 전에 완료해야 합니다.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,3 +1,5 @@
+//! 배치 계획·응답 검증·재시도·체크포인트를 관리합니다. 검증에 성공한 번역만 DB에 저장합니다.
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;

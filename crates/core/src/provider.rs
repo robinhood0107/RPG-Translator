@@ -1,3 +1,5 @@
+//! 로컬 번역 서버의 모델 탐색과 요청 형식을 다룹니다. 모델 응답의 JSONL·제어문자 검사는 배치 계층에서 수행합니다.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

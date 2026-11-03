@@ -1,3 +1,5 @@
+//! 프로젝트 파일과 DB·내보내기·설치 산출물의 위치를 관리합니다. 프로젝트 루트 밖으로 나가는 상대 경로를 거부합니다.
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

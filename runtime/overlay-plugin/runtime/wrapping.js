@@ -1,3 +1,4 @@
+// 대사창의 폭과 제어문자를 고려해 번역문을 줄바꿈합니다. 표시 상태와 글꼴 배율을 함께 보존합니다.
 (function attach(root) {
   class MessageWrapper {
     static wrap(text, options = {}) {

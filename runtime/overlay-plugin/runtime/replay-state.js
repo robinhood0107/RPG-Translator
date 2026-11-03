@@ -1,3 +1,4 @@
+// 텍스트와 배경 연산의 순서·겹침 영역을 계산합니다. 번역을 다시 그릴 때 뒤에 그린 그래픽도 보존해야 합니다.
 (function attach(root) {
   class ReplayState {
     static normalizeRect(rect) {

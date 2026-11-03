@@ -1,3 +1,4 @@
+// 캐시 키에 필요한 정규화와 제어문자 보호를 수행합니다. Rust 코덱과 공유 테스트 벡터를 일치시켜야 합니다.
 (function attach(root) {
   const CONTROL_CODE_PLACEHOLDER = '\u00a4';
 

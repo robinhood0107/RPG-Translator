@@ -1,3 +1,5 @@
+//! DB 무결성과 런타임 로그를 진단 화면에 전달합니다. 수집된 근거와 현재 실행 상태를 구분합니다.
+
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};

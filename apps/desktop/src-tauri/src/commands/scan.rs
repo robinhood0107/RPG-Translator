@@ -1,3 +1,5 @@
+//! 스캔 진행을 데스크톱 이벤트로 전달합니다. 추출과 DB 저장 상태가 UI에서 구분되도록 유지합니다.
+
 use std::io::{self, Write};
 
 use serde::{Deserialize, Serialize};

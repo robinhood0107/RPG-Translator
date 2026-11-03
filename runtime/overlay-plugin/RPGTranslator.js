@@ -1,3 +1,4 @@
+// 정해진 순서로 지원 모듈을 읽은 뒤 오버레이를 초기화합니다. 중복 설치와 로딩 실패를 게임 전역 상태에 기록합니다.
 (function attach(root) {
   const SUPPORT_DIRECTORY = 'rpg-translator';
   const MODULE_FILES = [

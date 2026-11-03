@@ -1,3 +1,4 @@
+// 스프라이트의 텍스트 단위·부모·가시성 변화를 추적합니다. 분리·재부착·파괴 시 구독과 렌더 상태를 갱신합니다.
 (function attach(root) {
   const STATE_KEY = '__rpgTranslatorSpriteTextState';
   const PARENT_RUN_KEY = '__rpgTranslatorSpriteTextParentRunState';

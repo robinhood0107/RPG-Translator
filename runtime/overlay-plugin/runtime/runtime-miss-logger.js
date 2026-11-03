@@ -1,3 +1,4 @@
+// 캐시에 없는 텍스트와 표면 정보를 진단용으로 기록합니다. 실제 번역이나 네트워크 요청은 수행하지 않습니다.
 (function attach(root) {
   const DEFAULT_FILE = 'runtime-misses.jsonl';
 

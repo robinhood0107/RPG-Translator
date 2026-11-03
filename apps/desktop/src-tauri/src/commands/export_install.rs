@@ -1,3 +1,5 @@
+//! 데스크톱의 내보내기·설치·복구 명령을 코어 서비스에 연결합니다. 생성된 경로와 작업 결과를 UI에 돌려줍니다.
+
 use serde::{Deserialize, Serialize};
 
 use rpg_translator_core::{

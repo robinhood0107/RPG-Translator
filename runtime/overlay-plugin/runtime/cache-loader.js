@@ -1,3 +1,4 @@
+// 번들 파일을 읽고 스키마·파일명·레코드 개수를 검증합니다. 검증 실패 시 후크를 설치하지 않습니다.
 (function attach(root) {
   const RUNTIME_MANIFEST_SCHEMA_VERSION = 1;
   const RUNTIME_CONFIG_SCHEMA_VERSION = 1;
