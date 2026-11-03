@@ -1,3 +1,4 @@
+// 비트맵 텍스트와 그리기 영역의 소유권을 추적합니다. 다른 어댑터가 처리하는 대사와 중복해서 덮어쓰지 않습니다.
 (function attach(root) {
   const { ReplayState } = loadDependency(root, '../../runtime/replay-state');
   const STATE_KEY = '__rpgTranslatorBitmapTextState';
@@ -31,6 +32,10 @@
     if (typeof originalDrawText !== 'function') return false;
     if (originalDrawText.__rpgTranslatorBitmapText === INSTALL_TOKEN) return true;
     prototype[methodName] = function translatedBitmapText(text, ...rest) {
+      const windowOwner = this.__rpgTranslatorWindowOwner;
+      if (windowOwner && windowOwner.__rpgTranslatorWindowTextCaptureDepth > 0) {
+        return originalDrawText.call(this, text, ...rest);
+      }
       if (isSmallTextDrawActive(scope, this) || isSmallTextScratchBitmap(scope, this)) {
         return originalDrawText.call(this, text, ...rest);
       }

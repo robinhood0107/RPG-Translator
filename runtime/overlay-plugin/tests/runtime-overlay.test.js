@@ -8496,3 +8496,35 @@ function runtimeSourceFiles(rootPath) {
   }
   return entries.sort();
 }
+
+test('선택지 번역은 하위 비트맵에서 압축하지 않고 기존 글자를 지운 뒤 한 번 그린다', () => {
+  const calls = [];
+  const root = { Bitmap: function Bitmap() { this.width = 104; this.fontSize = 26; } };
+  root.Bitmap.prototype.drawText = function (text, x, y, width) { calls.push(['draw', text, x, y, width]); };
+  root.Bitmap.prototype.clearRect = function (x, y, width, height) { calls.push(['clear', x, y, width, height]); };
+  root.Bitmap.prototype.measureTextWidth = text => text === 'No' ? 24 : 78;
+  root.Window_Base = function WindowBase() { this.contents = new root.Bitmap(); };
+  root.Window_Base.prototype.lineHeight = () => 36;
+  root.Window_Base.prototype.textWidth = root.Bitmap.prototype.measureTextWidth;
+  root.Window_Base.prototype.drawTextEx = function (text, x, y) {
+    this.contents.drawText(text, x, y, this.textWidth(text), 36);
+    return this.textWidth(text);
+  };
+  const translator = {
+    observeRecord: () => ({ itemId: 'choice-no', status: 'hit', translatedText: '아니요' }),
+    acceptRender: () => true,
+    recordSurfaceDraw: ({ text }) => text === 'No'
+      ? { drawDecision: { action: 'replace-native-draw', text: '아니요' } }
+      : null,
+  };
+  WindowTextAdapter.install(root, translator);
+  BitmapTextAdapter.install(root, translator);
+  const window = new root.Window_Base();
+  assert.equal(window.drawTextEx('No', 12, 48, 80), 24);
+  assert.deepEqual(calls, [
+    ['draw', 'No', 12, 48, 24],
+    ['clear', 12, 48, 80, 36],
+    ['draw', '아니요', 12, 48, 78],
+  ]);
+  assert.equal(window.__rpgTranslatorWindowTextCaptureDepth, 0);
+});

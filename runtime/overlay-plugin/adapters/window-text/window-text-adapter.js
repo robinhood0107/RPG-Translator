@@ -1,3 +1,4 @@
+// 창의 원래 그리기 후 번역과 겹치는 배경·후속 연산을 재생합니다. 창의 세대가 바뀌면 보류 중인 그리기를 폐기합니다.
 (function attach(root) {
   const { ReplayState } = loadDependency(root, '../../runtime/replay-state');
   const STATE_KEY = '__rpgTranslatorWindowTextState';
@@ -27,10 +28,16 @@
     const original = prototype[name];
     if (typeof original !== 'function') return;
     prototype[name] = function translatedWindowText(text, ...rest) {
-      if (isTranslatedDrawActive(this) || isDedicatedMessageWindow(scope, this)) {
+      if (isTranslatedDrawActive(this) || this.__rpgTranslatorWindowTextCaptureDepth > 0 || isDedicatedMessageWindow(scope, this)) {
         return original.call(this, text, ...rest);
       }
-      return observeWindowTextDraw(scope, translator, this, original, name, text, rest);
+      // 창이 처리하는 전체 문자열을 하위 비트맵이 글자 폭으로 다시 번역하지 않도록 합니다.
+      this.__rpgTranslatorWindowTextCaptureDepth = (this.__rpgTranslatorWindowTextCaptureDepth || 0) + 1;
+      try {
+        return observeWindowTextDraw(scope, translator, this, original, name, text, rest);
+      } finally {
+        this.__rpgTranslatorWindowTextCaptureDepth -= 1;
+      }
     };
     prototype[name].__rpgTranslatorOriginal = original;
   }
@@ -464,7 +471,7 @@
   }
 
   function clearWindowTextRegion(windowInstance, methodName, args, boundsOverride) {
-    if (methodName !== 'drawText') return false;
+    if (methodName !== 'drawText' && methodName !== 'drawTextEx') return false;
     const contents = windowInstance && windowInstance.contents;
     const clear = contents && typeof contents.clearRect === 'function' ? contents.clearRect : null;
     const bounds = ReplayState.normalizeRect(boundsOverride);
@@ -538,6 +545,8 @@
   function resolveWindowTextWidth(windowInstance, methodName, args) {
     if (methodName === 'drawText') return numberAt(args, 2, 0);
     if (methodName === 'drawTextEx') {
+      const explicitWidth = numberAt(args, 2, 0);
+      if (explicitWidth > 0) return explicitWidth;
       const contents = windowInstance && windowInstance.contents;
       const x = numberAt(args, 0, 0);
       const width = Number(contents && contents.width);
